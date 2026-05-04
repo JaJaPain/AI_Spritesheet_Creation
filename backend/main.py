@@ -1,6 +1,9 @@
 import os
 import torch
 import uuid
+import sys
+import traceback
+import logging
 from fastapi import FastAPI, Body, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -17,6 +20,17 @@ from diffusers import (
 from diffusers.utils import load_image, export_to_video
 from rembg import remove
 import io
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("backend.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
@@ -40,56 +54,61 @@ class ModelManager:
     def __init__(self):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.pipelines = {}
-        print(f"--- ModelManager Initialized on {self.device} ---")
+        logger.info(f"--- ModelManager Initialized on {self.device} ---")
 
     def unload_all(self):
         """Clear VRAM before loading a new heavy model."""
+        logger.info("Unloading all models to clear VRAM...")
         for key in list(self.pipelines.keys()):
             del self.pipelines[key]
         if self.device == "cuda":
             torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
 
     def load_sdxl(self):
         if "sdxl" in self.pipelines:
             return self.pipelines["sdxl"]
         
         self.unload_all()
-        print("Loading SDXL + ControlNet (this may take a minute)...")
+        logger.info("Loading SDXL + ControlNet...")
         
-        controlnet = ControlNetModel.from_pretrained(
-            "diffusers/controlnet-canny-sdxl-1.0", 
-            torch_dtype=torch.float16
-        )
-        pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
-            "stabilityai/stable-diffusion-xl-base-1.0",
-            controlnet=controlnet,
-            torch_dtype=torch.float16,
-            use_safetensors=True
-        )
-        
-        # Enable efficient memory usage for 16GB VRAM
-        pipe.enable_model_cpu_offload()
-        
-        self.pipelines["sdxl"] = pipe
-        return pipe
+        try:
+            controlnet = ControlNetModel.from_pretrained(
+                "diffusers/controlnet-canny-sdxl-1.0", 
+                torch_dtype=torch.float16
+            )
+            pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
+                "stabilityai/stable-diffusion-xl-base-1.0",
+                controlnet=controlnet,
+                torch_dtype=torch.float16,
+                use_safetensors=True
+            )
+            pipe.enable_model_cpu_offload()
+            self.pipelines["sdxl"] = pipe
+            return pipe
+        except Exception as e:
+            logger.error(f"FAILED to load SDXL: {e}")
+            raise e
 
     def load_ltx(self):
         if "ltx" in self.pipelines:
             return self.pipelines["ltx"]
         
         self.unload_all()
-        print("Loading LTX-Video (this will take a minute)...")
+        logger.info("Loading LTX-Video...")
         
-        pipe = LTXImageToVideoPipeline.from_pretrained(
-            "Lightricks/LTX-Video", 
-            torch_dtype=torch.bfloat16
-        )
-        
-        # Enable efficient memory usage
-        pipe.enable_model_cpu_offload()
-        
-        self.pipelines["ltx"] = pipe
-        return pipe
+        try:
+            pipe = LTXImageToVideoPipeline.from_pretrained(
+                "Lightricks/LTX-Video", 
+                torch_dtype=torch.bfloat16
+            )
+            logger.info("Enabling sequential CPU offload for LTX-Video...")
+            pipe.enable_sequential_cpu_offload()
+            self.pipelines["ltx"] = pipe
+            return pipe
+        except Exception as e:
+            logger.error(f"FAILED to load LTX-Video: {e}")
+            raise e
 
 manager = ModelManager()
 
@@ -100,44 +119,42 @@ async def root():
 @app.post("/generate-anchor")
 async def generate_anchor(
     prompt: str = Body(..., embed=True),
-    template_id: str = Body("default", embed=True)
+    template_id: str = Body("default", embed=True),
+    num_variants: int = Body(4, embed=True)
 ):
     try:
         pipe = manager.load_sdxl()
-        
-        # Load the template (Canny image)
         template_path = f"templates/{template_id}.png"
         if not os.path.exists(template_path):
-            # Fallback to default if template missing
             template_path = "templates/default.png"
         
         control_image = load_image(template_path)
-        
-        # Enhanced prompt for pixel art aesthetic
         full_prompt = f"{prompt}, pixel art style, high quality, 8-bit, game sprite, solid dark gray background"
         negative_prompt = "photorealistic, 3d render, blurry, deformed, messy, complex background"
 
-        image = pipe(
-            full_prompt,
-            negative_prompt=negative_prompt,
-            image=control_image,
-            controlnet_conditioning_scale=0.6,
-            num_inference_steps=30
-        ).images[0]
+        urls = []
+        for i in range(num_variants):
+            logger.info(f"Generating variant {i+1}/{num_variants}...")
+            image = pipe(
+                full_prompt,
+                negative_prompt=negative_prompt,
+                image=control_image,
+                controlnet_conditioning_scale=0.6,
+                num_inference_steps=30
+            ).images[0]
 
-        # Remove background
-        print("Removing background from anchor...")
-        image = remove(image)
+            logger.info(f"  Removing background for variant {i+1}...")
+            image = remove(image)
 
-        # Process image (e.g., auto-crop or transparency)
-        filename = f"anchor_{uuid.uuid4()}.png"
-        filepath = os.path.join("output", filename)
-        image.save(filepath)
+            filename = f"anchor_{uuid.uuid4()}.png"
+            filepath = os.path.join("output", filename)
+            image.save(filepath)
+            urls.append(f"/output/{filename}")
 
-        return {"status": "success", "url": f"/output/{filename}"}
-    
+        return {"status": "success", "urls": urls}
     except Exception as e:
-        print(f"Error during generation: {e}")
+        logger.error(f"Error during anchor generation: {e}")
+        logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/animate")
@@ -146,36 +163,40 @@ async def animate(
     prompt: str = Body(..., embed=True)
 ):
     try:
+        logger.info(f"Animation request received for {image_url}")
         pipe = manager.load_ltx()
         
-        # Resolve the local path of the image
         image_name = os.path.basename(image_url)
         image_path = os.path.join("output", image_name)
         
         if not os.path.exists(image_path):
             raise HTTPException(status_code=404, detail="Image not found")
             
+        logger.info("Preparing init image...")
         init_image = load_image(image_path).resize((704, 480))
         
-        # Generate the video using the anchor as the seed
+        logger.info("Starting LTX-Video inference...")
         video_output = pipe(
             image=init_image,
             prompt=f"{prompt}, pixel art style, high quality, smooth motion",
             negative_prompt="worst quality, blurry, distorted, realistic",
             width=704,
             height=480,
-            num_frames=25, # Shorter sequence for speed
+            num_frames=25,
             num_inference_steps=25,
         ).frames[0]
 
+        logger.info("Inference complete. Exporting video...")
         filename = f"anim_{uuid.uuid4()}.mp4"
         filepath = os.path.join("output", filename)
-        export_to_video(video_output, filepath, fps=8) # Lower FPS for 'choppy' pixel look
+        export_to_video(video_output, filepath, fps=8)
         
+        logger.info(f"Animation saved to {filepath}")
         return {"status": "success", "url": f"/output/{filename}"}
-    
     except Exception as e:
-        print(f"Error during animation: {e}")
+        logger.error(f"CRITICAL Error during animation: {e}")
+        logger.error(traceback.format_exc())
+        manager.unload_all()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/generate-spritesheet")
@@ -183,22 +204,19 @@ async def generate_spritesheet(
     video_url: str = Body(..., embed=True)
 ):
     try:
-        # Resolve the local path of the video
         video_name = os.path.basename(video_url)
         video_path = os.path.join("output", video_name)
         
         if not os.path.exists(video_path):
             raise HTTPException(status_code=404, detail="Video not found")
             
-        print(f"Extracting frames from {video_path}...")
+        logger.info(f"Extracting frames from {video_path}...")
         cap = cv2.VideoCapture(video_path)
         frames = []
-        
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
-            # Convert BGR (OpenCV) to RGB (PIL)
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             frames.append(Image.fromarray(frame_rgb))
         cap.release()
@@ -206,19 +224,14 @@ async def generate_spritesheet(
         if not frames:
             raise HTTPException(status_code=500, detail="Failed to extract frames from video")
             
-        # Select 8 evenly spaced frames for the sprite sheet
         num_target_frames = 8
         step = max(1, len(frames) // num_target_frames)
         selected_frames = frames[::step][:num_target_frames]
         
-        print(f"Processing {len(selected_frames)} frames for spritesheet...")
         processed_frames = []
         max_w, max_h = 0, 0
-        
         for i, f in enumerate(selected_frames):
-            print(f"  Removing background from frame {i+1}...")
             f_clean = remove(f)
-            # Find the bounding box of the non-transparent area to 'tighten' the sprite
             bbox = f_clean.getbbox()
             if bbox:
                 f_cropped = f_clean.crop(bbox)
@@ -230,13 +243,10 @@ async def generate_spritesheet(
                 max_w = max(max_w, f_clean.width)
                 max_h = max(max_h, f_clean.height)
 
-        # Create a horizontal sprite sheet with uniform frame sizes
         sheet_w = max_w * len(processed_frames)
         sheet_h = max_h
         sheet = Image.new("RGBA", (sheet_w, sheet_h), (0, 0, 0, 0))
-        
         for i, f in enumerate(processed_frames):
-            # Center each sprite in its allocated frame slot
             x_offset = i * max_w + (max_w - f.width) // 2
             y_offset = (max_h - f.height) // 2
             sheet.paste(f, (x_offset, y_offset), f)
@@ -244,12 +254,10 @@ async def generate_spritesheet(
         filename = f"spritesheet_{uuid.uuid4()}.png"
         filepath = os.path.join("output", filename)
         sheet.save(filepath)
-        
-        print(f"Spritesheet saved to {filepath}")
         return {"status": "success", "url": f"/output/{filename}"}
-    
     except Exception as e:
-        print(f"Error during spritesheet generation: {e}")
+        logger.error(f"Error during spritesheet generation: {e}")
+        logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
 def find_free_port(start_port):
@@ -265,5 +273,5 @@ def find_free_port(start_port):
 if __name__ == "__main__":
     import uvicorn
     port = find_free_port(8000)
-    print(f"Starting server on port {port}...")
+    logger.info(f"Starting server on port {port}...")
     uvicorn.run(app, host="0.0.0.0", port=port)

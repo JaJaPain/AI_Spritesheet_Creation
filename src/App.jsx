@@ -31,16 +31,17 @@ function App() {
   const handleForgeAnchor = async () => {
     setLoading(true)
     setStage('selecting-anchor')
+    setVariants([]) // Clear previous variants
     
     try {
       const response = await fetch(`${apiBase}/generate-anchor`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, template_id: 'default' })
+        body: JSON.stringify({ prompt, template_id: 'default', num_variants: 4 })
       });
       const data = await response.json();
       if (data.status === 'success') {
-        setVariants([`${apiBase}${data.url}`]);
+        setVariants(data.urls.map(url => `${apiBase}${url}`));
       }
     } catch (error) {
       console.error("Error forging anchor:", error);
@@ -170,7 +171,7 @@ function App() {
             >
               <h2 style={{ marginBottom: '2rem' }}>Select your <span className="gradient-text">Base Sprite</span></h2>
               
-              {loading ? (
+              {loading && variants.length === 0 ? (
                 <div style={{ padding: '4rem' }}>
                   <motion.div
                     animate={{ rotate: 360 }}
@@ -180,30 +181,39 @@ function App() {
                     <Loader2 size={48} color="var(--accent-primary)" />
                   </motion.div>
                   <p>Forging variants from your prompt...</p>
+                  <p style={{ fontSize: '0.8rem', color: 'var(--text-dim)', marginTop: '0.5rem' }}>This uses deep learning to generate 4 unique versions</p>
                 </div>
               ) : (
                 <div style={{ 
                   display: 'grid', 
-                  gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', 
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', 
                   gap: '1.5rem',
-                  marginBottom: '3rem'
+                  marginBottom: '3rem',
+                  maxWidth: '1200px',
+                  margin: '0 auto 3rem'
                 }}>
                   {variants.map((v, i) => (
                     <motion.div 
                       key={i} 
                       className="glass-card" 
-                      style={{ padding: '0', overflow: 'hidden', cursor: 'pointer' }}
-                      whileHover={{ scale: 1.05 }}
+                      style={{ padding: '0', overflow: 'hidden', cursor: 'pointer', height: '380px', display: 'flex', flexDirection: 'column' }}
+                      whileHover={{ scale: 1.02 }}
                       onClick={() => selectAnchor(v)}
                     >
-                      <div style={{ aspectRatio: '1/1', background: 'rgba(255,255,255,0.05)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                        <img src={v} alt={`Variant ${i}`} style={{ width: '80%', height: '80%', imageRendering: 'pixelated' }} />
+                      <div style={{ flex: 1, background: 'rgba(255,255,255,0.02)', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', padding: '1rem' }}>
+                        <img src={v} alt={`Variant ${i}`} style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', imageRendering: 'pixelated' }} />
                       </div>
-                      <div style={{ padding: '1rem' }}>
+                      <div style={{ padding: '1rem', borderTop: '1px solid var(--glass-border)' }}>
                         <button className="btn-secondary" style={{ width: '100%' }}>Select Variant {i + 1}</button>
                       </div>
                     </motion.div>
                   ))}
+                  {loading && (
+                     <div className="glass-card" style={{ height: '380px', display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: '1rem' }}>
+                        <Loader2 size={32} className="animate-spin" color="var(--accent-primary)" />
+                        <p style={{ fontSize: '0.9rem', color: 'var(--text-dim)' }}>Forging next variant...</p>
+                     </div>
+                  )}
                 </div>
               )}
               {!loading && <button className="btn-secondary" onClick={() => setStage('prompt')}>Back to Prompt</button>}
@@ -220,7 +230,7 @@ function App() {
             >
               <h2 style={{ marginBottom: '1.5rem' }}>Next: <span className="gradient-text">Add Motion</span></h2>
               <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '2rem' }}>
-                <img src={selectedAnchor} alt="Selected" style={{ width: '128px', height: '128px', border: '1px solid var(--accent-primary)', borderRadius: '12px', padding: '1rem', background: '#222' }} />
+                <img src={selectedAnchor} alt="Selected" style={{ width: '128px', height: '128px', border: '1px solid var(--glass-border)', borderRadius: '12px', padding: '1rem', background: '#111', imageRendering: 'pixelated' }} />
               </div>
               
               {loading ? (
@@ -263,13 +273,13 @@ function App() {
               style={{ maxWidth: '800px', margin: '0 auto', textAlign: 'center' }}
             >
               <h2 style={{ marginBottom: '1.5rem' }}>{spritesheetUrl ? 'Final' : 'Animation'} <span className="gradient-text">{spritesheetUrl ? 'Sprite Sheet' : 'Preview'}</span></h2>
-              <div style={{ background: '#000', borderRadius: '12px', padding: '1rem', marginBottom: '2rem', overflow: 'hidden', minHeight: '300px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <div style={{ background: '#000', borderRadius: '12px', padding: '1rem', marginBottom: '2rem', overflow: 'hidden', minHeight: '300px', maxHeight: '500px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                 {spritesheetUrl ? (
                   <div style={{ overflowX: 'auto', width: '100%' }}>
                     <img src={spritesheetUrl} alt="Spritesheet" style={{ height: '200px', imageRendering: 'pixelated', maxWidth: 'none' }} />
                   </div>
                 ) : (
-                  <video src={videoUrl} autoPlay loop muted style={{ width: '100%', borderRadius: '8px' }} />
+                  <video src={videoUrl} autoPlay loop muted style={{ maxHeight: '100%', maxWidth: '100%', borderRadius: '8px' }} />
                 )}
               </div>
               <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}>

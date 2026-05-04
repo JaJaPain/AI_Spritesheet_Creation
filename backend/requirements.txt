@@ -6,3 +6,10 @@ pillow
 opencv-python
 python-multipart
 python-dotenv
+torch
+torchvision
+torchaudio
+diffusers
+transformers
+accelerate
+sentencepiece
