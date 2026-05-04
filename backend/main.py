@@ -129,8 +129,10 @@ async def generate_anchor(
             template_path = "templates/default.png"
         
         control_image = load_image(template_path)
-        full_prompt = f"{prompt}, pixel art style, high quality, 8-bit, game sprite, solid dark gray background"
-        negative_prompt = "photorealistic, 3d render, blurry, deformed, messy, complex background"
+        
+        # ANCHOR PROMPT: Optimized for clean 2D sprites in neutral poses
+        full_prompt = f"{prompt}, orthographic view, neutral standing pose, arms at sides, full body, pixel art style, high quality, 8-bit, game sprite, solid dark gray background"
+        negative_prompt = "T-pose, arms outstretched, diagonal view, perspective, 3d render, blurry, deformed, messy, complex background"
 
         urls = []
         for i in range(num_variants):
@@ -139,7 +141,7 @@ async def generate_anchor(
                 full_prompt,
                 negative_prompt=negative_prompt,
                 image=control_image,
-                controlnet_conditioning_scale=0.6,
+                controlnet_conditioning_scale=0.45,
                 num_inference_steps=30
             ).images[0]
 
@@ -176,10 +178,17 @@ async def animate(
         init_image = load_image(image_path).resize((704, 480))
         
         logger.info("Starting LTX-Video inference...")
+        # LTX PROMPT: Optimized with 'sprite sheet walking pattern' logic
+        full_ltx_prompt = (
+            f"{prompt}, walking animation, 2D game walk cycle, "
+            f"sprite sheet walking pattern, looping motion, "
+            f"consistent character silhouette, smooth leg movement"
+        )
+        
         video_output = pipe(
             image=init_image,
-            prompt=f"{prompt}, pixel art style, high quality, smooth motion",
-            negative_prompt="worst quality, blurry, distorted, realistic",
+            prompt=full_ltx_prompt,
+            negative_prompt="T-pose, standing still, camera movement, zooming, rotating, 3D perspective shift",
             width=704,
             height=480,
             num_frames=25,
@@ -254,6 +263,7 @@ async def generate_spritesheet(
         filename = f"spritesheet_{uuid.uuid4()}.png"
         filepath = os.path.join("output", filename)
         sheet.save(filepath)
+        logger.info(f"Spritesheet successfully generated: {filepath}")
         return {"status": "success", "url": f"/output/{filename}"}
     except Exception as e:
         logger.error(f"Error during spritesheet generation: {e}")

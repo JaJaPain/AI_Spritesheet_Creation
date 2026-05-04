@@ -24,6 +24,7 @@ function App() {
   const [prompt, setPrompt] = useState('')
   const [variants, setVariants] = useState([])
   const [loading, setLoading] = useState(false)
+  const [isGeneratingSheet, setIsGeneratingSheet] = useState(false)
   const [selectedAnchor, setSelectedAnchor] = useState(null)
   const [videoUrl, setVideoUrl] = useState(null)
   const [spritesheetUrl, setSpritesheetUrl] = useState(null)
@@ -75,7 +76,7 @@ function App() {
   }
 
   const handleGenerateSpritesheet = async () => {
-    setLoading(true)
+    setIsGeneratingSheet(true)
     try {
       const response = await fetch(`${apiBase}/generate-spritesheet`, {
         method: 'POST',
@@ -89,7 +90,7 @@ function App() {
     } catch (error) {
       console.error("Error generating spritesheet:", error);
     } finally {
-      setLoading(false)
+      setIsGeneratingSheet(false)
     }
   }
 
@@ -296,10 +297,10 @@ function App() {
                     className="btn-primary" 
                     style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem 2rem' }} 
                     onClick={handleGenerateSpritesheet} 
-                    disabled={loading}
+                    disabled={isGeneratingSheet}
                   >
-                    {loading ? <Loader2 size={18} className="animate-spin" /> : <Download size={18} />}
-                    {loading ? 'Forging Sheet...' : 'Generate Sprite Sheet'}
+                    {isGeneratingSheet ? <Loader2 size={18} className="animate-spin" /> : <Download size={18} />}
+                    {isGeneratingSheet ? 'Forging Sheet...' : 'Generate Sprite Sheet'}
                   </button>
                 )}
               </div>
