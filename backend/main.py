@@ -130,9 +130,17 @@ async def generate_anchor(
         
         control_image = load_image(template_path)
         
-        # ANCHOR PROMPT: Optimized for clean 2D sprites in neutral poses
-        full_prompt = f"{prompt}, orthographic view, neutral standing pose, arms at sides, full body, pixel art style, high quality, 8-bit, game sprite, solid dark gray background"
-        negative_prompt = "T-pose, arms outstretched, diagonal view, perspective, 3d render, blurry, deformed, messy, complex background"
+        # AGGRESSIVE ANTI-T-POSE PROMPT
+        # Using (arms at sides:1.5) to weight the instruction heavily
+        full_prompt = (
+            f"{prompt}, (arms at sides:1.5), neutral standing pose, "
+            f"orthographic front view, full body, pixel art style, "
+            f"high quality, 8-bit, game sprite, solid dark gray background"
+        )
+        negative_prompt = (
+            "T-pose, (arms outstretched:1.8), horizontal arms, "
+            "deformed hands, blurry, photorealistic, 3d render, messy background"
+        )
 
         urls = []
         for i in range(num_variants):
@@ -141,7 +149,8 @@ async def generate_anchor(
                 full_prompt,
                 negative_prompt=negative_prompt,
                 image=control_image,
-                controlnet_conditioning_scale=0.45,
+                # REDUCED SCALE: Dropped to 0.35 to let the "arms at sides" prompt override the T-pose template
+                controlnet_conditioning_scale=0.35,
                 num_inference_steps=30
             ).images[0]
 
@@ -178,17 +187,17 @@ async def animate(
         init_image = load_image(image_path).resize((704, 480))
         
         logger.info("Starting LTX-Video inference...")
-        # LTX PROMPT: Optimized with 'sprite sheet walking pattern' logic
+        # LTX PROMPT: Focused on leg and arm swing, avoiding T-pose stiffness
         full_ltx_prompt = (
-            f"{prompt}, walking animation, 2D game walk cycle, "
-            f"sprite sheet walking pattern, looping motion, "
-            f"consistent character silhouette, smooth leg movement"
+            f"{prompt}, walking animation, swinging arms, stepping legs, "
+            f"2D game walk cycle, sprite sheet walking pattern, looping motion, "
+            f"consistent character silhouette, smooth movement"
         )
         
         video_output = pipe(
             image=init_image,
             prompt=full_ltx_prompt,
-            negative_prompt="T-pose, standing still, camera movement, zooming, rotating, 3D perspective shift",
+            negative_prompt="T-pose, static arms, standing still, floating, camera movement, zooming, rotating",
             width=704,
             height=480,
             num_frames=25,
