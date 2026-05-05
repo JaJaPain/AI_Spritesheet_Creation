@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { Sparkles, Wand2, Play, Download, Settings, Image as ImageIcon, Loader2, ArrowLeft, RefreshCw } from 'lucide-react'
+import { Sparkles, Wand2, Play, Download, Settings, Image as ImageIcon, Loader2, ArrowLeft, RefreshCw, Save, Upload } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 
 function App() {
@@ -25,7 +25,6 @@ function App() {
   const [variants, setVariants] = useState([])
   const [loading, setLoading] = useState(false)
   const [selectedAnchor, setSelectedAnchor] = useState(null)
-  const [videoUrl, setVideoUrl] = useState(null)
   const [spritesheetUrl, setSpritesheetUrl] = useState(null)
 
   // Frame editor state
@@ -33,8 +32,21 @@ function App() {
   const [frameUrls, setFrameUrls] = useState([])
   const [skeletonUrls, setSkeletonUrls] = useState([])
   const [anchorUrl, setAnchorUrl] = useState(null)
-  const [redoingFrame, setRedoingFrame] = useState(null) // index of frame being regenerated
-  const [animFrame, setAnimFrame] = useState(0) // current animation preview frame
+  const [redoingFrame, setRedoingFrame] = useState(null)
+  const [animFrame, setAnimFrame] = useState(0)
+  const [hasSavedAnchor, setHasSavedAnchor] = useState(false)
+
+  // Check for saved anchor on mount
+  useEffect(() => {
+    const check = async () => {
+      if (!apiBase) return
+      try {
+        const res = await fetch(`${apiBase}/load-anchor`);
+        if (res.ok) setHasSavedAnchor(true);
+      } catch (e) {}
+    }
+    check();
+  }, [apiBase])
 
   // Animation preview timer
   const animRef = useRef(null)
@@ -50,7 +62,7 @@ function App() {
   const handleForgeAnchor = async () => {
     setLoading(true)
     setStage('selecting-anchor')
-    setVariants([]) // Clear previous variants
+    setVariants([])
     
     try {
       const response = await fetch(`${apiBase}/generate-anchor`, {
@@ -69,6 +81,33 @@ function App() {
     }
   }
 
+  const handleLoadAnchor = async () => {
+    try {
+      const res = await fetch(`${apiBase}/load-anchor`);
+      const data = await res.json();
+      if (data.status === 'success') {
+        setPrompt(data.prompt)
+        setSelectedAnchor(`${apiBase}${data.image_url}`)
+        setStage('animating')
+      }
+    } catch (error) {
+      console.error("Error loading anchor:", error);
+    }
+  }
+
+  const handleSaveAnchor = async (anchorFullUrl) => {
+    try {
+      await fetch(`${apiBase}/save-anchor`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image_url: anchorFullUrl, prompt })
+      });
+      setHasSavedAnchor(true)
+    } catch (error) {
+      console.error("Error saving anchor:", error);
+    }
+  }
+
   const handleAnimate = async () => {
     setLoading(true)
     
@@ -79,8 +118,7 @@ function App() {
         body: JSON.stringify({ 
           image_url: selectedAnchor,
           prompt: prompt,
-          reference_video: 'ref_front.mp4',
-          num_frames: 8
+          num_frames: 12
         })
       });
       const data = await response.json();
@@ -131,7 +169,6 @@ function App() {
   const handleStitchFrames = async () => {
     setLoading(true)
     try {
-      // Strip apiBase from URLs for the backend
       const relativeUrls = frameUrls.map(u => {
         const url = new URL(u)
         return url.pathname
@@ -153,25 +190,6 @@ function App() {
     }
   }
 
-  const handleGenerateSpritesheet = async () => {
-    setLoading(true)
-    try {
-      const response = await fetch(`${apiBase}/generate-spritesheet`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ video_url: videoUrl })
-      });
-      const data = await response.json();
-      if (data.status === 'success') {
-        setSpritesheetUrl(`${apiBase}${data.url}`);
-      }
-    } catch (error) {
-      console.error("Error generating spritesheet:", error);
-    } finally {
-      setLoading(false)
-    }
-  }
-
   const selectAnchor = (variant) => {
     setSelectedAnchor(variant)
     setStage('animating')
@@ -182,7 +200,6 @@ function App() {
     setPrompt('')
     setVariants([])
     setSelectedAnchor(null)
-    setVideoUrl(null)
     setSpritesheetUrl(null)
     setFrameUrls([])
     setSkeletonUrls([])
@@ -230,6 +247,16 @@ function App() {
                     <Settings size={18} />
                     Options
                   </button>
+                  {hasSavedAnchor && (
+                    <button 
+                      className="btn-secondary" 
+                      style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', borderColor: 'var(--accent-secondary)', color: 'var(--accent-secondary)' }}
+                      onClick={handleLoadAnchor}
+                    >
+                      <Upload size={18} />
+                      Load Saved Anchor
+                    </button>
+                  )}
                 </div>
                 <button 
                   className="btn-primary" 
@@ -286,8 +313,16 @@ function App() {
                       <div style={{ flex: 1, background: 'rgba(255,255,255,0.02)', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', padding: '1rem' }}>
                         <img src={v} alt={`Variant ${i}`} style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', imageRendering: 'pixelated' }} />
                       </div>
-                      <div style={{ padding: '1rem', borderTop: '1px solid var(--glass-border)' }}>
-                        <button className="btn-secondary" style={{ width: '100%' }}>Select Variant {i + 1}</button>
+                      <div style={{ padding: '0.75rem', borderTop: '1px solid var(--glass-border)', display: 'flex', gap: '0.5rem' }}>
+                        <button className="btn-secondary" style={{ flex: 1 }}>Select</button>
+                        <button 
+                          className="btn-secondary" 
+                          style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', padding: '0.5rem 0.75rem' }}
+                          onClick={(e) => { e.stopPropagation(); handleSaveAnchor(v); }}
+                          title="Save this anchor for quick loading later"
+                        >
+                          <Save size={14} />
+                        </button>
                       </div>
                     </motion.div>
                   ))}
@@ -325,13 +360,13 @@ function App() {
                   >
                     <Loader2 size={48} color="var(--accent-secondary)" />
                   </motion.div>
-                  <p>Forging 8-frame walk cycle with OpenPose...</p>
-                  <p style={{ fontSize: '0.8rem', color: 'var(--text-dim)', marginTop: '0.5rem' }}>This takes ~3 minutes (8 frames × 20 sec each)</p>
+                  <p>Forging 12-frame walk cycle...</p>
+                  <p style={{ fontSize: '0.8rem', color: 'var(--text-dim)', marginTop: '0.5rem' }}>This takes ~4 minutes (12 frames × 20 sec each)</p>
                 </div>
               ) : (
                 <>
                   <p style={{ color: 'var(--text-dim)', marginBottom: '2rem' }}>
-                    We'll generate 8 walk cycle frames. You can redo any frame afterwards.
+                    We'll generate a 12-frame walk cycle using clean skeleton references. You can redo any frame afterwards.
                   </p>
                   <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}>
                     <button className="btn-secondary" onClick={() => setStage('selecting-anchor')}>
@@ -352,81 +387,90 @@ function App() {
               key="editing"
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
-              style={{ maxWidth: '1100px', margin: '0 auto' }}
+              style={{ maxWidth: '1200px', margin: '0 auto' }}
             >
               <h2 style={{ textAlign: 'center', marginBottom: '2rem' }}>
                 Refine your <span className="gradient-text">Walk Cycle</span>
               </h2>
 
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr) minmax(200px, 1fr)', gap: '1rem', marginBottom: '2rem' }}>
-                {/* 8 individual frames in a 4x2 grid on the left, animation preview on the right */}
-                {frameUrls.map((url, i) => (
-                  <motion.div
-                    key={i}
-                    className="glass-card"
-                    style={{ padding: '0', overflow: 'hidden', textAlign: 'center' }}
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: i * 0.05 }}
-                  >
-                    <div style={{ 
-                      background: '#0a0a0a', 
-                      padding: '0.75rem', 
-                      display: 'flex', 
-                      alignItems: 'center', 
-                      justifyContent: 'center',
-                      height: '140px',
-                      position: 'relative'
-                    }}>
-                      <img 
-                        src={url} 
-                        alt={`Frame ${i + 1}`} 
-                        style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', imageRendering: 'pixelated' }}
-                      />
-                      <span style={{
-                        position: 'absolute', top: '6px', left: '8px',
-                        fontSize: '0.65rem', color: 'var(--text-dim)',
-                        background: 'rgba(0,0,0,0.6)', padding: '2px 6px', borderRadius: '4px'
-                      }}>F{i + 1}</span>
-                    </div>
-                    <div style={{ padding: '0.5rem' }}>
-                      <button 
-                        className="btn-secondary" 
-                        style={{ 
-                          width: '100%', 
-                          fontSize: '0.75rem', 
-                          padding: '0.4rem 0.5rem',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          gap: '0.3rem',
-                          opacity: redoingFrame !== null ? 0.5 : 1
-                        }}
-                        onClick={() => handleRedoFrame(i)}
-                        disabled={redoingFrame !== null}
-                      >
-                        {redoingFrame === i ? (
-                          <><Loader2 size={12} className="animate-spin" /> Redoing...</>
-                        ) : (
-                          <><RefreshCw size={12} /> Redo</>
-                        )}
-                      </button>
-                    </div>
-                  </motion.div>
-                ))}
+              {/* Main layout: frame grid on left, preview on right */}
+              <div style={{ display: 'flex', gap: '1.5rem', alignItems: 'flex-start' }}>
+                {/* Frame grid: 6 columns x 2 rows = 12 frames */}
+                <div style={{ 
+                  flex: 1,
+                  display: 'grid', 
+                  gridTemplateColumns: 'repeat(6, 1fr)', 
+                  gap: '0.75rem'
+                }}>
+                  {frameUrls.map((url, i) => (
+                    <motion.div
+                      key={i}
+                      className="glass-card"
+                      style={{ padding: '0', overflow: 'hidden', textAlign: 'center' }}
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ delay: i * 0.04 }}
+                    >
+                      <div style={{ 
+                        background: animFrame === i ? '#1a1a2e' : '#0a0a0a',
+                        border: animFrame === i ? '2px solid var(--accent-secondary)' : '2px solid transparent',
+                        padding: '0.5rem', 
+                        display: 'flex', 
+                        alignItems: 'center', 
+                        justifyContent: 'center',
+                        height: '120px',
+                        position: 'relative',
+                        transition: 'border-color 0.15s'
+                      }}>
+                        <img 
+                          src={url} 
+                          alt={`Frame ${i + 1}`} 
+                          style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', imageRendering: 'pixelated' }}
+                        />
+                        <span style={{
+                          position: 'absolute', top: '4px', left: '6px',
+                          fontSize: '0.6rem', color: 'var(--text-dim)',
+                          background: 'rgba(0,0,0,0.7)', padding: '1px 5px', borderRadius: '3px'
+                        }}>F{i + 1}</span>
+                      </div>
+                      <div style={{ padding: '0.35rem' }}>
+                        <button 
+                          className="btn-secondary" 
+                          style={{ 
+                            width: '100%', 
+                            fontSize: '0.7rem', 
+                            padding: '0.3rem 0.4rem',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            gap: '0.25rem',
+                            opacity: redoingFrame !== null ? 0.5 : 1
+                          }}
+                          onClick={() => handleRedoFrame(i)}
+                          disabled={redoingFrame !== null}
+                        >
+                          {redoingFrame === i ? (
+                            <><Loader2 size={10} className="animate-spin" /> Redoing...</>
+                          ) : (
+                            <><RefreshCw size={10} /> Redo</>
+                          )}
+                        </button>
+                      </div>
+                    </motion.div>
+                  ))}
+                </div>
 
-                {/* Animation Preview - spans the 5th column, both rows */}
+                {/* Animation Preview panel */}
                 <motion.div
                   className="glass-card"
                   style={{ 
                     padding: '0', 
                     overflow: 'hidden', 
-                    gridRow: '1 / 3',
-                    gridColumn: '5',
+                    width: '220px',
+                    minWidth: '220px',
                     display: 'flex',
                     flexDirection: 'column',
-                    alignItems: 'center',
-                    justifyContent: 'center'
+                    alignItems: 'center'
                   }}
                   initial={{ opacity: 0, x: 20 }}
                   animate={{ opacity: 1, x: 0 }}
@@ -436,7 +480,6 @@ function App() {
                     fontSize: '0.75rem', 
                     color: 'var(--accent-secondary)', 
                     fontWeight: 600, 
-                    marginBottom: '0.5rem',
                     marginTop: '0.75rem',
                     textTransform: 'uppercase',
                     letterSpacing: '0.1em'
@@ -444,7 +487,7 @@ function App() {
                   <div style={{ 
                     background: '#0a0a0a', 
                     width: '100%', 
-                    flex: 1, 
+                    height: '250px',
                     display: 'flex', 
                     alignItems: 'center', 
                     justifyContent: 'center',
@@ -455,7 +498,7 @@ function App() {
                         src={frameUrls[animFrame]} 
                         alt="Animation preview" 
                         style={{ 
-                          maxHeight: '200px', 
+                          maxHeight: '220px', 
                           maxWidth: '100%', 
                           objectFit: 'contain', 
                           imageRendering: 'pixelated' 
@@ -492,10 +535,10 @@ function App() {
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               className="glass-card"
-              style={{ maxWidth: '800px', margin: '0 auto', textAlign: 'center' }}
+              style={{ maxWidth: '900px', margin: '0 auto', textAlign: 'center' }}
             >
               <h2 style={{ marginBottom: '1.5rem' }}>Final <span className="gradient-text">Sprite Sheet</span></h2>
-              <div style={{ background: '#000', borderRadius: '12px', padding: '1rem', marginBottom: '2rem', overflow: 'hidden', minHeight: '300px', maxHeight: '500px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <div style={{ background: '#000', borderRadius: '12px', padding: '1rem', marginBottom: '2rem', overflow: 'hidden', minHeight: '200px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                 {spritesheetUrl && (
                   <div style={{ overflowX: 'auto', width: '100%' }}>
                     <img src={spritesheetUrl} alt="Spritesheet" style={{ height: '200px', imageRendering: 'pixelated', maxWidth: 'none' }} />

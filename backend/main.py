@@ -243,62 +243,88 @@ async def animate(
         manager.unload_all()
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/save-anchor")
+async def save_anchor(
+    image_url: str = Body(..., embed=True),
+    prompt: str = Body(..., embed=True)
+):
+    """Save an anchor image + prompt for quick reloading later."""
+    try:
+        import json
+        anchor_name = os.path.basename(image_url)
+        save_data = {"image_url": f"/output/{anchor_name}", "prompt": prompt}
+        save_path = os.path.join("output", "saved_anchor.json")
+        with open(save_path, "w") as f:
+            json.dump(save_data, f)
+        logger.info(f"Saved anchor: {anchor_name} with prompt: {prompt[:50]}...")
+        return {"status": "success"}
+    except Exception as e:
+        logger.error(f"Error saving anchor: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/load-anchor")
+async def load_anchor():
+    """Load a previously saved anchor image + prompt."""
+    try:
+        import json
+        save_path = os.path.join("output", "saved_anchor.json")
+        if not os.path.exists(save_path):
+            raise HTTPException(status_code=404, detail="No saved anchor found")
+        with open(save_path, "r") as f:
+            data = json.load(f)
+        logger.info(f"Loaded saved anchor: {data['image_url']}")
+        return {"status": "success", **data}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error loading anchor: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/animate-openpose")
 async def animate_openpose(
     image_url: str = Body(..., embed=True),
     prompt: str = Body(..., embed=True),
     reference_video: str = Body("ref_front.mp4", embed=True),
-    num_frames: int = Body(8, embed=True)
+    num_frames: int = Body(12, embed=True)
 ):
-    """Generate a walk/attack/death cycle using OpenPose skeletons from any reference video."""
+    """Generate a walk cycle using pre-made skeleton images for clean, consistent poses."""
     try:
-        logger.info(f"OpenPose animation requested for {image_url} using ref={reference_video}")
+        logger.info(f"OpenPose animation requested for {image_url} ({num_frames} frames)")
         
-        # Create a session ID to group all files from this walk cycle
         session_id = str(uuid.uuid4())[:8]
         
-        # Find the reference video
-        ref_path = None
-        for candidate in [f"output/{reference_video}", f"backend/output/{reference_video}"]:
-            if os.path.exists(candidate):
-                ref_path = candidate
-                break
-        if not ref_path:
-            raise HTTPException(status_code=404, detail=f"Reference video {reference_video} not found in output/")
-        
-        # Step 1: Extract evenly-spaced frames from the reference video
-        logger.info("Step 1/4: Extracting reference frames...")
-        cap = cv2.VideoCapture(ref_path)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        num_target = num_frames
-        step = max(1, total_frames // num_target)
-        
-        ref_frames = []
-        for i in range(num_target):
-            cap.set(cv2.CAP_PROP_POS_FRAMES, i * step)
-            ret, frame = cap.read()
-            if ret:
-                ref_frames.append(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
-        cap.release()
-        logger.info(f"  Extracted {len(ref_frames)} reference frames.")
-        
-        # Step 2: Generate OpenPose skeletons and SAVE them
-        logger.info("Step 2/4: Generating OpenPose skeletons...")
-        openpose = OpenposeDetector.from_pretrained("lllyasviel/ControlNet")
+        # Step 1: Use pre-made skeleton images (skip video extraction entirely)
+        logger.info("Step 1/3: Loading pre-made walk cycle skeletons...")
+        skeleton_dir = os.path.join("output", "ref_skeletons")
         skeleton_urls = []
-        for i, ref in enumerate(ref_frames):
-            pose = openpose(ref)
-            skel_filename = f"skel_{session_id}_{i}.png"
-            skel_path = os.path.join("output", skel_filename)
-            pose.save(skel_path)
-            skeleton_urls.append(f"/output/{skel_filename}")
-            logger.info(f"  Skeleton {i+1}/{len(ref_frames)} done.")
         
-        # Step 3: Load SDXL + OpenPose ControlNet and generate character in each pose
-        logger.info("Step 3/4: Loading SDXL + OpenPose ControlNet...")
+        # Find available skeleton frames
+        available = sorted([f for f in os.listdir(skeleton_dir) if f.startswith("walk_front_")])
+        if len(available) == 0:
+            raise HTTPException(status_code=404, detail="No skeleton frames found in output/ref_skeletons/")
+        
+        # Sample the right number of frames
+        if len(available) >= num_frames:
+            step = len(available) / num_frames
+            selected = [available[int(i * step)] for i in range(num_frames)]
+        else:
+            selected = available
+        
+        # Copy skeletons to session folder for redo tracking
+        for i, skel_file in enumerate(selected):
+            src = os.path.join(skeleton_dir, skel_file)
+            dst_name = f"skel_{session_id}_{i}.png"
+            dst = os.path.join("output", dst_name)
+            Image.open(src).save(dst)
+            skeleton_urls.append(f"/output/{dst_name}")
+        
+        logger.info(f"  Using {len(selected)} skeleton frames from pre-made set.")
+        
+        # Step 2: Load SDXL + OpenPose ControlNet and generate character in each pose
+        logger.info("Step 2/3: Loading SDXL + OpenPose ControlNet...")
         pipe = manager.load_sdxl_openpose()
         
-        # Load the anchor image for IP-Adapter reference
+        # Load anchor image for IP-Adapter reference
         anchor_name = os.path.basename(image_url)
         anchor_path = os.path.join("output", anchor_name)
         if not os.path.exists(anchor_path):
@@ -321,8 +347,8 @@ async def animate_openpose(
         
         seed = 42
         frame_urls = []
-        for i in range(len(ref_frames)):
-            logger.info(f"  Generating frame {i+1}/{len(ref_frames)}...")
+        for i in range(len(selected)):
+            logger.info(f"  Generating frame {i+1}/{len(selected)}...")
             
             skeleton = load_image(os.path.join("output", f"skel_{session_id}_{i}.png"))
             
@@ -342,13 +368,12 @@ async def animate_openpose(
             
             image = remove(image)
             
-            # Save individual frame
             frame_filename = f"frame_{session_id}_{i}.png"
             frame_path = os.path.join("output", frame_filename)
             image.save(frame_path)
             frame_urls.append(f"/output/{frame_filename}")
         
-        logger.info("Step 4/4: All frames generated.")
+        logger.info("Step 3/3: All frames generated.")
         
         return {
             "status": "success",
