@@ -254,7 +254,10 @@ async def animate_openpose(
     try:
         logger.info(f"OpenPose animation requested for {image_url} using ref={reference_video}")
         
-        # Find the reference video — supports dropping new videos into output/
+        # Create a session ID to group all files from this walk cycle
+        session_id = str(uuid.uuid4())[:8]
+        
+        # Find the reference video
         ref_path = None
         for candidate in [f"output/{reference_video}", f"backend/output/{reference_video}"]:
             if os.path.exists(candidate):
@@ -263,7 +266,7 @@ async def animate_openpose(
         if not ref_path:
             raise HTTPException(status_code=404, detail=f"Reference video {reference_video} not found in output/")
         
-        # Step 1: Extract 8 evenly-spaced frames from the reference video
+        # Step 1: Extract evenly-spaced frames from the reference video
         logger.info("Step 1/4: Extracting reference frames...")
         cap = cv2.VideoCapture(ref_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -279,20 +282,23 @@ async def animate_openpose(
         cap.release()
         logger.info(f"  Extracted {len(ref_frames)} reference frames.")
         
-        # Step 2: Generate OpenPose skeletons from the reference frames
+        # Step 2: Generate OpenPose skeletons and SAVE them
         logger.info("Step 2/4: Generating OpenPose skeletons...")
         openpose = OpenposeDetector.from_pretrained("lllyasviel/ControlNet")
-        skeleton_images = []
+        skeleton_urls = []
         for i, ref in enumerate(ref_frames):
             pose = openpose(ref)
-            skeleton_images.append(pose)
+            skel_filename = f"skel_{session_id}_{i}.png"
+            skel_path = os.path.join("output", skel_filename)
+            pose.save(skel_path)
+            skeleton_urls.append(f"/output/{skel_filename}")
             logger.info(f"  Skeleton {i+1}/{len(ref_frames)} done.")
         
         # Step 3: Load SDXL + OpenPose ControlNet and generate character in each pose
         logger.info("Step 3/4: Loading SDXL + OpenPose ControlNet...")
         pipe = manager.load_sdxl_openpose()
         
-        # Load the anchor image to use as IP-Adapter reference for character consistency
+        # Load the anchor image for IP-Adapter reference
         anchor_name = os.path.basename(image_url)
         anchor_path = os.path.join("output", anchor_name)
         if not os.path.exists(anchor_path):
@@ -300,7 +306,7 @@ async def animate_openpose(
         anchor_image = load_image(anchor_path).convert("RGB")
         logger.info(f"  Loaded anchor image: {anchor_path}")
         
-        # Precompute IP-Adapter image embeddings ONCE (avoids encoder dtype issues)
+        # Precompute IP-Adapter image embeddings ONCE
         logger.info("  Precomputing IP-Adapter embeddings from anchor...")
         image_embeds = pipe.prepare_ip_adapter_image_embeds(
             ip_adapter_image=anchor_image,
@@ -314,11 +320,12 @@ async def animate_openpose(
         negative_prompt = "photorealistic, 3d render, blurry, deformed, messy background, multiple characters"
         
         seed = 42
-        generated_frames = []
-        for i, skeleton in enumerate(skeleton_images):
-            logger.info(f"  Generating frame {i+1}/{len(skeleton_images)}...")
+        frame_urls = []
+        for i in range(len(ref_frames)):
+            logger.info(f"  Generating frame {i+1}/{len(ref_frames)}...")
             
-            # Clear VRAM between frames to prevent memory buildup
+            skeleton = load_image(os.path.join("output", f"skel_{session_id}_{i}.png"))
+            
             if manager.device == "cuda":
                 torch.cuda.empty_cache()
                 gc.collect()
@@ -333,42 +340,135 @@ async def animate_openpose(
                 generator=torch.Generator(device="cpu").manual_seed(seed)
             ).images[0]
             
-            # Remove background
             image = remove(image)
-            generated_frames.append(image)
+            
+            # Save individual frame
+            frame_filename = f"frame_{session_id}_{i}.png"
+            frame_path = os.path.join("output", frame_filename)
+            image.save(frame_path)
+            frame_urls.append(f"/output/{frame_filename}")
         
-        # Step 4: Stitch into sprite sheet
-        logger.info("Step 4/4: Stitching sprite sheet...")
-        max_w, max_h = 0, 0
-        cropped = []
-        for img in generated_frames:
-            bbox = img.getbbox()
-            if bbox:
-                c = img.crop(bbox)
-                cropped.append(c)
-                max_w = max(max_w, c.width)
-                max_h = max(max_h, c.height)
-            else:
-                cropped.append(img)
-                max_w = max(max_w, img.width)
-                max_h = max(max_h, img.height)
+        logger.info("Step 4/4: All frames generated.")
         
-        sheet = Image.new("RGBA", (max_w * len(cropped), max_h), (0, 0, 0, 0))
-        for i, f in enumerate(cropped):
-            x = i * max_w + (max_w - f.width) // 2
-            y = (max_h - f.height) // 2
-            sheet.paste(f, (x, y), f)
-        
-        filename = f"walk_sheet_{uuid.uuid4()}.png"
-        filepath = os.path.join("output", filename)
-        sheet.save(filepath)
-        logger.info(f"Walk cycle sprite sheet saved: {filepath}")
-        
-        return {"status": "success", "url": f"/output/{filename}"}
+        return {
+            "status": "success",
+            "session_id": session_id,
+            "frame_urls": frame_urls,
+            "skeleton_urls": skeleton_urls,
+            "anchor_url": image_url
+        }
     except Exception as e:
         logger.error(f"Error during OpenPose walk cycle: {e}")
         logger.error(traceback.format_exc())
         manager.unload_all()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/regenerate-frame")
+async def regenerate_frame(
+    frame_index: int = Body(..., embed=True),
+    skeleton_url: str = Body(..., embed=True),
+    anchor_url: str = Body(..., embed=True),
+    prompt: str = Body(..., embed=True),
+    session_id: str = Body(..., embed=True)
+):
+    """Regenerate a single frame using a new random seed."""
+    try:
+        logger.info(f"Regenerating frame {frame_index} for session {session_id}")
+        
+        pipe = manager.load_sdxl_openpose()
+        
+        # Load skeleton
+        skel_name = os.path.basename(skeleton_url)
+        skeleton = load_image(os.path.join("output", skel_name))
+        
+        # Load anchor and precompute embeddings
+        anchor_name = os.path.basename(anchor_url)
+        anchor_path = os.path.join("output", anchor_name)
+        anchor_image = load_image(anchor_path).convert("RGB")
+        
+        image_embeds = pipe.prepare_ip_adapter_image_embeds(
+            ip_adapter_image=anchor_image,
+            ip_adapter_image_embeds=None,
+            device=manager.device,
+            num_images_per_prompt=1,
+            do_classifier_free_guidance=True
+        )
+        
+        full_prompt = f"{prompt}, pixel art style, game sprite, full body, solid dark gray background"
+        negative_prompt = "photorealistic, 3d render, blurry, deformed, messy background, multiple characters"
+        
+        if manager.device == "cuda":
+            torch.cuda.empty_cache()
+            gc.collect()
+        
+        # Use a random seed for variation
+        import random
+        seed = random.randint(0, 2**32 - 1)
+        logger.info(f"  Using seed {seed}")
+        
+        image = pipe(
+            full_prompt,
+            negative_prompt=negative_prompt,
+            image=skeleton,
+            ip_adapter_image_embeds=image_embeds,
+            controlnet_conditioning_scale=0.8,
+            num_inference_steps=25,
+            generator=torch.Generator(device="cpu").manual_seed(seed)
+        ).images[0]
+        
+        image = remove(image)
+        
+        # Overwrite the frame file
+        frame_filename = f"frame_{session_id}_{frame_index}.png"
+        frame_path = os.path.join("output", frame_filename)
+        image.save(frame_path)
+        logger.info(f"  Frame {frame_index} regenerated: {frame_path}")
+        
+        return {"status": "success", "url": f"/output/{frame_filename}"}
+    except Exception as e:
+        logger.error(f"Error regenerating frame: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/stitch-frames")
+async def stitch_frames(
+    frame_urls: list = Body(..., embed=True)
+):
+    """Stitch individual frames into a final sprite sheet."""
+    try:
+        logger.info(f"Stitching {len(frame_urls)} frames into sprite sheet...")
+        
+        frames = []
+        max_w, max_h = 0, 0
+        for url in frame_urls:
+            name = os.path.basename(url)
+            img = load_image(os.path.join("output", name))
+            bbox = img.getbbox()
+            if bbox:
+                c = img.crop(bbox)
+                frames.append(c)
+                max_w = max(max_w, c.width)
+                max_h = max(max_h, c.height)
+            else:
+                frames.append(img)
+                max_w = max(max_w, img.width)
+                max_h = max(max_h, img.height)
+        
+        sheet = Image.new("RGBA", (max_w * len(frames), max_h), (0, 0, 0, 0))
+        for i, f in enumerate(frames):
+            x = i * max_w + (max_w - f.width) // 2
+            y = (max_h - f.height) // 2
+            sheet.paste(f, (x, y), f)
+        
+        filename = f"spritesheet_{uuid.uuid4()}.png"
+        filepath = os.path.join("output", filename)
+        sheet.save(filepath)
+        logger.info(f"Sprite sheet saved: {filepath}")
+        
+        return {"status": "success", "url": f"/output/{filename}"}
+    except Exception as e:
+        logger.error(f"Error stitching frames: {e}")
+        logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/generate-spritesheet")
