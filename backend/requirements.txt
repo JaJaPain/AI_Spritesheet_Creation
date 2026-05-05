@@ -9,11 +9,9 @@ python-dotenv
 torch
 torchvision
 torchaudio
-diffusers
+diffusers>=0.31.0
 transformers
 accelerate
 sentencepiece
 tiktoken
 protobuf
-imageio-ffmpeg
-controlnet_aux
