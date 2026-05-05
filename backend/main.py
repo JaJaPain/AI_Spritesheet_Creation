@@ -132,6 +132,14 @@ class ModelManager:
                 use_safetensors=True
             )
             pipe.enable_model_cpu_offload()
+            # Load IP-Adapter for character consistency across frames
+            logger.info("Loading IP-Adapter for character identity preservation...")
+            pipe.load_ip_adapter(
+                "h94/IP-Adapter", 
+                subfolder="sdxl_models", 
+                weight_name="ip-adapter_sdxl.bin"
+            )
+            pipe.set_ip_adapter_scale(0.6)
             self.pipelines["sdxl_openpose"] = pipe
             return pipe
         except Exception as e:
@@ -276,6 +284,14 @@ async def animate_openpose(
         logger.info("Step 3/4: Loading SDXL + OpenPose ControlNet...")
         pipe = manager.load_sdxl_openpose()
         
+        # Load the anchor image to use as IP-Adapter reference for character consistency
+        anchor_name = os.path.basename(image_url)
+        anchor_path = os.path.join("output", anchor_name)
+        if not os.path.exists(anchor_path):
+            raise HTTPException(status_code=404, detail="Anchor image not found")
+        anchor_image = load_image(anchor_path).convert("RGB")
+        logger.info(f"  Loaded anchor image: {anchor_path}")
+        
         full_prompt = f"{prompt}, pixel art style, game sprite, full body, solid dark gray background"
         negative_prompt = "photorealistic, 3d render, blurry, deformed, messy background, multiple characters"
         
@@ -293,6 +309,7 @@ async def animate_openpose(
                 full_prompt,
                 negative_prompt=negative_prompt,
                 image=skeleton,
+                ip_adapter_image=anchor_image,
                 controlnet_conditioning_scale=0.8,
                 num_inference_steps=25,
                 generator=torch.Generator(device="cpu").manual_seed(seed)
