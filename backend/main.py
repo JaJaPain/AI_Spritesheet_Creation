@@ -131,8 +131,7 @@ class ModelManager:
                 torch_dtype=torch.float16,
                 use_safetensors=True
             )
-            pipe.enable_model_cpu_offload()
-            # Load IP-Adapter for character consistency across frames
+            # Load IP-Adapter BEFORE CPU offload so the image encoder is included
             logger.info("Loading IP-Adapter for character identity preservation...")
             pipe.load_ip_adapter(
                 "h94/IP-Adapter", 
@@ -140,6 +139,7 @@ class ModelManager:
                 weight_name="ip-adapter_sdxl.bin"
             )
             pipe.set_ip_adapter_scale(0.6)
+            pipe.enable_model_cpu_offload()
             self.pipelines["sdxl_openpose"] = pipe
             return pipe
         except Exception as e:
