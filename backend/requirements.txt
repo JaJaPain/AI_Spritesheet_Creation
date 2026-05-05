@@ -13,3 +13,6 @@ diffusers
 transformers
 accelerate
 sentencepiece
+tiktoken
+protobuf
+imageio-ffmpeg
