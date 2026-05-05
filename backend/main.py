@@ -17,6 +17,7 @@ from diffusers import (
     LTXImageToVideoPipeline,
     AutoencoderKL
 )
+from transformers import CLIPVisionModelWithProjection
 from diffusers.utils import load_image, export_to_video
 from rembg import remove
 from controlnet_aux import OpenposeDetector
@@ -125,13 +126,20 @@ class ModelManager:
                 "thibaud/controlnet-openpose-sdxl-1.0", 
                 torch_dtype=torch.float16
             )
+            # Load the CLIP image encoder explicitly so CPU offload handles it
+            image_encoder = CLIPVisionModelWithProjection.from_pretrained(
+                "h94/IP-Adapter",
+                subfolder="models/image_encoder",
+                torch_dtype=torch.float16
+            )
             pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
                 "stabilityai/stable-diffusion-xl-base-1.0",
                 controlnet=controlnet,
+                image_encoder=image_encoder,
                 torch_dtype=torch.float16,
                 use_safetensors=True
             )
-            # Load IP-Adapter BEFORE CPU offload so the image encoder is included
+            # Load IP-Adapter weights
             logger.info("Loading IP-Adapter for character identity preservation...")
             pipe.load_ip_adapter(
                 "h94/IP-Adapter", 
@@ -292,6 +300,16 @@ async def animate_openpose(
         anchor_image = load_image(anchor_path).convert("RGB")
         logger.info(f"  Loaded anchor image: {anchor_path}")
         
+        # Precompute IP-Adapter image embeddings ONCE (avoids encoder dtype issues)
+        logger.info("  Precomputing IP-Adapter embeddings from anchor...")
+        image_embeds = pipe.prepare_ip_adapter_image_embeds(
+            ip_adapter_image=anchor_image,
+            ip_adapter_image_embeds=None,
+            device=manager.device,
+            num_images_per_prompt=1,
+            do_classifier_free_guidance=True
+        )
+        
         full_prompt = f"{prompt}, pixel art style, game sprite, full body, solid dark gray background"
         negative_prompt = "photorealistic, 3d render, blurry, deformed, messy background, multiple characters"
         
@@ -309,7 +327,7 @@ async def animate_openpose(
                 full_prompt,
                 negative_prompt=negative_prompt,
                 image=skeleton,
-                ip_adapter_image=anchor_image,
+                ip_adapter_image_embeds=image_embeds,
                 controlnet_conditioning_scale=0.8,
                 num_inference_steps=25,
                 generator=torch.Generator(device="cpu").manual_seed(seed)
