@@ -119,15 +119,11 @@ class ModelManager:
             return self.pipelines["sdxl_openpose"]
         
         self.unload_all()
-        logger.info("Loading SDXL + Multi-ControlNet (OpenPose + Canny)...")
+        logger.info("Loading SDXL + OpenPose ControlNet (single)...")
         
         try:
-            controlnet_openpose = ControlNetModel.from_pretrained(
+            controlnet = ControlNetModel.from_pretrained(
                 "thibaud/controlnet-openpose-sdxl-1.0", 
-                torch_dtype=torch.float16
-            )
-            controlnet_canny = ControlNetModel.from_pretrained(
-                "diffusers/controlnet-canny-sdxl-1.0",
                 torch_dtype=torch.float16
             )
             # Load the CLIP image encoder explicitly so CPU offload handles it
@@ -138,24 +134,24 @@ class ModelManager:
             )
             pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
                 "stabilityai/stable-diffusion-xl-base-1.0",
-                controlnet=[controlnet_openpose, controlnet_canny],
+                controlnet=controlnet,
                 image_encoder=image_encoder,
                 torch_dtype=torch.float16,
                 use_safetensors=True
             )
-            # Load IP-Adapter Plus (matches ViT-H encoder, better character fidelity)
-            logger.info("Loading IP-Adapter Plus for character identity preservation...")
+            # IP-Adapter Plus at 0.5 (lower = less T-pose leakage from anchor)
+            logger.info("Loading IP-Adapter Plus (scale=0.5)...")
             pipe.load_ip_adapter(
                 "h94/IP-Adapter", 
                 subfolder="sdxl_models", 
                 weight_name="ip-adapter-plus_sdxl_vit-h.safetensors"
             )
-            pipe.set_ip_adapter_scale(0.6)
+            pipe.set_ip_adapter_scale(0.5)
             pipe.enable_model_cpu_offload()
             self.pipelines["sdxl_openpose"] = pipe
             return pipe
         except Exception as e:
-            logger.error(f"FAILED to load SDXL+MultiControlNet: {e}")
+            logger.error(f"FAILED to load SDXL+OpenPose: {e}")
             raise e
 
 manager = ModelManager()
@@ -324,23 +320,17 @@ async def animate_openpose(
         
         logger.info(f"  Using {len(selected)} skeleton frames from pre-made set.")
         
-        # Step 2: Load SDXL + Multi-ControlNet and generate character in each pose
-        logger.info("Step 2/3: Loading SDXL + Multi-ControlNet...")
+        # Step 2: Load SDXL + OpenPose ControlNet
+        logger.info("Step 2/3: Loading SDXL + OpenPose ControlNet...")
         pipe = manager.load_sdxl_openpose()
         
-        # Load anchor image for IP-Adapter + Canny ControlNet
+        # Load anchor image for IP-Adapter
         anchor_name = os.path.basename(image_url)
         anchor_path = os.path.join("output", anchor_name)
         if not os.path.exists(anchor_path):
             raise HTTPException(status_code=404, detail="Anchor image not found")
         anchor_image = load_image(anchor_path).convert("RGB")
         logger.info(f"  Loaded anchor image: {anchor_path}")
-        
-        # Generate Canny edge map from anchor for silhouette consistency
-        anchor_np = np.array(anchor_image.resize((512, 512)))
-        canny_edges = cv2.Canny(anchor_np, 50, 150)
-        canny_image = Image.fromarray(np.stack([canny_edges]*3, axis=-1))
-        logger.info("  Generated Canny edge map from anchor.")
         
         # Precompute IP-Adapter image embeddings ONCE
         logger.info("  Precomputing IP-Adapter embeddings from anchor...")
@@ -352,8 +342,8 @@ async def animate_openpose(
             do_classifier_free_guidance=True
         )
         
-        full_prompt = f"{prompt}, pixel art style, game sprite, full body, solid dark gray background"
-        negative_prompt = "photorealistic, 3d render, blurry, deformed, messy background, multiple characters"
+        full_prompt = f"{prompt}, walking pose, pixel art style, game sprite, full body, solid dark gray background"
+        negative_prompt = "photorealistic, 3d render, blurry, deformed, messy background, multiple characters, t-pose, arms spread, standing still"
         
         seed = 42
         frame_urls = []
@@ -367,14 +357,13 @@ async def animate_openpose(
                 torch.cuda.empty_cache()
                 gc.collect()
             
-            # Multi-ControlNet: [OpenPose skeleton, Canny anchor edges]
-            # OpenPose at 0.7 drives the pose, Canny at 0.3 constrains the silhouette
+            # Single OpenPose ControlNet at 0.9 (high = strongly follow the skeleton)
             image = pipe(
                 full_prompt,
                 negative_prompt=negative_prompt,
-                image=[skeleton, canny_image],
+                image=skeleton,
                 ip_adapter_image_embeds=image_embeds,
-                controlnet_conditioning_scale=[0.7, 0.3],
+                controlnet_conditioning_scale=0.9,
                 num_inference_steps=25,
                 generator=torch.Generator(device="cpu").manual_seed(seed)
             ).images[0]
@@ -450,14 +439,10 @@ async def regenerate_frame(
         skel_name = os.path.basename(skeleton_url)
         skeleton = load_image(os.path.join("output", skel_name))
         
-        # Load anchor and precompute embeddings + Canny edges
+        # Load anchor and precompute embeddings
         anchor_name = os.path.basename(anchor_url)
         anchor_path = os.path.join("output", anchor_name)
         anchor_image = load_image(anchor_path).convert("RGB")
-        
-        anchor_np = np.array(anchor_image.resize((512, 512)))
-        canny_edges = cv2.Canny(anchor_np, 50, 150)
-        canny_image = Image.fromarray(np.stack([canny_edges]*3, axis=-1))
         
         image_embeds = pipe.prepare_ip_adapter_image_embeds(
             ip_adapter_image=anchor_image,
@@ -467,8 +452,8 @@ async def regenerate_frame(
             do_classifier_free_guidance=True
         )
         
-        full_prompt = f"{prompt}, pixel art style, game sprite, full body, solid dark gray background"
-        negative_prompt = "photorealistic, 3d render, blurry, deformed, messy background, multiple characters"
+        full_prompt = f"{prompt}, walking pose, pixel art style, game sprite, full body, solid dark gray background"
+        negative_prompt = "photorealistic, 3d render, blurry, deformed, messy background, multiple characters, t-pose, arms spread, standing still"
         
         if manager.device == "cuda":
             torch.cuda.empty_cache()
@@ -479,13 +464,13 @@ async def regenerate_frame(
         seed = random.randint(0, 2**32 - 1)
         logger.info(f"  Using seed {seed}")
         
-        # Multi-ControlNet: [OpenPose skeleton, Canny anchor edges]
+        # Single OpenPose at 0.9 (strongly follow the skeleton pose)
         image = pipe(
             full_prompt,
             negative_prompt=negative_prompt,
-            image=[skeleton, canny_image],
+            image=skeleton,
             ip_adapter_image_embeds=image_embeds,
-            controlnet_conditioning_scale=[0.7, 0.3],
+            controlnet_conditioning_scale=0.9,
             num_inference_steps=25,
             generator=torch.Generator(device="cpu").manual_seed(seed)
         ).images[0]

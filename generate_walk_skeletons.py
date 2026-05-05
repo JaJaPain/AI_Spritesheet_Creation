@@ -1,46 +1,34 @@
 """
 Generate clean OpenPose skeleton images for a 12-frame front-facing walk cycle.
-These are programmatically drawn stick figures with the correct joint positions
-for each phase of a walk cycle, matching standard animation reference sheets.
-
-Walk cycle phases (12 frames):
-  1-2: Right foot contact & weight shift
-  3-4: Right leg passing, left push-off
-  5-6: Right leg swing forward, left contact
-  7-8: Left foot contact & weight shift
-  9-10: Left leg passing, right push-off
-  11-12: Left leg swing forward, right contact (loop back to 1)
+EXAGGERATED poses for clear ControlNet guidance.
 """
 from PIL import Image, ImageDraw
 import os, math
 
 os.makedirs("output/ref_skeletons", exist_ok=True)
+# Also create in backend output
+os.makedirs("backend/output/ref_skeletons", exist_ok=True)
 
 WIDTH, HEIGHT = 512, 512
 
-# OpenPose format: draw colored lines between keypoints on black background
-# Colors match OpenPose convention
 BONE_COLORS = {
-    'torso': (255, 0, 0),        # Red
-    'right_arm': (255, 170, 0),  # Orange
-    'left_arm': (0, 255, 0),     # Green
-    'right_leg': (0, 170, 255),  # Light blue
-    'left_leg': (255, 0, 170),   # Pink
-    'head': (255, 255, 0),       # Yellow
+    'torso': (255, 0, 0),
+    'right_arm': (255, 170, 0),
+    'left_arm': (0, 255, 0),
+    'right_leg': (0, 170, 255),
+    'left_leg': (255, 0, 170),
+    'head': (255, 255, 0),
 }
 
-def lerp(a, b, t):
-    return a + (b - a) * t
-
-def draw_skeleton(draw, joints, thickness=6):
+def draw_skeleton(draw, joints, thickness=8):
     """Draw OpenPose-style skeleton from joint positions."""
     # Head
-    draw.ellipse([joints['nose'][0]-8, joints['nose'][1]-8, joints['nose'][0]+8, joints['nose'][1]+8], fill=BONE_COLORS['head'])
+    draw.ellipse([joints['nose'][0]-10, joints['nose'][1]-10, joints['nose'][0]+10, joints['nose'][1]+10], fill=BONE_COLORS['head'])
     
     # Neck to nose
     draw.line([joints['neck'], joints['nose']], fill=BONE_COLORS['head'], width=thickness)
     
-    # Torso (neck to hip center)
+    # Torso
     hip_center = ((joints['r_hip'][0] + joints['l_hip'][0])//2, (joints['r_hip'][1] + joints['l_hip'][1])//2)
     draw.line([joints['neck'], hip_center], fill=BONE_COLORS['torso'], width=thickness)
     
@@ -68,83 +56,76 @@ def draw_skeleton(draw, joints, thickness=6):
     draw.line([joints['l_hip'], joints['l_knee']], fill=BONE_COLORS['left_leg'], width=thickness)
     draw.line([joints['l_knee'], joints['l_ankle']], fill=BONE_COLORS['left_leg'], width=thickness)
     
-    # Draw joint circles
+    # Joint circles
     for name, pos in joints.items():
-        r = 5
+        r = 6
         draw.ellipse([pos[0]-r, pos[1]-r, pos[0]+r, pos[1]+r], fill=(255, 255, 255))
 
 
 def generate_walk_frame(frame_index, total_frames=12):
     """
-    Generate a single walk cycle frame.
-    For a front-facing walk, the main movement is:
-    - Legs swing left/right (knee spread)
-    - Arms swing opposite to legs
-    - Slight torso bob up/down
-    - Subtle shoulder rotation
+    Generate a walk cycle frame with EXAGGERATED movement.
+    Front-facing view: legs swing left/right visibly, arms counter-swing.
     """
-    t = frame_index / total_frames  # 0.0 to ~0.917
-    angle = t * 2 * math.pi  # Full cycle
+    t = frame_index / total_frames
+    angle = t * 2 * math.pi
     
-    cx = WIDTH // 2  # Center x
+    cx = WIDTH // 2
     
     # Base positions
-    head_y = 100
-    neck_y = 135
-    hip_y = 280
-    knee_y = 370
-    ankle_y = 450
+    head_y = 90
+    neck_y = 130
+    hip_y = 270
+    knee_y = 360
+    ankle_y = 445
     
-    # Vertical bob (body goes up when legs pass, down at contact)
-    bob = math.sin(angle * 2) * 8
+    # Stronger vertical bob
+    bob = math.sin(angle * 2) * 12
     
-    # --- RIGHT LEG ---
-    # Right leg swings forward (appears to go RIGHT from camera view when stepping)
-    r_leg_swing = math.sin(angle) * 30  # horizontal swing
-    r_knee_bend = abs(math.sin(angle)) * 15  # knee bends more during swing
+    # --- RIGHT LEG --- (EXAGGERATED swing: 50px instead of 30px)
+    r_leg_swing = math.sin(angle) * 50
+    r_knee_bend = abs(math.sin(angle)) * 25
     
-    r_hip = (cx + 25, int(hip_y + bob))
-    r_knee = (int(cx + 25 + r_leg_swing * 0.6), int(knee_y + bob - r_knee_bend))
-    r_ankle = (int(cx + 25 + r_leg_swing), int(ankle_y + bob))
+    r_hip = (cx + 30, int(hip_y + bob))
+    r_knee = (int(cx + 30 + r_leg_swing * 0.5), int(knee_y + bob - r_knee_bend))
+    r_ankle = (int(cx + 30 + r_leg_swing), int(ankle_y + bob))
     
-    # --- LEFT LEG (180 degrees out of phase) ---
-    l_leg_swing = math.sin(angle + math.pi) * 30
-    l_knee_bend = abs(math.sin(angle + math.pi)) * 15
+    # --- LEFT LEG (180° out of phase) ---
+    l_leg_swing = math.sin(angle + math.pi) * 50
+    l_knee_bend = abs(math.sin(angle + math.pi)) * 25
     
-    l_hip = (cx - 25, int(hip_y + bob))
-    l_knee = (int(cx - 25 + l_leg_swing * 0.6), int(knee_y + bob - l_knee_bend))
-    l_ankle = (int(cx - 25 + l_leg_swing), int(ankle_y + bob))
+    l_hip = (cx - 30, int(hip_y + bob))
+    l_knee = (int(cx - 30 + l_leg_swing * 0.5), int(knee_y + bob - l_knee_bend))
+    l_ankle = (int(cx - 30 + l_leg_swing), int(ankle_y + bob))
     
-    # --- ARMS (opposite to legs) ---
-    r_arm_swing = math.sin(angle + math.pi) * 20  # opposite to right leg
-    l_arm_swing = math.sin(angle) * 20  # opposite to left leg
+    # --- ARMS (opposite to legs, EXAGGERATED: 35px swing) ---
+    r_arm_swing = math.sin(angle + math.pi) * 35
+    l_arm_swing = math.sin(angle) * 35
     
-    shoulder_y = int(neck_y + 15 + bob)
-    r_shoulder = (cx + 45, shoulder_y)
-    l_shoulder = (cx - 45, shoulder_y)
+    shoulder_y = int(neck_y + 20 + bob)
+    r_shoulder = (cx + 50, shoulder_y)
+    l_shoulder = (cx - 50, shoulder_y)
     
-    r_elbow = (int(cx + 50 + r_arm_swing * 0.4), int(shoulder_y + 50))
-    r_wrist = (int(cx + 48 + r_arm_swing), int(shoulder_y + 95))
+    r_elbow = (int(cx + 55 + r_arm_swing * 0.5), int(shoulder_y + 50))
+    r_wrist = (int(cx + 50 + r_arm_swing), int(shoulder_y + 100))
     
-    l_elbow = (int(cx - 50 + l_arm_swing * 0.4), int(shoulder_y + 50))
-    l_wrist = (int(cx - 48 + l_arm_swing), int(shoulder_y + 95))
+    l_elbow = (int(cx - 55 + l_arm_swing * 0.5), int(shoulder_y + 50))
+    l_wrist = (int(cx - 50 + l_arm_swing), int(shoulder_y + 100))
     
-    # --- HEAD & NECK ---
+    # Head & Neck
     nose = (cx, int(head_y + bob))
     neck = (cx, int(neck_y + bob))
     
-    joints = {
+    return {
         'nose': nose, 'neck': neck,
         'r_shoulder': r_shoulder, 'r_elbow': r_elbow, 'r_wrist': r_wrist,
         'l_shoulder': l_shoulder, 'l_elbow': l_elbow, 'l_wrist': l_wrist,
         'r_hip': r_hip, 'r_knee': r_knee, 'r_ankle': r_ankle,
         'l_hip': l_hip, 'l_knee': l_knee, 'l_ankle': l_ankle,
     }
-    
-    return joints
 
 
-# Generate all 12 frames
+# Generate all 12 frames and save to BOTH locations
 for i in range(12):
     img = Image.new("RGB", (WIDTH, HEIGHT), (0, 0, 0))
     draw = ImageDraw.Draw(img)
@@ -152,9 +133,10 @@ for i in range(12):
     joints = generate_walk_frame(i, 12)
     draw_skeleton(draw, joints)
     
-    path = f"output/ref_skeletons/walk_front_{i:02d}.png"
-    img.save(path)
-    print(f"Generated skeleton frame {i+1}/12: {path}")
+    for dest_dir in ["output/ref_skeletons", "backend/output/ref_skeletons"]:
+        path = f"{dest_dir}/walk_front_{i:02d}.png"
+        img.save(path)
+    
+    print(f"Generated skeleton frame {i+1}/12")
 
-print("\nDone! 12 walk cycle skeleton frames saved to output/ref_skeletons/")
-print("These can be used directly as ControlNet input (no OpenPose detection needed).")
+print("\nDone! Exaggerated walk cycle skeletons saved to both output directories.")
