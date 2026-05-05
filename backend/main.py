@@ -119,11 +119,15 @@ class ModelManager:
             return self.pipelines["sdxl_openpose"]
         
         self.unload_all()
-        logger.info("Loading SDXL + OpenPose ControlNet...")
+        logger.info("Loading SDXL + Multi-ControlNet (OpenPose + Canny)...")
         
         try:
-            controlnet = ControlNetModel.from_pretrained(
+            controlnet_openpose = ControlNetModel.from_pretrained(
                 "thibaud/controlnet-openpose-sdxl-1.0", 
+                torch_dtype=torch.float16
+            )
+            controlnet_canny = ControlNetModel.from_pretrained(
+                "diffusers/controlnet-canny-sdxl-1.0",
                 torch_dtype=torch.float16
             )
             # Load the CLIP image encoder explicitly so CPU offload handles it
@@ -134,7 +138,7 @@ class ModelManager:
             )
             pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
                 "stabilityai/stable-diffusion-xl-base-1.0",
-                controlnet=controlnet,
+                controlnet=[controlnet_openpose, controlnet_canny],
                 image_encoder=image_encoder,
                 torch_dtype=torch.float16,
                 use_safetensors=True
@@ -151,7 +155,7 @@ class ModelManager:
             self.pipelines["sdxl_openpose"] = pipe
             return pipe
         except Exception as e:
-            logger.error(f"FAILED to load SDXL+OpenPose: {e}")
+            logger.error(f"FAILED to load SDXL+MultiControlNet: {e}")
             raise e
 
 manager = ModelManager()
@@ -320,17 +324,23 @@ async def animate_openpose(
         
         logger.info(f"  Using {len(selected)} skeleton frames from pre-made set.")
         
-        # Step 2: Load SDXL + OpenPose ControlNet and generate character in each pose
-        logger.info("Step 2/3: Loading SDXL + OpenPose ControlNet...")
+        # Step 2: Load SDXL + Multi-ControlNet and generate character in each pose
+        logger.info("Step 2/3: Loading SDXL + Multi-ControlNet...")
         pipe = manager.load_sdxl_openpose()
         
-        # Load anchor image for IP-Adapter reference
+        # Load anchor image for IP-Adapter + Canny ControlNet
         anchor_name = os.path.basename(image_url)
         anchor_path = os.path.join("output", anchor_name)
         if not os.path.exists(anchor_path):
             raise HTTPException(status_code=404, detail="Anchor image not found")
         anchor_image = load_image(anchor_path).convert("RGB")
         logger.info(f"  Loaded anchor image: {anchor_path}")
+        
+        # Generate Canny edge map from anchor for silhouette consistency
+        anchor_np = np.array(anchor_image.resize((512, 512)))
+        canny_edges = cv2.Canny(anchor_np, 50, 150)
+        canny_image = Image.fromarray(np.stack([canny_edges]*3, axis=-1))
+        logger.info("  Generated Canny edge map from anchor.")
         
         # Precompute IP-Adapter image embeddings ONCE
         logger.info("  Precomputing IP-Adapter embeddings from anchor...")
@@ -347,6 +357,7 @@ async def animate_openpose(
         
         seed = 42
         frame_urls = []
+        generated_frames = []
         for i in range(len(selected)):
             logger.info(f"  Generating frame {i+1}/{len(selected)}...")
             
@@ -356,21 +367,54 @@ async def animate_openpose(
                 torch.cuda.empty_cache()
                 gc.collect()
             
+            # Multi-ControlNet: [OpenPose skeleton, Canny anchor edges]
+            # OpenPose at 0.7 drives the pose, Canny at 0.3 constrains the silhouette
             image = pipe(
                 full_prompt,
                 negative_prompt=negative_prompt,
-                image=skeleton,
+                image=[skeleton, canny_image],
                 ip_adapter_image_embeds=image_embeds,
-                controlnet_conditioning_scale=0.8,
+                controlnet_conditioning_scale=[0.7, 0.3],
                 num_inference_steps=25,
                 generator=torch.Generator(device="cpu").manual_seed(seed)
             ).images[0]
             
             image = remove(image)
+            generated_frames.append(image)
+        
+        # Post-processing: Align all frames to consistent center
+        logger.info("  Aligning frames...")
+        max_w, max_h = 0, 0
+        bboxes = []
+        for img in generated_frames:
+            bbox = img.getbbox()
+            if bbox:
+                bboxes.append(bbox)
+                cw = bbox[2] - bbox[0]
+                ch = bbox[3] - bbox[1]
+                max_w = max(max_w, cw)
+                max_h = max(max_h, ch)
+            else:
+                bboxes.append((0, 0, img.width, img.height))
+                max_w = max(max_w, img.width)
+                max_h = max(max_h, img.height)
+        
+        # Add padding
+        pad = 10
+        canvas_w = max_w + pad * 2
+        canvas_h = max_h + pad * 2
+        
+        for i, (img, bbox) in enumerate(zip(generated_frames, bboxes)):
+            cropped = img.crop(bbox)
+            # Center on consistent canvas
+            aligned = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+            x = (canvas_w - cropped.width) // 2
+            y = canvas_h - cropped.height - pad  # Anchor to bottom (feet alignment)
+            aligned.paste(cropped, (x, y), cropped)
             
             frame_filename = f"frame_{session_id}_{i}.png"
             frame_path = os.path.join("output", frame_filename)
-            image.save(frame_path)
+            aligned.save(frame_path)
             frame_urls.append(f"/output/{frame_filename}")
         
         logger.info("Step 3/3: All frames generated.")
@@ -406,10 +450,14 @@ async def regenerate_frame(
         skel_name = os.path.basename(skeleton_url)
         skeleton = load_image(os.path.join("output", skel_name))
         
-        # Load anchor and precompute embeddings
+        # Load anchor and precompute embeddings + Canny edges
         anchor_name = os.path.basename(anchor_url)
         anchor_path = os.path.join("output", anchor_name)
         anchor_image = load_image(anchor_path).convert("RGB")
+        
+        anchor_np = np.array(anchor_image.resize((512, 512)))
+        canny_edges = cv2.Canny(anchor_np, 50, 150)
+        canny_image = Image.fromarray(np.stack([canny_edges]*3, axis=-1))
         
         image_embeds = pipe.prepare_ip_adapter_image_embeds(
             ip_adapter_image=anchor_image,
@@ -431,12 +479,13 @@ async def regenerate_frame(
         seed = random.randint(0, 2**32 - 1)
         logger.info(f"  Using seed {seed}")
         
+        # Multi-ControlNet: [OpenPose skeleton, Canny anchor edges]
         image = pipe(
             full_prompt,
             negative_prompt=negative_prompt,
-            image=skeleton,
+            image=[skeleton, canny_image],
             ip_adapter_image_embeds=image_embeds,
-            controlnet_conditioning_scale=0.8,
+            controlnet_conditioning_scale=[0.7, 0.3],
             num_inference_steps=25,
             generator=torch.Generator(device="cpu").manual_seed(seed)
         ).images[0]
