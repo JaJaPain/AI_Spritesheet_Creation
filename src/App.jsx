@@ -3,8 +3,9 @@ import { Sparkles, Wand2, Play, Download, Settings, Image as ImageIcon, Loader2,
 import { motion, AnimatePresence } from 'framer-motion'
 
 function App() {
-  const [apiBase, setApiBase] = useState('http://localhost:8000')
+  const [apiBase, setApiBase] = useState(null)
   const [stage, setStage] = useState('prompt') // prompt, selecting-anchor, animating, editing, preview
+  const [apiReady, setApiReady] = useState(false)
 
   useEffect(() => {
     const discover = async () => {
@@ -13,11 +14,14 @@ function App() {
           const res = await fetch(`http://localhost:${p}/`, { method: 'GET' });
           const data = await res.json();
           if (data.status === 'active') {
+            console.log(`SpriteForge backend found on port ${p}`);
             setApiBase(`http://localhost:${p}`);
+            setApiReady(true);
             return;
           }
         } catch (e) {}
       }
+      console.warn('No SpriteForge backend found on ports 8000-8010');
     }
     discover();
   }, [])
@@ -36,17 +40,18 @@ function App() {
   const [animFrame, setAnimFrame] = useState(0)
   const [hasSavedAnchor, setHasSavedAnchor] = useState(false)
 
-  // Check for saved anchor on mount
+  // Check for saved anchor ONLY after discovery completes
   useEffect(() => {
+    if (!apiReady || !apiBase) return;
     const check = async () => {
-      if (!apiBase) return
       try {
         const res = await fetch(`${apiBase}/load-anchor`);
         if (res.ok) setHasSavedAnchor(true);
-      } catch (e) {}
+        else setHasSavedAnchor(false);
+      } catch (e) { setHasSavedAnchor(false); }
     }
     check();
-  }, [apiBase])
+  }, [apiReady, apiBase])
 
   // Animation preview timer
   const animRef = useRef(null)
@@ -262,7 +267,7 @@ function App() {
                   className="btn-primary" 
                   style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem 2rem' }}
                   onClick={handleForgeAnchor}
-                  disabled={!prompt.trim()}
+                  disabled={!prompt.trim() || !apiReady}
                 >
                   <Wand2 size={18} />
                   Forge Anchor
