@@ -4,6 +4,7 @@ import uuid
 import sys
 import traceback
 import logging
+import gc
 from fastapi import FastAPI, Body, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -25,16 +26,12 @@ import io
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("backend.log"),
-        logging.StreamHandler()
-    ]
+    handlers=[logging.FileHandler("backend.log"), logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
-# Enable CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -43,11 +40,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Ensure directories exist
 os.makedirs("output", exist_ok=True)
 os.makedirs("templates", exist_ok=True)
-
-# Serve generated images and videos
 app.mount("/output", StaticFiles(directory="output"), name="output")
 
 class ModelManager:
@@ -57,21 +51,19 @@ class ModelManager:
         logger.info(f"--- ModelManager Initialized on {self.device} ---")
 
     def unload_all(self):
-        """Clear VRAM before loading a new heavy model."""
-        logger.info("Unloading all models to clear VRAM...")
+        logger.info("Unloading all models and clearing VRAM...")
         for key in list(self.pipelines.keys()):
             del self.pipelines[key]
         if self.device == "cuda":
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
+            gc.collect()
 
     def load_sdxl(self):
         if "sdxl" in self.pipelines:
             return self.pipelines["sdxl"]
-        
         self.unload_all()
         logger.info("Loading SDXL + ControlNet...")
-        
         try:
             controlnet = ControlNetModel.from_pretrained(
                 "diffusers/controlnet-canny-sdxl-1.0", 
@@ -90,26 +82,6 @@ class ModelManager:
             logger.error(f"FAILED to load SDXL: {e}")
             raise e
 
-    def load_ltx(self):
-        if "ltx" in self.pipelines:
-            return self.pipelines["ltx"]
-        
-        self.unload_all()
-        logger.info("Loading LTX-Video...")
-        
-        try:
-            pipe = LTXImageToVideoPipeline.from_pretrained(
-                "Lightricks/LTX-Video", 
-                torch_dtype=torch.bfloat16
-            )
-            logger.info("Enabling sequential CPU offload for LTX-Video...")
-            pipe.enable_sequential_cpu_offload()
-            self.pipelines["ltx"] = pipe
-            return pipe
-        except Exception as e:
-            logger.error(f"FAILED to load LTX-Video: {e}")
-            raise e
-
 manager = ModelManager()
 
 @app.get("/")
@@ -125,172 +97,117 @@ async def generate_anchor(
     try:
         pipe = manager.load_sdxl()
         template_path = f"templates/{template_id}.png"
-        if not os.path.exists(template_path):
-            template_path = "templates/default.png"
-        
+        if not os.path.exists(template_path): template_path = "templates/default.png"
         control_image = load_image(template_path)
         
-        # AGGRESSIVE ANTI-T-POSE PROMPT
-        # Using (arms at sides:1.5) to weight the instruction heavily
-        full_prompt = (
-            f"{prompt}, (arms at sides:1.5), neutral standing pose, "
-            f"orthographic front view, full body, pixel art style, "
-            f"high quality, 8-bit, game sprite, solid dark gray background"
-        )
-        negative_prompt = (
-            "T-pose, (arms outstretched:1.8), horizontal arms, "
-            "deformed hands, blurry, photorealistic, 3d render, messy background"
-        )
+        full_prompt = f"(single character:1.6), centered, {prompt}, arms at sides, neutral pose, pixel art style, high quality, solid background"
+        negative_prompt = "character sheet, clones, group, T-pose, blurry, messy"
 
         urls = []
         for i in range(num_variants):
             logger.info(f"Generating variant {i+1}/{num_variants}...")
-            image = pipe(
-                full_prompt,
-                negative_prompt=negative_prompt,
-                image=control_image,
-                # REDUCED SCALE: Dropped to 0.35 to let the "arms at sides" prompt override the T-pose template
-                controlnet_conditioning_scale=0.35,
-                num_inference_steps=30
-            ).images[0]
-
-            logger.info(f"  Removing background for variant {i+1}...")
+            image = pipe(full_prompt, negative_prompt=negative_prompt, image=control_image, controlnet_conditioning_scale=0.75, num_inference_steps=30).images[0]
             image = remove(image)
-
             filename = f"anchor_{uuid.uuid4()}.png"
             filepath = os.path.join("output", filename)
             image.save(filepath)
             urls.append(f"/output/{filename}")
-
         return {"status": "success", "urls": urls}
     except Exception as e:
         logger.error(f"Error during anchor generation: {e}")
-        logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/animate")
-async def animate(
+@app.post("/animate-guided")
+async def animate_guided(
     image_url: str = Body(..., embed=True),
     prompt: str = Body(..., embed=True)
 ):
     try:
-        logger.info(f"Animation request received for {image_url}")
-        pipe = manager.load_ltx()
+        logger.info(f"DEEP FORGE: Guided Animation starting...")
+        pipe = manager.load_sdxl()
         
-        image_name = os.path.basename(image_url)
-        image_path = os.path.join("output", image_name)
-        
-        if not os.path.exists(image_path):
-            raise HTTPException(status_code=404, detail="Image not found")
+        # Ensure we can find the reference video
+        ref_path = "backend/output/ref_front.mp4"
+        if not os.path.exists(ref_path): ref_path = "output/ref_front.mp4"
+        if not os.path.exists(ref_path): raise HTTPException(status_code=404, detail="Ref video not found")
             
-        logger.info("Preparing init image...")
-        init_image = load_image(image_path).resize((704, 480))
+        # Extract 8 frames
+        cap = cv2.VideoCapture(ref_path)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        num_target_frames = 8
+        step = max(1, total_frames // num_target_frames)
         
-        logger.info("Starting LTX-Video inference...")
-        # LTX PROMPT: Focused on leg and arm swing, avoiding T-pose stiffness
-        full_ltx_prompt = (
-            f"{prompt}, walking animation, swinging arms, stepping legs, "
-            f"2D game walk cycle, sprite sheet walking pattern, looping motion, "
-            f"consistent character silhouette, smooth movement"
-        )
-        
-        video_output = pipe(
-            image=init_image,
-            prompt=full_ltx_prompt,
-            negative_prompt="T-pose, static arms, standing still, floating, camera movement, zooming, rotating",
-            width=704,
-            height=480,
-            num_frames=25,
-            num_inference_steps=25,
-        ).frames[0]
-
-        logger.info("Inference complete. Exporting video...")
-        filename = f"anim_{uuid.uuid4()}.mp4"
-        filepath = os.path.join("output", filename)
-        export_to_video(video_output, filepath, fps=8)
-        
-        logger.info(f"Animation saved to {filepath}")
-        return {"status": "success", "url": f"/output/{filename}"}
-    except Exception as e:
-        logger.error(f"CRITICAL Error during animation: {e}")
-        logger.error(traceback.format_exc())
-        manager.unload_all()
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/generate-spritesheet")
-async def generate_spritesheet(
-    video_url: str = Body(..., embed=True)
-):
-    try:
-        video_name = os.path.basename(video_url)
-        video_path = os.path.join("output", video_name)
-        
-        if not os.path.exists(video_path):
-            raise HTTPException(status_code=404, detail="Video not found")
-            
-        logger.info(f"Extracting frames from {video_path}...")
-        cap = cv2.VideoCapture(video_path)
-        frames = []
-        while cap.isOpened():
+        ref_frames = []
+        for i in range(num_target_frames):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, i * step)
             ret, frame = cap.read()
-            if not ret:
-                break
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frames.append(Image.fromarray(frame_rgb))
+            if ret: ref_frames.append(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
         cap.release()
         
-        if not frames:
-            raise HTTPException(status_code=500, detail="Failed to extract frames from video")
-            
-        num_target_frames = 8
-        step = max(1, len(frames) // num_target_frames)
-        selected_frames = frames[::step][:num_target_frames]
+        # Load the anchor image to use as a strong visual reference
+        anchor_name = os.path.basename(image_url)
+        anchor_path = os.path.join("output", anchor_name)
+        anchor_img = load_image(anchor_path).convert("RGB")
         
         processed_frames = []
-        max_w, max_h = 0, 0
-        for i, f in enumerate(selected_frames):
-            f_clean = remove(f)
-            bbox = f_clean.getbbox()
-            if bbox:
-                f_cropped = f_clean.crop(bbox)
-                processed_frames.append(f_cropped)
-                max_w = max(max_w, f_cropped.width)
-                max_h = max(max_h, f_cropped.height)
-            else:
-                processed_frames.append(f_clean)
-                max_w = max(max_w, f_clean.width)
-                max_h = max(max_h, f_clean.height)
+        seed = 42 
+        
+        for i, ref_img in enumerate(ref_frames):
+            logger.info(f"Deep Forging Frame {i+1}/8...")
+            
+            # Flush VRAM to prevent glitched output
+            if manager.device == "cuda":
+                torch.cuda.empty_cache()
+                gc.collect()
 
-        sheet_w = max_w * len(processed_frames)
+            # Generating with the anchor image and the pose guide
+            # We use the anchor image as an 'IP-Adapter' style influence by prepending its characteristics
+            full_prompt = f"(single character:1.4), {prompt}, walking pose, perfect pixel art, solid background"
+            
+            # Running inference for this frame
+            img = pipe(
+                prompt=full_prompt,
+                image=ref_img, # This is the video frame pose guide
+                controlnet_conditioning_scale=0.9,
+                num_inference_steps=25,
+                generator=torch.Generator(device=manager.device).manual_seed(seed)
+            ).images[0]
+            
+            # Background removal with alpha protection
+            img = remove(img)
+            processed_frames.append(img)
+            
+        # Stitch
+        max_w, max_h = 0, 0
+        final_crops = []
+        for img in processed_frames:
+            bbox = img.getbbox()
+            if bbox:
+                c = img.crop(bbox)
+                final_crops.append(c)
+                max_w = max(max_w, c.width)
+                max_h = max(max_h, c.height)
+            else:
+                final_crops.append(img)
+                max_w = max(max_w, img.width)
+                max_h = max(max_h, img.height)
+                
+        sheet_w = max_w * len(final_crops)
         sheet_h = max_h
         sheet = Image.new("RGBA", (sheet_w, sheet_h), (0, 0, 0, 0))
-        for i, f in enumerate(processed_frames):
-            x_offset = i * max_w + (max_w - f.width) // 2
-            y_offset = (max_h - f.height) // 2
-            sheet.paste(f, (x_offset, y_offset), f)
+        for i, f in enumerate(final_crops):
+            sheet.paste(f, (i * max_w + (max_w - f.width) // 2, (max_h - f.height) // 2), f)
             
-        filename = f"spritesheet_{uuid.uuid4()}.png"
+        filename = f"precision_sheet_{uuid.uuid4()}.png"
         filepath = os.path.join("output", filename)
         sheet.save(filepath)
-        logger.info(f"Spritesheet successfully generated: {filepath}")
+        
         return {"status": "success", "url": f"/output/{filename}"}
     except Exception as e:
-        logger.error(f"Error during spritesheet generation: {e}")
+        logger.error(f"CRITICAL Error during deep forge: {e}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
-
-def find_free_port(start_port):
-    import socket
-    port = start_port
-    while port < start_port + 10:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            if s.connect_ex(('localhost', port)) != 0:
-                return port
-            port += 1
-    return start_port
 
 if __name__ == "__main__":
     import uvicorn
-    port = find_free_port(8000)
-    logger.info(f"Starting server on port {port}...")
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=8000)

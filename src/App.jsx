@@ -1,39 +1,35 @@
 import React, { useState, useEffect } from 'react'
 import { Sparkles, Wand2, Play, Download, Settings, Image as ImageIcon, Loader2, ArrowLeft, RefreshCw } from 'lucide-react'
-import { motion, AnimatePresence } from 'framer-motion'
 
 function App() {
   const [apiBase, setApiBase] = useState('http://localhost:8000')
-  const [stage, setStage] = useState('prompt') // prompt, selecting-anchor, animating, preview
+  const [stage, setStage] = useState('prompt') // prompt, selecting-anchor, preview
+  const [prompt, setPrompt] = useState('female high elf wearing leather armor')
+  const [variants, setVariants] = useState([])
+  const [loading, setLoading] = useState(false)
+  const [status, setStatus] = useState('Idle')
+  const [selectedAnchor, setSelectedAnchor] = useState(null)
+  const [videoUrl, setVideoUrl] = useState(null)
+  const [spritesheetUrl, setSpritesheetUrl] = useState(null)
 
   useEffect(() => {
     const discover = async () => {
-      for (let p = 8000; p <= 8010; p++) {
+      for (let p = 8000; p <= 8005; p++) {
         try {
           const res = await fetch(`http://localhost:${p}/`, { method: 'GET' });
           const data = await res.json();
-          if (data.status === 'active') {
-            setApiBase(`http://localhost:${p}`);
-            return;
-          }
+          if (data.status === 'active') { setApiBase(`http://localhost:${p}`); return; }
         } catch (e) {}
       }
     }
     discover();
   }, [])
-  const [prompt, setPrompt] = useState('')
-  const [variants, setVariants] = useState([])
-  const [loading, setLoading] = useState(false)
-  const [isGeneratingSheet, setIsGeneratingSheet] = useState(false)
-  const [selectedAnchor, setSelectedAnchor] = useState(null)
-  const [videoUrl, setVideoUrl] = useState(null)
-  const [spritesheetUrl, setSpritesheetUrl] = useState(null)
 
   const handleForgeAnchor = async () => {
-    setLoading(true)
-    setStage('selecting-anchor')
-    setVariants([]) // Clear previous variants
-    
+    setLoading(true);
+    setStatus('Forging 4 Variants (Running SDXL + ControlNet)...');
+    setStage('selecting-anchor');
+    setVariants([]);
     try {
       const response = await fetch(`${apiBase}/generate-anchor`, {
         method: 'POST',
@@ -43,275 +39,155 @@ function App() {
       const data = await response.json();
       if (data.status === 'success') {
         setVariants(data.urls.map(url => `${apiBase}${url}`));
+        setStatus('Select your favorite anchor below.');
       }
     } catch (error) {
-      console.error("Error forging anchor:", error);
+      setStatus('Error forging anchors. Check backend log.');
     } finally {
-      setLoading(false)
+      setLoading(false);
     }
   }
 
-  const handleAnimate = async () => {
-    setLoading(true)
-    
+  const handleAnimateGuided = async () => {
+    setLoading(true);
+    setStatus('Precision Forging: Running 8-frame ControlNet cycle using YouTube reference...');
     try {
-      const response = await fetch(`${apiBase}/animate`, {
+      const response = await fetch(`${apiBase}/animate-guided`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          image_url: selectedAnchor,
-          prompt: `${prompt}, walking forward, consistent animation, game sprite`
-        })
+        body: JSON.stringify({ image_url: selectedAnchor, prompt: prompt })
       });
       const data = await response.json();
-      if (data.status === 'success') {
-        setVideoUrl(`${apiBase}${data.url}`);
-        setStage('preview');
-      }
-    } catch (error) {
-      console.error("Error animating:", error);
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const handleGenerateSpritesheet = async () => {
-    setIsGeneratingSheet(true)
-    try {
-      const response = await fetch(`${apiBase}/generate-spritesheet`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ video_url: videoUrl })
-      });
-      const data = await response.json();
-      if (data.status === 'success') {
+      if (data.url) {
         setSpritesheetUrl(`${apiBase}${data.url}`);
+        setStage('preview');
+        setStatus('Success! Your 8-frame walk cycle is ready.');
       }
     } catch (error) {
-      console.error("Error generating spritesheet:", error);
+      setStatus('Error during guided animation.');
     } finally {
-      setIsGeneratingSheet(false)
+      setLoading(false);
     }
-  }
-
-  const selectAnchor = (variant) => {
-    setSelectedAnchor(variant)
-    setStage('animating')
   }
 
   const reset = () => {
-    setStage('prompt')
-    setPrompt('')
-    setVariants([])
-    setSelectedAnchor(null)
-    setVideoUrl(null)
-    setSpritesheetUrl(null)
+    setStage('prompt');
+    setVariants([]);
+    setSelectedAnchor(null);
+    setVideoUrl(null);
+    setSpritesheetUrl(null);
+    setStatus('Ready to forge.');
   }
 
   return (
-    <div className="app-container">
-      <header className="fade-in" style={{ textAlign: 'center', marginBottom: '4rem' }}>
-        <h1 style={{ fontSize: '3.5rem', fontWeight: 800, marginBottom: '1rem', cursor: 'pointer' }} onClick={reset}>
-          Sprite<span className="gradient-text">Forge</span>
+    <div style={{ minHeight: '100vh', background: '#0a0a0a', color: 'white', padding: '2rem', fontFamily: 'Inter, system-ui' }}>
+      
+      {/* HEADER */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '3rem' }}>
+        <h1 style={{ margin: 0, fontSize: '1.5rem', fontWeight: 800, letterSpacing: '-0.05em' }}>
+          SPRITEFORGE <span style={{ color: '#6366f1' }}>AI</span>
         </h1>
-        <p style={{ color: 'var(--text-dim)', fontSize: '1.2rem', maxWidth: '600px', margin: '0 auto' }}>
-          Turn your ideas into fully animated, game-ready sprite sheets using advanced AI.
-        </p>
-      </header>
+        <div style={{ background: '#1a1a1a', padding: '0.5rem 1rem', borderRadius: '20px', fontSize: '0.8rem', color: '#888' }}>
+          Status: <span style={{ color: '#fff' }}>{status}</span>
+        </div>
+      </div>
 
-      <main>
-        <AnimatePresence mode="wait">
-          {stage === 'prompt' && (
-            <motion.div 
-              key="prompt"
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -20 }}
-              className="glass-card"
-              style={{ maxWidth: '800px', margin: '0 auto' }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1.5rem' }}>
-                <Sparkles size={20} color="var(--accent-primary)" />
-                <h2 style={{ fontSize: '1.5rem' }}>Imagine your Character</h2>
+      {/* STAGE: PROMPT */}
+      {stage === 'prompt' && (
+        <div style={{ maxWidth: '600px', margin: '0 auto', textAlign: 'center' }}>
+          <h2 style={{ fontSize: '2.5rem', marginBottom: '1rem' }}>Forge Your Hero</h2>
+          <textarea 
+            style={{ width: '100%', padding: '1rem', background: '#1a1a1a', border: '1px solid #333', borderRadius: '12px', color: 'white', fontSize: '1.1rem', marginBottom: '1.5rem', height: '100px' }}
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+          />
+          <button 
+            onClick={handleForgeAnchor}
+            disabled={loading}
+            style={{ width: '100%', padding: '1rem', background: '#6366f1', border: 'none', borderRadius: '12px', color: 'white', fontWeight: 700, fontSize: '1.1rem', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem' }}
+          >
+            {loading ? <Loader2 className="animate-spin" size={20} /> : <Wand2 size={20} />}
+            {loading ? 'Working...' : 'Forge Character Anchors'}
+          </button>
+        </div>
+      )}
+
+      {/* STAGE: SELECTION */}
+      {stage === 'selecting-anchor' && (
+        <div>
+          <div style={{ display: 'flex', gap: '1rem', marginBottom: '2rem' }}>
+            <button onClick={reset} style={{ background: 'none', border: '1px solid #333', color: 'white', padding: '0.5rem 1rem', borderRadius: '8px', cursor: 'pointer' }}>← Back</button>
+            <h2 style={{ margin: 0 }}>Choose Your Anchor</h2>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '1.5rem' }}>
+            {loading && variants.length === 0 && [1,2,3,4].map(i => (
+              <div key={i} style={{ height: '300px', background: '#1a1a1a', borderRadius: '12px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <Loader2 className="animate-spin" size={40} color="#333" />
               </div>
-              
-              <textarea 
-                placeholder="Describe your character (e.g., 'A cyberpunk ronin with a neon katana, pixel art style, south facing, neutral pose')"
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                style={{ height: '120px', resize: 'none', marginBottom: '2rem' }}
-              />
-
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div style={{ display: 'flex', gap: '1rem' }}>
-                  <button className="btn-secondary" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    <Settings size={18} />
-                    Options
-                  </button>
-                </div>
-                <button 
-                  className="btn-primary" 
-                  style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem 2rem' }}
-                  onClick={handleForgeAnchor}
-                  disabled={!prompt.trim()}
-                >
-                  <Wand2 size={18} />
-                  Forge Anchor
+            ))}
+            {variants.map((url, i) => (
+              <div 
+                key={i} 
+                onClick={() => setSelectedAnchor(url)}
+                style={{ 
+                  background: '#1a1a1a', 
+                  borderRadius: '12px', 
+                  padding: '1rem', 
+                  cursor: 'pointer', 
+                  border: selectedAnchor === url ? '2px solid #6366f1' : '2px solid transparent',
+                  transition: '0.2s'
+                }}
+              >
+                <img src={url} alt="Variant" style={{ width: '100%', height: 'auto', borderRadius: '8px' }} />
+                <button style={{ width: '100%', marginTop: '1rem', padding: '0.5rem', background: selectedAnchor === url ? '#6366f1' : '#333', border: 'none', color: 'white', borderRadius: '6px' }}>
+                  {selectedAnchor === url ? 'SELECTED' : `Variant ${i+1}`}
                 </button>
               </div>
-            </motion.div>
-          )}
+            ))}
+          </div>
 
-          {stage === 'selecting-anchor' && (
-            <motion.div
-              key="selecting-anchor"
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 1.05 }}
-              style={{ textAlign: 'center' }}
-            >
-              <h2 style={{ marginBottom: '2rem' }}>Select your <span className="gradient-text">Base Sprite</span></h2>
-              
-              {loading && variants.length === 0 ? (
-                <div style={{ padding: '4rem' }}>
-                  <motion.div
-                    animate={{ rotate: 360 }}
-                    transition={{ repeat: Infinity, duration: 2, ease: 'linear' }}
-                    style={{ marginBottom: '1rem', display: 'flex', justifyContent: 'center' }}
-                  >
-                    <Loader2 size={48} color="var(--accent-primary)" />
-                  </motion.div>
-                  <p>Forging variants from your prompt...</p>
-                  <p style={{ fontSize: '0.8rem', color: 'var(--text-dim)', marginTop: '0.5rem' }}>This uses deep learning to generate 4 unique versions</p>
-                </div>
-              ) : (
-                <div style={{ 
-                  display: 'grid', 
-                  gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', 
-                  gap: '1.5rem',
-                  marginBottom: '3rem',
-                  maxWidth: '1200px',
-                  margin: '0 auto 3rem'
-                }}>
-                  {variants.map((v, i) => (
-                    <motion.div 
-                      key={i} 
-                      className="glass-card" 
-                      style={{ padding: '0', overflow: 'hidden', cursor: 'pointer', height: '380px', display: 'flex', flexDirection: 'column' }}
-                      whileHover={{ scale: 1.02 }}
-                      onClick={() => selectAnchor(v)}
-                    >
-                      <div style={{ flex: 1, background: 'rgba(255,255,255,0.02)', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', padding: '1rem' }}>
-                        <img src={v} alt={`Variant ${i}`} style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', imageRendering: 'pixelated' }} />
-                      </div>
-                      <div style={{ padding: '1rem', borderTop: '1px solid var(--glass-border)' }}>
-                        <button className="btn-secondary" style={{ width: '100%' }}>Select Variant {i + 1}</button>
-                      </div>
-                    </motion.div>
-                  ))}
-                  {loading && (
-                     <div className="glass-card" style={{ height: '380px', display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: '1rem' }}>
-                        <Loader2 size={32} className="animate-spin" color="var(--accent-primary)" />
-                        <p style={{ fontSize: '0.9rem', color: 'var(--text-dim)' }}>Forging next variant...</p>
-                     </div>
-                  )}
-                </div>
-              )}
-              {!loading && <button className="btn-secondary" onClick={() => setStage('prompt')}>Back to Prompt</button>}
-            </motion.div>
+          {selectedAnchor && (
+            <div style={{ position: 'fixed', bottom: '2rem', left: '50%', transform: 'translateX(-50%)', background: '#1a1a1a', padding: '1rem 2rem', borderRadius: '50px', border: '1px solid #333', boxShadow: '0 10px 30px rgba(0,0,0,0.5)', display: 'flex', gap: '1rem', alignItems: 'center' }}>
+              <span style={{ fontSize: '0.9rem', color: '#888' }}>Step 2:</span>
+              <button 
+                onClick={handleAnimateGuided}
+                disabled={loading}
+                style={{ padding: '0.75rem 1.5rem', background: 'linear-gradient(135deg, #f59e0b 0%, #ef4444 100%)', border: 'none', borderRadius: '25px', color: 'white', fontWeight: 700, cursor: 'pointer' }}
+              >
+                {loading ? 'Processing Frames...' : 'Precision Forge (Perfect Walk)'}
+              </button>
+            </div>
           )}
+        </div>
+      )}
 
-          {stage === 'animating' && (
-            <motion.div
-              key="animating"
-              initial={{ opacity: 0, x: 20 }}
-              animate={{ opacity: 1, x: 0 }}
-              className="glass-card"
-              style={{ maxWidth: '600px', margin: '0 auto', textAlign: 'center' }}
-            >
-              <h2 style={{ marginBottom: '1.5rem' }}>Next: <span className="gradient-text">Add Motion</span></h2>
-              <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '2rem' }}>
-                <img src={selectedAnchor} alt="Selected" style={{ width: '128px', height: '128px', border: '1px solid var(--glass-border)', borderRadius: '12px', padding: '1rem', background: '#111', imageRendering: 'pixelated' }} />
-              </div>
-              
-              {loading ? (
-                <div style={{ padding: '2rem' }}>
-                  <motion.div
-                    animate={{ rotate: 360 }}
-                    transition={{ repeat: Infinity, duration: 2, ease: 'linear' }}
-                    style={{ marginBottom: '1rem', display: 'flex', justifyContent: 'center' }}
-                  >
-                    <Loader2 size={48} color="var(--accent-secondary)" />
-                  </motion.div>
-                  <p>Generating walk cycle video...</p>
-                  <p style={{ fontSize: '0.8rem', color: 'var(--text-dim)', marginTop: '0.5rem' }}>This may take 1-2 minutes on local hardware</p>
-                </div>
-              ) : (
-                <>
-                  <p style={{ color: 'var(--text-dim)', marginBottom: '2rem' }}>
-                    We'll now generate a walk cycle video based on this anchor image.
-                  </p>
-                  <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}>
-                    <button className="btn-secondary" onClick={() => setStage('selecting-anchor')}>
-                      <ArrowLeft size={18} style={{ marginRight: '0.5rem' }} /> Back
-                    </button>
-                    <button className="btn-primary" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }} onClick={handleAnimate}>
-                      <Play size={18} />
-                      Animate Walk Cycle
-                    </button>
-                  </div>
-                </>
-              )}
-            </motion.div>
-          )}
+      {/* STAGE: PREVIEW */}
+      {stage === 'preview' && (
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ display: 'flex', gap: '1rem', marginBottom: '2rem' }}>
+            <button onClick={() => setStage('selecting-anchor')} style={{ background: 'none', border: '1px solid #333', color: 'white', padding: '0.5rem 1rem', borderRadius: '8px', cursor: 'pointer' }}>← Back</button>
+            <h2 style={{ margin: 0 }}>Your Final Sprite</h2>
+          </div>
 
-          {stage === 'preview' && (
-            <motion.div
-              key="preview"
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="glass-card"
-              style={{ maxWidth: '800px', margin: '0 auto', textAlign: 'center' }}
-            >
-              <h2 style={{ marginBottom: '1.5rem' }}>{spritesheetUrl ? 'Final' : 'Animation'} <span className="gradient-text">{spritesheetUrl ? 'Sprite Sheet' : 'Preview'}</span></h2>
-              <div style={{ background: '#000', borderRadius: '12px', padding: '1rem', marginBottom: '2rem', overflow: 'hidden', minHeight: '300px', maxHeight: '500px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                {spritesheetUrl ? (
-                  <div style={{ overflowX: 'auto', width: '100%' }}>
-                    <img src={spritesheetUrl} alt="Spritesheet" style={{ height: '200px', imageRendering: 'pixelated', maxWidth: 'none' }} />
-                  </div>
-                ) : (
-                  <video src={videoUrl} autoPlay loop muted style={{ maxHeight: '100%', maxWidth: '100%', borderRadius: '8px' }} />
-                )}
-              </div>
-              <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}>
-                <button className="btn-secondary" onClick={() => { setStage('animating'); setSpritesheetUrl(null); }}>
-                  <RefreshCw size={18} style={{ marginRight: '0.5rem' }} /> Re-generate
-                </button>
-                {spritesheetUrl ? (
-                  <a href={spritesheetUrl} download="spritesheet.png" className="btn-primary" style={{ textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem 2rem' }}>
-                    <Download size={18} />
-                    Download Sprite Sheet
-                  </a>
-                ) : (
-                  <button 
-                    className="btn-primary" 
-                    style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem 2rem' }} 
-                    onClick={handleGenerateSpritesheet} 
-                    disabled={isGeneratingSheet}
-                  >
-                    {isGeneratingSheet ? <Loader2 size={18} className="animate-spin" /> : <Download size={18} />}
-                    {isGeneratingSheet ? 'Forging Sheet...' : 'Generate Sprite Sheet'}
-                  </button>
-                )}
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </main>
+          <div style={{ background: '#1a1a1a', padding: '3rem', borderRadius: '24px', display: 'inline-block', marginBottom: '2rem' }}>
+            <img src={spritesheetUrl} alt="Final Sprite" style={{ maxWidth: '100%', imageRendering: 'pixelated' }} />
+          </div>
 
-      <footer style={{ marginTop: '5rem', textAlign: 'center', color: 'var(--text-dim)', fontSize: '0.9rem' }}>
-        <p>© 2026 SpriteForge AI Pipeline • Powered by Local AI</p>
-      </footer>
+          <div style={{ display: 'flex', justifyContent: 'center', gap: '1rem' }}>
+            <a href={spritesheetUrl} download="spritesheet.png" style={{ textDecoration: 'none', padding: '1rem 2rem', background: '#6366f1', borderRadius: '12px', color: 'white', fontWeight: 700 }}>Download Sprite Sheet</a>
+            <button onClick={reset} style={{ padding: '1rem 2rem', background: '#333', border: 'none', borderRadius: '12px', color: 'white', fontWeight: 700, cursor: 'pointer' }}>Start Over</button>
+          </div>
+        </div>
+      )}
+
+      {/* FOOTER STATUS */}
+      {loading && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <Loader2 className="animate-spin" size={60} color="#6366f1" />
+          <p style={{ marginTop: '1.5rem', fontSize: '1.2rem', fontWeight: 500 }}>{status}</p>
+        </div>
+      )}
     </div>
   )
 }
