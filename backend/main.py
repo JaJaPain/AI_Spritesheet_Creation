@@ -139,12 +139,12 @@ class ModelManager:
                 torch_dtype=torch.float16,
                 use_safetensors=True
             )
-            # Load IP-Adapter weights
-            logger.info("Loading IP-Adapter for character identity preservation...")
+            # Load IP-Adapter Plus (matches ViT-H encoder, better character fidelity)
+            logger.info("Loading IP-Adapter Plus for character identity preservation...")
             pipe.load_ip_adapter(
                 "h94/IP-Adapter", 
                 subfolder="sdxl_models", 
-                weight_name="ip-adapter_sdxl.bin"
+                weight_name="ip-adapter-plus_sdxl_vit-h.safetensors"
             )
             pipe.set_ip_adapter_scale(0.6)
             pipe.enable_model_cpu_offload()
