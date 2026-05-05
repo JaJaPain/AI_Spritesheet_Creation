@@ -19,6 +19,8 @@ from diffusers import (
 )
 from diffusers.utils import load_image, export_to_video
 from rembg import remove
+from controlnet_aux import OpenposeDetector
+import gc
 import io
 
 # Setup logging
@@ -110,6 +112,32 @@ class ModelManager:
             logger.error(f"FAILED to load LTX-Video: {e}")
             raise e
 
+    def load_sdxl_openpose(self):
+        """Load SDXL with OpenPose ControlNet for pose-guided generation."""
+        if "sdxl_openpose" in self.pipelines:
+            return self.pipelines["sdxl_openpose"]
+        
+        self.unload_all()
+        logger.info("Loading SDXL + OpenPose ControlNet...")
+        
+        try:
+            controlnet = ControlNetModel.from_pretrained(
+                "thibaud/controlnet-openpose-sdxl-1.0", 
+                torch_dtype=torch.float16
+            )
+            pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
+                "stabilityai/stable-diffusion-xl-base-1.0",
+                controlnet=controlnet,
+                torch_dtype=torch.float16,
+                use_safetensors=True
+            )
+            pipe.enable_model_cpu_offload()
+            self.pipelines["sdxl_openpose"] = pipe
+            return pipe
+        except Exception as e:
+            logger.error(f"FAILED to load SDXL+OpenPose: {e}")
+            raise e
+
 manager = ModelManager()
 
 @app.get("/")
@@ -195,6 +223,115 @@ async def animate(
         return {"status": "success", "url": f"/output/{filename}"}
     except Exception as e:
         logger.error(f"CRITICAL Error during animation: {e}")
+        logger.error(traceback.format_exc())
+        manager.unload_all()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/animate-openpose")
+async def animate_openpose(
+    image_url: str = Body(..., embed=True),
+    prompt: str = Body(..., embed=True),
+    reference_video: str = Body("ref_front.mp4", embed=True),
+    num_frames: int = Body(8, embed=True)
+):
+    """Generate a walk/attack/death cycle using OpenPose skeletons from any reference video."""
+    try:
+        logger.info(f"OpenPose animation requested for {image_url} using ref={reference_video}")
+        
+        # Find the reference video — supports dropping new videos into output/
+        ref_path = None
+        for candidate in [f"output/{reference_video}", f"backend/output/{reference_video}"]:
+            if os.path.exists(candidate):
+                ref_path = candidate
+                break
+        if not ref_path:
+            raise HTTPException(status_code=404, detail=f"Reference video {reference_video} not found in output/")
+        
+        # Step 1: Extract 8 evenly-spaced frames from the reference video
+        logger.info("Step 1/4: Extracting reference frames...")
+        cap = cv2.VideoCapture(ref_path)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        num_target = num_frames
+        step = max(1, total_frames // num_target)
+        
+        ref_frames = []
+        for i in range(num_target):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, i * step)
+            ret, frame = cap.read()
+            if ret:
+                ref_frames.append(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
+        cap.release()
+        logger.info(f"  Extracted {len(ref_frames)} reference frames.")
+        
+        # Step 2: Generate OpenPose skeletons from the reference frames
+        logger.info("Step 2/4: Generating OpenPose skeletons...")
+        openpose = OpenposeDetector.from_pretrained("lllyasviel/ControlNet")
+        skeleton_images = []
+        for i, ref in enumerate(ref_frames):
+            pose = openpose(ref)
+            skeleton_images.append(pose)
+            logger.info(f"  Skeleton {i+1}/{len(ref_frames)} done.")
+        
+        # Step 3: Load SDXL + OpenPose ControlNet and generate character in each pose
+        logger.info("Step 3/4: Loading SDXL + OpenPose ControlNet...")
+        pipe = manager.load_sdxl_openpose()
+        
+        full_prompt = f"{prompt}, pixel art style, game sprite, full body, solid dark gray background"
+        negative_prompt = "photorealistic, 3d render, blurry, deformed, messy background, multiple characters"
+        
+        seed = 42
+        generated_frames = []
+        for i, skeleton in enumerate(skeleton_images):
+            logger.info(f"  Generating frame {i+1}/{len(skeleton_images)}...")
+            
+            # Clear VRAM between frames to prevent memory buildup
+            if manager.device == "cuda":
+                torch.cuda.empty_cache()
+                gc.collect()
+            
+            image = pipe(
+                full_prompt,
+                negative_prompt=negative_prompt,
+                image=skeleton,
+                controlnet_conditioning_scale=0.8,
+                num_inference_steps=25,
+                generator=torch.Generator(device="cpu").manual_seed(seed)
+            ).images[0]
+            
+            # Remove background
+            image = remove(image)
+            generated_frames.append(image)
+        
+        # Step 4: Stitch into sprite sheet
+        logger.info("Step 4/4: Stitching sprite sheet...")
+        max_w, max_h = 0, 0
+        cropped = []
+        for img in generated_frames:
+            bbox = img.getbbox()
+            if bbox:
+                c = img.crop(bbox)
+                cropped.append(c)
+                max_w = max(max_w, c.width)
+                max_h = max(max_h, c.height)
+            else:
+                cropped.append(img)
+                max_w = max(max_w, img.width)
+                max_h = max(max_h, img.height)
+        
+        sheet = Image.new("RGBA", (max_w * len(cropped), max_h), (0, 0, 0, 0))
+        for i, f in enumerate(cropped):
+            x = i * max_w + (max_w - f.width) // 2
+            y = (max_h - f.height) // 2
+            sheet.paste(f, (x, y), f)
+        
+        filename = f"walk_sheet_{uuid.uuid4()}.png"
+        filepath = os.path.join("output", filename)
+        sheet.save(filepath)
+        logger.info(f"Walk cycle sprite sheet saved: {filepath}")
+        
+        return {"status": "success", "url": f"/output/{filename}"}
+    except Exception as e:
+        logger.error(f"Error during OpenPose walk cycle: {e}")
         logger.error(traceback.format_exc())
         manager.unload_all()
         raise HTTPException(status_code=500, detail=str(e))

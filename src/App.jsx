@@ -54,17 +54,19 @@ function App() {
     setLoading(true)
     
     try {
-      const response = await fetch(`${apiBase}/animate`, {
+      const response = await fetch(`${apiBase}/animate-openpose`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           image_url: selectedAnchor,
-          prompt: `${prompt}, walking forward, consistent animation, game sprite`
+          prompt: prompt,
+          reference_video: 'ref_front.mp4',
+          num_frames: 8
         })
       });
       const data = await response.json();
       if (data.status === 'success') {
-        setVideoUrl(`${apiBase}${data.url}`);
+        setSpritesheetUrl(`${apiBase}${data.url}`);
         setStage('preview');
       }
     } catch (error) {
@@ -242,8 +244,8 @@ function App() {
                   >
                     <Loader2 size={48} color="var(--accent-secondary)" />
                   </motion.div>
-                  <p>Generating walk cycle video...</p>
-                  <p style={{ fontSize: '0.8rem', color: 'var(--text-dim)', marginTop: '0.5rem' }}>This may take 1-2 minutes on local hardware</p>
+                  <p>Forging 8-frame walk cycle with OpenPose...</p>
+                  <p style={{ fontSize: '0.8rem', color: 'var(--text-dim)', marginTop: '0.5rem' }}>This takes ~4 minutes (8 frames × 30 sec each)</p>
                 </div>
               ) : (
                 <>
@@ -256,7 +258,7 @@ function App() {
                     </button>
                     <button className="btn-primary" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }} onClick={handleAnimate}>
                       <Play size={18} />
-                      Animate Walk Cycle
+                      Forge Walk Cycle
                     </button>
                   </div>
                 </>
