@@ -8,13 +8,18 @@ import json
 import random
 import time
 import shutil
-from fastapi import FastAPI, Body, HTTPException
+from typing import Optional
+from fastapi import FastAPI, Body, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from PIL import Image
 import numpy as np
 import cv2
+import mediapipe as mp
 from diffusers import (
     StableDiffusionXLControlNetPipeline,
     ControlNetModel,
@@ -48,18 +53,84 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    error_details = exc.errors()
+    logger.error(f"[422 Error Detail] Path: {request.url.path} | Errors: {error_details}")
+    return JSONResponse(
+        status_code=422,
+        content={"status": "error", "message": "Validation Error", "details": error_details},
+    )
+
 # Ensure directories exist
 os.makedirs("output", exist_ok=True)
 os.makedirs("templates", exist_ok=True)
 os.makedirs("saves", exist_ok=True)
+os.makedirs("Output_Saves", exist_ok=True)
 
 # Serve generated images and saves
 app.mount("/output", StaticFiles(directory="output"), name="output")
 app.mount("/saves", StaticFiles(directory="saves"), name="saves")
+app.mount("/output_saves", StaticFiles(directory="Output_Saves"), name="output_saves")
+
+def get_next_project_id():
+    """Finds the highest AXXXXXX folder and returns the next ID."""
+    existing = [d for d in os.listdir("Output_Saves") if d.startswith("A") and d[1:].isdigit()]
+    if not existing:
+        return "A00000"
+    
+    ids = [int(d[1:]) for d in existing]
+    next_num = max(ids) + 1
+    return f"A{next_num:05d}"
 
 
 # Create anime-optimized bg removal session (loaded once, reused)
 rembg_session = new_session("isnet-anime")
+
+def resolve_image_path(url: str) -> str:
+    """
+    Robustly resolves a URL (local path, full URL, or Data URL) to a local filesystem path.
+    If it's a Data URL, it saves it to a temporary file in 'output' and returns that path.
+    """
+    if not url:
+        return ""
+        
+    # Handle Data URLs
+    if url.startswith("data:image"):
+        import base64
+        import uuid
+        try:
+            header, encoded = url.split(",", 1)
+            data = base64.b64decode(encoded)
+            filename = f"temp_{uuid.uuid4()}.png"
+            path = os.path.join("output", filename)
+            with open(path, "wb") as f:
+                f.write(data)
+            return path
+        except Exception as e:
+            logger.error(f"Failed to decode Data URL: {e}")
+            return ""
+
+    # Strip base URL and query strings (?t=...) if provided
+    if "http" in url:
+        url = "/" + "/".join(url.split("/")[3:])
+    
+    if "?" in url:
+        url = url.split("?")[0]
+    
+    # Resolve local paths
+    # Handle /output/, /output_saves/, and /saves/
+    path = url.replace("/output_saves/", "Output_Saves/").replace("/output/", "output/").replace("/saves/", "saves/").lstrip("/")
+    
+    # If path doesn't exist, try common locations as fallback
+    if not os.path.exists(path):
+        name = os.path.basename(url)
+        for loc in ["output", "saves"]:
+            fallback = os.path.join(loc, name)
+            if os.path.exists(fallback):
+                return fallback
+                
+    return path
 
 class ModelManager:
     def __init__(self):
@@ -699,19 +770,22 @@ async def animate_openpose(
             
             # Use SoftEdge ControlNet + IP-Adapter (anchor as reference)
             anchor_image = load_image(anchor_path).resize((1024, 1024))
-            image = pipe(
-                prompt=frame_specific_prompt,
-                negative_prompt="blurry, low quality, deformed, ugly, bad anatomy, extra limbs, cape, cloak, flowing fabric, wings, rear view, back view, from behind, turned away",
-                image=skeleton,
-                ip_adapter_image=anchor_image,
-                controlnet_conditioning_scale=0.8,
-                num_inference_steps=30,
-                guidance_scale=7.5,
-                height=1024,
-                width=1024,
-                generator=torch.Generator(device="cpu").manual_seed(seed)
-            ).images[0]
             
+            def do_sdxl():
+                return pipe(
+                    prompt=frame_specific_prompt,
+                    negative_prompt="blurry, low quality, deformed, ugly, bad anatomy, extra limbs, cape, cloak, flowing fabric, wings, rear view, back view, from behind, turned away",
+                    image=skeleton,
+                    ip_adapter_image=anchor_image,
+                    controlnet_conditioning_scale=0.8,
+                    num_inference_steps=30,
+                    guidance_scale=7.5,
+                    height=1024,
+                    width=1024,
+                    generator=torch.Generator(device="cpu").manual_seed(seed)
+                ).images[0]
+                
+            image = await run_in_threadpool(do_sdxl)
             image = remove(image, session=rembg_session)
             generated_frames.append(image)
         
@@ -860,6 +934,7 @@ async def regenerate_frame(
 class TurnaroundRequest(BaseModel):
     session_id: str
     prompt: str
+    enforce_white: bool = True
 
 @app.post("/generate-turnaround")
 async def generate_turnaround(req: TurnaroundRequest):
@@ -898,8 +973,10 @@ async def generate_turnaround(req: TurnaroundRequest):
             torch_dtype=torch.bfloat16
         )
         
-        # Enable offloading to fit in 16GB VRAM
+        # Enable offloading and VAE optimizations to fit in 16GB VRAM
         flux_pipe.enable_model_cpu_offload()
+        flux_pipe.vae.enable_tiling()
+        flux_pipe.vae.enable_slicing()
         
         # 4. Load the LoRA
         lora_path = os.path.join("loras", "turnaround.safetensors")
@@ -909,26 +986,52 @@ async def generate_turnaround(req: TurnaroundRequest):
         flux_pipe.load_lora_weights(lora_path)
         logger.info("LoRA loaded successfully.")
         
-        # 5. Inference
-        prompt = f"create turnaround sheet of this exact character, {req.prompt}, 5 full-body poses on pure white background: front view, 3/4 left, left profile, back view, right profile, 3/4 right — evenly spaced in a clean horizontal row, consistent lighting and style, no background noise, no shadows, same proportions and detailing across all views"
+        # 5. Inference - Slimmed down and reordered to prevent token truncation
+        # Placing technical constraints at the front ensures they are seen by the CLIP tokenizer
+        tech_prefix = "character turnaround sheet, 5 views, no shadows, same proportions, consistent detailing, white background"
+        prompt_text = f"{tech_prefix}, {req.prompt}"
         
-        logger.info("Starting FLUX generation...")
-        image = flux_pipe(
-            prompt=prompt,
-            num_inference_steps=30,
-            guidance_scale=3.5,
-            width=1536,
-            height=768,
-            joint_attention_kwargs={"scale": 1.0}
-        ).images[0]
+        logger.info(f"Starting FLUX generation (in threadpool)...")
+        print(">>> [AI] Running FLUX.1-dev Inference...")
+        def do_flux():
+            return flux_pipe(
+                prompt=prompt_text,
+                num_inference_steps=30,
+                guidance_scale=3.5,
+                width=1536,
+                height=768,
+                joint_attention_kwargs={"scale": 1.0}
+            ).images[0]
+            
+        # --- AUTO-RETRY LOOP ---
+        max_attempts = 2 if req.enforce_white else 1
+        last_image_url = None
         
-        # Remove background from the generated sheet
-        image = remove(image, session=rembg_session)
-        
-        # 6. Save
-        output_filename = f"turnaround_{req.session_id}_{int(time.time())}.png"
-        output_path = os.path.join("output", output_filename)
-        image.save(output_path)
+        for attempt in range(max_attempts):
+            logger.info(f"Generation Attempt {attempt+1}/{max_attempts}...")
+            image = await run_in_threadpool(do_flux)
+            
+            # Save the result
+            filename = f"turnaround_{uuid.uuid4().hex[:8]}.png"
+            filepath = os.path.join("output", filename)
+            image.save(filepath)
+            last_image_url = f"/output/{filename}"
+            
+            if not req.enforce_white:
+                break
+                
+            # Check corners for white background
+            data = np.array(image)
+            corners = [data[0,0], data[0,-1], data[-1,0], data[-1,-1]]
+            avg_corner = np.mean(corners, axis=0)
+            is_white = np.mean(avg_corner[:3]) > 180 # Threshold for "mostly white"
+            
+            if is_white:
+                logger.info("  Validation Success: Found white background.")
+                break
+            else:
+                logger.warning(f"  Validation Failed: Background is too dark (Avg: {np.mean(avg_corner[:3])}). Retrying...")
+                # We continue the loop and overwrite last_image_url
         
         # Unload FLUX after we are done
         del flux_pipe
@@ -936,7 +1039,7 @@ async def generate_turnaround(req: TurnaroundRequest):
             torch.cuda.empty_cache()
             gc.collect()
             
-        return {"status": "success", "url": f"/output/{output_filename}"}
+        return {"status": "success", "url": last_image_url}
         
     except HTTPException:
         raise
@@ -946,105 +1049,336 @@ async def generate_turnaround(req: TurnaroundRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-class TurnaroundSaveRequest(BaseModel):
-    sheet_url: str
+class DescribeRequest(BaseModel):
+    image_url: str
 
-@app.post("/save-turnaround")
-async def save_turnaround(req: TurnaroundSaveRequest):
+class SaveProjectRequest(BaseModel):
+    prompt: str
+    image_url: str
+    project_id: Optional[str] = None
+    force_overwrite: Optional[bool] = False
+
+class SliceRequest(BaseModel):
+    image_url: str
+    num_poses: Optional[int] = 5
+    project_id: Optional[str] = None
+    remover_type: Optional[str] = "ai" # "ai", "simple", or "none"
+    alpha_matting: Optional[bool] = False
+    foreground_threshold: Optional[int] = 240
+    background_threshold: Optional[int] = 10
+
+@app.get("/open-output-folder")
+async def open_output_folder():
+    """Opens the Output_Saves folder in Windows Explorer."""
     try:
-        sheet_name = os.path.basename(req.sheet_url)
-        source_path = os.path.join("output", sheet_name)
-        if not os.path.exists(source_path):
-             source_path = os.path.join("saves", sheet_name)
-        
-        save_path = os.path.join("saves", sheet_name)
-        if source_path != save_path:
-            shutil.copy2(source_path, save_path)
-            
-        return {"status": "success", "url": f"/saves/{sheet_name}"}
+        folder_path = os.path.abspath("Output_Saves")
+        if not os.path.exists(folder_path):
+            os.makedirs(folder_path, exist_ok=True)
+        os.startfile(folder_path)
+        return {"status": "success", "path": folder_path}
     except Exception as e:
-        logger.error(f"Error saving turnaround: {e}")
+        logger.error(f"Failed to open folder: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/list-projects")
+async def list_projects():
+    try:
+        saves = []
+        if not os.path.exists("Output_Saves"):
+            return {"status": "success", "saves": []}
+            
+        for d in os.listdir("Output_Saves"):
+            folder_path = os.path.join("Output_Saves", d)
+            if not os.path.isdir(folder_path):
+                continue
+                
+            meta_path = os.path.join(folder_path, "metadata.json")
+            if os.path.exists(meta_path):
+                with open(meta_path, "r") as f:
+                    meta = json.load(f)
+                    saves.append({
+                        "id": d,
+                        "prompt": meta.get("prompt", ""),
+                        "image_url": f"/output_saves/{d}/{d}_turnaround.png",
+                        "timestamp": os.path.getmtime(meta_path)
+                    })
+                    
+        saves.sort(key=lambda x: x["timestamp"], reverse=True)
+        return {"status": "success", "saves": saves}
+    except Exception as e:
+        logger.error(f"Error listing saves: {e}")
+        return {"status": "error", "message": str(e)}
 
-class TurnaroundSliceRequest(BaseModel):
-    sheet_url: str
+@app.post("/save-project")
+async def save_project(req: SaveProjectRequest):
+    try:
+        pid = req.project_id
+        if not pid:
+            pid = get_next_project_id()
+            
+        project_dir = os.path.join("Output_Saves", pid)
+        os.makedirs(project_dir, exist_ok=True)
+        
+        target_filename = f"{pid}_turnaround.png"
+        target_path = os.path.join(project_dir, target_filename)
+        
+        source_path = resolve_image_path(req.image_url)
+        if os.path.exists(source_path):
+            shutil.copy2(source_path, target_path)
+        else:
+            logger.warning(f"Could not resolve source image for saving: {req.image_url}")
+                
+        with open(os.path.join(project_dir, "metadata.json"), "w") as f:
+            json.dump({"prompt": req.prompt, "id": pid, "updated_at": time.time()}, f)
+            
+        return {"status": "success", "project_id": pid, "image_url": f"/output_saves/{pid}/{target_filename}"}
+    except Exception as e:
+        logger.error(f"Error saving project: {e}")
+        return {"status": "error", "message": str(e)}
 
 @app.post("/slice-turnaround")
-async def slice_turnaround(req: TurnaroundSliceRequest):
+async def slice_turnaround(req: SliceRequest):
     try:
-        sheet_name = os.path.basename(req.sheet_url)
-        # Search in saves first since we usually save it, else output
-        sheet_path = os.path.join("saves", sheet_name)
+        # Robust URL handling using helper
+        sheet_path = resolve_image_path(req.image_url)
+        
         if not os.path.exists(sheet_path):
-            sheet_path = os.path.join("output", sheet_name)
-            
-        if not os.path.exists(sheet_path):
-            raise HTTPException(status_code=404, detail="Sheet not found")
+            raise HTTPException(status_code=404, detail=f"Sheet not found at {sheet_path}")
             
         image = Image.open(sheet_path).convert("RGB")
         w, h = image.size
         
-        # We know FLUX was prompted for 5 poses evenly spaced.
-        # Mathematical slicing is more robust than contour detection when ground shadows connect characters.
         num_poses = 5
         slice_width = w / num_poses
         
         sliced_urls = []
         logger.info(f"Slicing turnaround sheet ({w}x{h}) into {num_poses} poses...")
         
-        for i in range(num_poses):
-            # Calculate the center of this slice
-            center_x = (i * slice_width) + (slice_width / 2)
+        # Check for existing slices if project_id is provided
+        if req.project_id:
+            output_dir = os.path.join("Output_Saves", req.project_id, "slices")
             
-            # Take a wider crop than just the math slice to ensure we don't cut off arms/hair
-            # We'll take 1.2x the slice width as our crop window
-            crop_w = int(slice_width * 1.2)
-            x1 = max(0, int(center_x - (crop_w / 2)))
-            x2 = min(w, int(center_x + (crop_w / 2)))
+            # Smart check: If slices exist and the sheet hasn't changed, skip re-slicing
+            if os.path.exists(output_dir) and len(os.listdir(output_dir)) >= num_poses:
+                sheet_mtime = os.path.getmtime(sheet_path)
+                
+                # Get the mtime of the newest slice file to be extra safe
+                files = [os.path.join(output_dir, f) for f in os.listdir(output_dir) if f.endswith(".png")]
+                if files:
+                    newest_slice_mtime = max(os.path.getmtime(f) for f in files)
+                    
+                    # If the sheet is OLDER than the newest slice, it means the sheet 
+                    # hasn't been touched since those slices were created.
+                    if sheet_mtime < newest_slice_mtime and not getattr(req, 'force_reslice', False):
+                        logger.info(f"Reusing existing slices for project {req.project_id} (Sheet: {sheet_mtime} < Newest Slice: {newest_slice_mtime})")
+                        existing_files = sorted([f for f in os.listdir(output_dir) if f.endswith(".png")])
+                        sliced_urls = [f"/output_saves/{req.project_id}/slices/{f}" for f in existing_files[:num_poses]]
+                        return {"status": "success", "urls": sliced_urls}
+            
+            os.makedirs(output_dir, exist_ok=True)
+        else:
+            output_dir = "output"
+            
+        # Dynamic Detection: Use horizontal projection to find gaps and isolate characters
+        num_poses = 5
+        
+        # 1. Prepare mask for detection (ignore background)
+        # We'll use a grayscale version to find where the characters are
+        detection_img = image.convert("RGBA")
+        data = np.array(detection_img)
+        r, g, b, a = data.T
+        
+        # Determine if background is likely white or black
+        # Sample corners
+        corners = [data[0,0], data[0,-1], data[-1,0], data[-1,-1]]
+        avg_corner = np.mean(corners, axis=0)
+        is_white_bg = np.mean(avg_corner[:3]) > 128
+        
+        if is_white_bg:
+            mask = (r < 240) | (g < 240) | (b < 240)
+        else:
+            mask = (r > 15) | (g > 15) | (b > 15)
+            
+        # 2. Horizontal Projection (sum along Y axis)
+        projection = np.sum(mask, axis=0)
+        
+        # 3. Find segments (islands of pixels)
+        threshold = 5 # Minimum pixels in a column to be part of a character
+        segments = []
+        in_segment = False
+        start_x = 0
+        
+        for x, val in enumerate(projection):
+            if val > threshold and not in_segment:
+                in_segment = True
+                start_x = x
+            elif val <= threshold and in_segment:
+                in_segment = False
+                segments.append((start_x, x))
+        if in_segment:
+            segments.append((start_x, len(projection)-1))
+            
+        # 4. Refine segments (merge small gaps, filter noise)
+        min_gap = 20 # Minimum pixels to be considered a real gap between poses
+        refined = []
+        if segments:
+            curr_s, curr_e = segments[0]
+            for next_s, next_e in segments[1:]:
+                if next_s - curr_e < min_gap:
+                    curr_e = next_e
+                else:
+                    refined.append((curr_s, curr_e))
+                    curr_s, curr_e = next_s, next_e
+            refined.append((curr_s, curr_e))
+            
+        logger.info(f"Dynamic Slicer: Found {len(refined)} potential character islands.")
+        
+        # If we didn't find exactly 5, or detection failed, fallback to equal slices
+        if len(refined) != num_poses:
+            logger.warning(f"Dynamic detection found {len(refined)} segments instead of {num_poses}. Falling back to equal segments.")
+            slice_width = w / num_poses
+            pose_boxes = []
+            for i in range(num_poses):
+                center_x = (i * slice_width) + (slice_width / 2)
+                crop_w = int(slice_width * 1.5)
+                pose_boxes.append((max(0, int(center_x - crop_w/2)), min(w, int(center_x + crop_w/2))))
+        else:
+            # Use detected segments with some padding
+            pose_boxes = []
+            for s, e in refined:
+                pad = int((e - s) * 0.2) # 20% padding
+                pose_boxes.append((max(0, s - pad), min(w, e + pad)))
+
+        for i in range(num_poses):
+            x1, x2 = pose_boxes[i]
             
             logger.info(f"  Processing slice {i+1}/{num_poses} (x={x1} to {x2})...")
             crop = image.crop((x1, 0, x2, h))
             
-            # Remove background on the isolated crop
-            # This is where the magic happens: rembg will now see only one salient person
-            # and effortlessly wipe out the white background and ground shadows.
-            no_bg = remove(crop, session=rembg_session)
+            if req.remover_type == "none":
+                # Do nothing, just use the raw crop
+                no_bg = crop.convert("RGBA")
+            elif req.remover_type == "simple":
+                # Enhanced color-keying for white backgrounds
+                no_bg = crop.convert("RGBA")
+                data = np.array(no_bg)
+                r, g, b, a = data.T
+                # Use the provided sensitivity threshold
+                thresh = req.foreground_threshold or 235
+                white_mask = (r > thresh) & (g > thresh) & (b > thresh)
+                data[..., 3][white_mask.T] = 0
+                no_bg = Image.fromarray(data)
+            else:
+                # Use AI remover (rembg)
+                no_bg = await run_in_threadpool(
+                    remove, 
+                    crop, 
+                    session=rembg_session,
+                    alpha_matting=req.alpha_matting,
+                    alpha_matting_foreground_threshold=req.foreground_threshold,
+                    alpha_matting_background_threshold=req.background_threshold
+                )
+
+            # --- AUTO-ISOLATION: Mask out neighbor character artifacts ---
+            try:
+                # 1. Create a mask of the character vs background
+                iso_data = np.array(no_bg)
+                r, g, b, a = iso_data.T
+                
+                # Check if we already have transparency
+                has_alpha = np.max(a) > 0 and np.min(a) < 255
+                
+                if has_alpha:
+                    # Use existing alpha channel
+                    binary_mask = (a.T > 10).astype(np.uint8)
+                else:
+                    # No alpha? Detect background color from corners
+                    corners = [iso_data[0,0], iso_data[0,-1], iso_data[-1,0], iso_data[-1,-1]]
+                    avg_corner = np.mean(corners, axis=0)
+                    is_white_bg = np.mean(avg_corner[:3]) > 128
+                    
+                    if is_white_bg:
+                        # Character is not white (be sensitive)
+                        binary_mask = ((r.T < 250) | (g.T < 250) | (b.T < 250)).astype(np.uint8)
+                    else:
+                        # Character is not black (be VERY sensitive for dark outfits)
+                        binary_mask = ((r.T > 5) | (g.T > 5) | (b.T > 5)).astype(np.uint8)
+                
+                # 2. Find all connected components (islands)
+                num_labels, labels = cv2.connectedComponents(binary_mask)
+                
+                if num_labels > 1: # 0 is background, 1+ are islands
+                    # 3. Find the best island to keep
+                    center_x = no_bg.width // 2
+                    
+                    # Check which labels are present in the central 40% of the slice (wider scan)
+                    start_scan = center_x - (no_bg.width // 5)
+                    end_scan = center_x + (no_bg.width // 5)
+                    center_region = labels[:, int(max(0, start_scan)):int(min(no_bg.width, end_scan))]
+                    
+                    # Get unique labels and their counts in the center
+                    unique, counts = np.unique(center_region[center_region > 0], return_counts=True)
+                    
+                    target_label = None
+                    if len(unique) > 0:
+                        # Pick the label with the most pixels in the center
+                        target_label = unique[np.argmax(counts)]
+                    elif num_labels == 2:
+                        # Only one island found at all? Just keep it!
+                        target_label = 1
+                    
+                    if target_label is not None:
+                        # Prepare final output data
+                        if no_bg.mode != 'RGBA':
+                            no_bg = no_bg.convert('RGBA')
+                            iso_data = np.array(no_bg)
+                            
+                        # Set alpha to 0 for all pixels NOT belonging to our target character
+                        iso_data[..., 3][labels != target_label] = 0
+                        no_bg = Image.fromarray(iso_data)
+                        logger.info(f"    Isolated central character in slice {i+1} (Target Label: {target_label})")
+            except Exception as iso_err:
+                logger.warning(f"    Auto-isolation failed for slice {i+1}: {iso_err}")
             
-            # Find the actual character bounding box in the transparent result
             bbox = no_bg.getbbox()
-            if not bbox:
-                logger.warning(f"    No character detected in slice {i+1}. Skipping.")
-                continue
+            # If nothing detected, or the image is too transparent
+            is_empty = not bbox
+            if not is_empty:
+                # Check if the detected area is actually meaningful (at least 1% of the crop)
+                bw, bh = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                if bw < 20 or bh < 20:
+                    is_empty = True
+            
+            if is_empty:
+                logger.warning(f"    No character detected in slice {i+1}. Falling back to raw crop.")
+                no_bg = crop.convert("RGBA")
+                bbox = (0, 0, no_bg.width, no_bg.height)
                 
             character_sprite = no_bg.crop(bbox)
-            
-            # Paste onto 512x512 canvas, anchored to bottom center
             canvas = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
             
-            # Scale down if character is too large for 512x512
             sw, sh = character_sprite.size
             scale = 1.0
-            if sh > 480:
-                scale = 480 / sh
-            if (sw * scale) > 480:
-                scale = 480 / sw
+            if sh > 480: scale = 480 / sh
+            if (sw * scale) > 480: scale = 480 / sw
                 
-            new_w = int(sw * scale)
-            new_h = int(sh * scale)
+            new_w, new_h = int(sw * scale), int(sh * scale)
             resized_sprite = character_sprite.resize((new_w, new_h), Image.Resampling.LANCZOS)
             
             paste_x = (512 - new_w) // 2
-            paste_y = 512 - new_h - 10 # 10px padding from bottom
+            paste_y = 512 - new_h - 10
             canvas.paste(resized_sprite, (paste_x, paste_y), resized_sprite)
             
-            out_name = f"slice_{req.sheet_url.split('/')[-1].split('.')[0]}_{i}.png"
-            out_path = os.path.join("output", out_name)
+            out_name = f"{req.project_id or 'temp'}_pose_{i}.png"
+                
+            out_path = os.path.join(output_dir, out_name)
             canvas.save(out_path)
-            sliced_urls.append(f"/output/{out_name}")
+            
+            url_prefix = "/output/" if not req.project_id else f"/output_saves/{req.project_id}/slices/"
+            sliced_urls.append(f"{url_prefix}{out_name}")
             
         if not sliced_urls:
-            raise HTTPException(status_code=400, detail="Could not isolate any characters from the sheet.")
+            raise HTTPException(status_code=400, detail="Could not isolate any characters.")
             
         return {"status": "success", "urls": sliced_urls}
     except Exception as e:
@@ -1052,20 +1386,102 @@ async def slice_turnaround(req: TurnaroundSliceRequest):
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
+class RigPosesRequest(BaseModel):
+    frame_urls: list
+    project_id: Optional[str] = None
+
+@app.post("/rig-poses")
+async def rig_poses(req: RigPosesRequest):
+    try:
+        rig_data = []
+        try:
+            from mediapipe.tasks import python
+            from mediapipe.tasks.python import vision
+            import urllib.request
+            
+            # Modern MediaPipe Tasks API requires a model file
+            model_path = "pose_landmarker.task"
+            if not os.path.exists(model_path):
+                logger.info("Downloading MediaPipe Pose Landmarker model...")
+                model_url = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task"
+                urllib.request.urlretrieve(model_url, model_path)
+                
+            base_options = python.BaseOptions(model_asset_path=model_path)
+            options = vision.PoseLandmarkerOptions(
+                base_options=base_options,
+                running_mode=vision.RunningMode.IMAGE
+            )
+            
+            with vision.PoseLandmarker.create_from_options(options) as landmarker:
+                for i, url in enumerate(req.frame_urls):
+                    img_path = resolve_image_path(url)
+                    if not os.path.exists(img_path):
+                        logger.warning(f"  Frame {i} not found at {img_path}")
+                        continue
+                        
+                    mp_image = mp.Image.create_from_file(img_path)
+                    result = landmarker.detect(mp_image)
+                    
+                    joints = {}
+                    if result.pose_landmarks:
+                        landmarks = result.pose_landmarks[0]
+                        joint_map = {
+                            "nose": 0, "shoulder_l": 11, "shoulder_r": 12,
+                            "elbow_l": 13, "elbow_r": 14, "wrist_l": 15, "wrist_r": 16,
+                            "hip_l": 23, "hip_r": 24, "knee_l": 25, "knee_r": 26,
+                            "ankle_l": 27, "ankle_r": 28, "foot_l": 31, "foot_r": 32
+                        }
+                        for name, idx in joint_map.items():
+                            lm = landmarks[idx]
+                            joints[name] = {"x": lm.x, "y": lm.y, "v": getattr(lm, 'presence', 1.0) * getattr(lm, 'visibility', 1.0)}
+                    
+                    if not joints:
+                        raise Exception("No joints detected by AI")
+                        
+                    rig_data.append({"pose_index": i, "url": url, "joints": joints, "method": "ai"})
+        except Exception as ai_err:
+            logger.warning(f"MediaPipe AI Rigging failed, using mathematical fallback: {ai_err}")
+            # Fallback to standard human proportions if AI fails
+            for i, url in enumerate(req.frame_urls):
+                fallback_joints = {
+                    "nose": {"x": 0.5, "y": 0.15, "v": 1.0},
+                    "shoulder_l": {"x": 0.45, "y": 0.25, "v": 1.0}, "shoulder_r": {"x": 0.55, "y": 0.25, "v": 1.0},
+                    "elbow_l": {"x": 0.42, "y": 0.4, "v": 1.0}, "elbow_r": {"x": 0.58, "y": 0.4, "v": 1.0},
+                    "wrist_l": {"x": 0.4, "y": 0.55, "v": 1.0}, "wrist_r": {"x": 0.6, "y": 0.55, "v": 1.0},
+                    "hip_l": {"x": 0.46, "y": 0.55, "v": 1.0}, "hip_r": {"x": 0.54, "y": 0.55, "v": 1.0},
+                    "knee_l": {"x": 0.46, "y": 0.75, "v": 1.0}, "knee_r": {"x": 0.54, "y": 0.75, "v": 1.0},
+                    "ankle_l": {"x": 0.46, "y": 0.9, "v": 1.0}, "ankle_r": {"x": 0.54, "y": 0.9, "v": 1.0},
+                    "foot_l": {"x": 0.45, "y": 0.95, "v": 1.0}, "foot_r": {"x": 0.55, "y": 0.95, "v": 1.0}
+                }
+                rig_data.append({"pose_index": i, "url": url, "joints": fallback_joints, "method": "fallback"})
+                
+        return {"status": "success", "rigs": rig_data}
+        
+    except Exception as e:
+        logger.error(f"Critical error in rigging endpoint: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class StitchFramesRequest(BaseModel):
+    frame_urls: list
+    project_id: Optional[str] = None
 
 @app.post("/stitch-frames")
-async def stitch_frames(
-    frame_urls: list = Body(..., embed=True)
-):
+async def stitch_frames(req: StitchFramesRequest):
     """Stitch individual frames into a final sprite sheet."""
     try:
-        logger.info(f"Stitching {len(frame_urls)} frames into sprite sheet...")
+        logger.info(f"Stitching {len(req.frame_urls)} frames into sprite sheet...")
         
         frames = []
         max_w, max_h = 0, 0
-        for url in frame_urls:
-            name = os.path.basename(url)
-            img = load_image(os.path.join("output", name))
+        for url in req.frame_urls:
+            img_path = resolve_image_path(url)
+            if not os.path.exists(img_path):
+                logger.warning(f"  Frame not found at {img_path}")
+                continue
+                
+            img = Image.open(img_path).convert("RGBA")
             bbox = img.getbbox()
             if bbox:
                 c = img.crop(bbox)
@@ -1077,19 +1493,29 @@ async def stitch_frames(
                 max_w = max(max_w, img.width)
                 max_h = max(max_h, img.height)
         
+        if not frames:
+            raise HTTPException(status_code=400, detail="No valid frames to stitch")
+
         sheet = Image.new("RGBA", (max_w * len(frames), max_h), (0, 0, 0, 0))
         for i, f in enumerate(frames):
-            f = f.convert("RGBA")  # Ensure RGBA for mask compatibility
             x = i * max_w + (max_w - f.width) // 2
             y = (max_h - f.height) // 2
             sheet.paste(f, (x, y), f)
         
         filename = f"spritesheet_{uuid.uuid4()}.png"
-        filepath = os.path.join("output", filename)
+        if req.project_id:
+            filename = f"{req.project_id}_spritesheet.png"
+            output_dir = os.path.join("Output_Saves", req.project_id)
+            os.makedirs(output_dir, exist_ok=True)
+            filepath = os.path.join(output_dir, filename)
+        else:
+            filepath = os.path.join("output", filename)
+            
         sheet.save(filepath)
         logger.info(f"Sprite sheet saved: {filepath}")
         
-        return {"status": "success", "url": f"/output/{filename}"}
+        url_prefix = "/output/" if not req.project_id else f"/output_saves/{req.project_id}/"
+        return {"status": "success", "url": f"{url_prefix}{filename}"}
     except Exception as e:
         logger.error(f"Error stitching frames: {e}")
         logger.error(traceback.format_exc())

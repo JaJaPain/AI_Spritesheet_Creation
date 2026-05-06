@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { Sparkles, Wand2, Play, Download, Settings, Image as ImageIcon, Loader2, ArrowLeft, RefreshCw, Save, Upload, X, Check } from 'lucide-react'
+import { Sparkles, Wand2, Play, Download, Settings, Image as ImageIcon, Loader2, ArrowLeft, RefreshCw, Save, Upload, X, Check, FolderOpen } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 
 function App() {
@@ -11,6 +11,21 @@ function App() {
     let timeout = null;
     const discover = async () => {
       let found = false;
+      // If we already have a base, check if it's still alive first
+      if (apiBase) {
+        try {
+          const res = await fetch(`${apiBase}/`, { method: 'GET' });
+          const data = await res.json();
+          if (data.status === 'active') {
+            setApiReady(true);
+            timeout = setTimeout(discover, 5000); // Check again in 5s
+            return;
+          }
+        } catch (e) {
+          setApiReady(false);
+        }
+      }
+
       for (let p = 8000; p <= 8010; p++) {
         try {
           const res = await fetch(`http://localhost:${p}/`, { method: 'GET' });
@@ -20,18 +35,19 @@ function App() {
             setApiBase(`http://localhost:${p}`);
             setApiReady(true);
             found = true;
-            return;
+            break;
           }
         } catch (e) {}
       }
+      
       if (!found) {
-        console.warn('Backend not found yet, retrying in 2 seconds...');
-        timeout = setTimeout(discover, 2000);
+        setApiReady(false);
       }
+      timeout = setTimeout(discover, found ? 10000 : 2000);
     }
     discover();
     return () => clearTimeout(timeout);
-  }, [])
+  }, [apiBase])
   const [prompt, setPrompt] = useState('')
   const [variants, setVariants] = useState([])
   const [loading, setLoading] = useState(false)
@@ -56,10 +72,30 @@ function App() {
   const [turnaroundUrl, setTurnaroundUrl] = useState(null)
   const [generatingTurnaround, setGeneratingTurnaround] = useState(false)
   const [isTurnaroundModalOpen, setIsTurnaroundModalOpen] = useState(false)
+  const [isWandActive, setIsWandActive] = useState(false)
+  const [wandHistory, setWandHistory] = useState([])
+  const [activeProjectId, setActiveProjectId] = useState(null)
+  const [isOptionsOpen, setIsOptionsOpen] = useState(false)
+  const [removerType, setRemoverType] = useState('ai')
+  const [alphaMatting, setAlphaMatting] = useState(false)
+  const [removalSensitivity, setRemovalSensitivity] = useState(240)
+  const [forceReslice, setForceReslice] = useState(false)
+  const [enforceWhite, setEnforceWhite] = useState(true)
+  const [saveClickCount, setSaveClickCount] = useState(0)
+  const [isLoadModalOpen, setIsLoadModalOpen] = useState(false)
+  const [savedProjects, setSavedProjects] = useState([])
+  const [isZoomed, setIsZoomed] = useState(false)
+  const turnaroundCanvasRef = useRef(null)
   
   // Slicing State
   const [slicedUrls, setSlicedUrls] = useState([])
   const [slicing, setSlicing] = useState(false)
+  
+  // Rigging State
+  const [rigData, setRigData] = useState([])
+  const [rigging, setRigging] = useState(false)
+  
+  // UI Modals
 
   // Check for saved anchors ONLY after discovery completes
   useEffect(() => {
@@ -92,6 +128,7 @@ function App() {
       return () => clearInterval(animRef.current)
     }
   }, [stage, frameUrls.length, excludedFrames])
+
 
   const handleForgeAnchor = async () => {
     setLoading(true)
@@ -240,50 +277,216 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           session_id: Date.now().toString(),
-          prompt: prompt
+          prompt: prompt,
+          enforce_white: enforceWhite
         })
       });
       const data = await response.json();
       if (data.status === 'success') {
-        setTurnaroundUrl(`${apiBase}${data.url}`)
+        const imageUrl = data.url || data.image_url;
+        setTurnaroundUrl(`${apiBase}${imageUrl}?t=${Date.now()}`)
+      } else {
+        alert(`Generation failed: ${data.message || 'Unknown error'}`);
       }
     } catch (error) {
       console.error("Error generating turnaround:", error);
+      alert("Lost connection to SpriteForge backend. It may have crashed due to high VRAM usage. Check backend.log.");
     } finally {
       setGeneratingTurnaround(false)
     }
   }
 
-  const handleSaveAndSlice = async () => {
-    setSlicing(true)
+  const handleSaveProject = async () => {
+    // Increment click count for force override
+    const newCount = saveClickCount + 1;
+    setSaveClickCount(newCount);
+    const forceOverwrite = newCount >= 3;
+    
+    if (forceOverwrite) {
+      console.log(">>> [FORCE] Overwriting project file...");
+      setSaveClickCount(0);
+    }
+
     try {
-      // 1. Save the turnaround sheet permanently
-      const saveRes = await fetch(`${apiBase}/save-turnaround`, {
+      const res = await fetch(`${apiBase}/save-project`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sheet_url: turnaroundUrl })
-      })
-      const saveData = await saveRes.json()
-      
-      if (saveData.status === 'success') {
-        // 2. Slice the sheet using OpenCV
-        const sliceRes = await fetch(`${apiBase}/slice-turnaround`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sheet_url: saveData.url })
+        body: JSON.stringify({
+          prompt: prompt,
+          image_url: turnaroundUrl,
+          project_id: activeProjectId,
+          force_overwrite: forceOverwrite
         })
-        const sliceData = await sliceRes.json()
-        
-        if (sliceData.status === 'success') {
-          setSlicedUrls(sliceData.urls.map(u => `${apiBase}${u}`))
-          setIsTurnaroundModalOpen(false)
-          setStage('slicing')
-        }
+      });
+      const data = await res.json();
+      if (data.status === 'success') {
+        setActiveProjectId(data.project_id);
+        // Ensure no double slashes and add cache buster
+        const cleanPath = data.image_url.startsWith('/') ? data.image_url : `/${data.image_url}`;
+        setTurnaroundUrl(`${apiBase}${cleanPath}?t=${Date.now()}`);
+        setWandHistory([]);
+        alert(`Project saved as ${data.project_id}`);
       }
     } catch (err) {
-      console.error("Error saving and slicing:", err)
+      console.error("Failed to save project:", err);
+    }
+  }
+
+  const handleSlice = async () => {
+    if (!turnaroundUrl) {
+      alert("No turnaround image to slice!");
+      return;
+    }
+    
+    setSlicing(true)
+    try {
+      // Send the full URL, the backend is now robust enough to strip the base itself
+      const res = await fetch(`${apiBase}/slice-turnaround`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          image_url: turnaroundUrl,
+          project_id: activeProjectId,
+          remover_type: removerType,
+          alpha_matting: alphaMatting,
+          force_reslice: forceReslice,
+          foreground_threshold: removalSensitivity,
+          background_threshold: Math.max(0, removalSensitivity - 230)
+        }),
+      })
+      const data = await res.json()
+      if (data.status === 'success') {
+        setSlicedUrls(data.urls.map(u => `${apiBase}${u}`))
+        setIsTurnaroundModalOpen(false)
+        setStage('slicing')
+      } else if (data.status === 'error') {
+        alert(`Slicing failed: ${data.message}`);
+      }
+    } catch (err) {
+      console.error("Slicing failed:", err)
     } finally {
       setSlicing(false)
+    }
+  }
+
+  const fetchSavedProjects = async () => {
+    try {
+      const res = await fetch(`${apiBase}/list-projects`);
+      const data = await res.json();
+      if (data.status === 'success') {
+        setSavedProjects(data.saves);
+        setIsLoadModalOpen(true);
+      }
+    } catch (err) {
+      console.error("Failed to list saves:", err);
+    }
+  }
+
+  const handleLoadProject = (project) => {
+    setActiveProjectId(project.id);
+    setPrompt(project.prompt);
+    // Add cache buster to ensure the image refreshes
+    setTurnaroundUrl(`${apiBase}${project.image_url}?t=${Date.now()}`);
+    setIsLoadModalOpen(false);
+    setIsTurnaroundModalOpen(true);
+    setWandHistory([]);
+  }
+
+  const handleWandClick = (e) => {
+    if (!isWandActive || !turnaroundUrl) return;
+    
+    const img = e.target;
+    const rect = img.getBoundingClientRect();
+    const x = Math.floor(((e.clientX - rect.left) / rect.width) * img.naturalWidth);
+    const y = Math.floor(((e.clientY - rect.top) / rect.height) * img.naturalHeight);
+    
+    // Use a canvas to process the image
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0);
+    
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = imageData.data;
+    const targetIdx = (y * canvas.width + x) * 4;
+    const targetR = data[targetIdx];
+    const targetG = data[targetIdx + 1];
+    const targetB = data[targetIdx + 2];
+    
+    // Tolerance for matching (higher = more aggressive)
+    const tolerance = 45;
+    
+    // Queue for flood fill
+    const queue = [[x, y]];
+    const visited = new Set();
+    
+    while (queue.length > 0) {
+      const [cx, cy] = queue.shift();
+      if (cx < 0 || cx >= canvas.width || cy < 0 || cy >= canvas.height) continue;
+      
+      const key = `${cx},${cy}`;
+      if (visited.has(key)) continue;
+      visited.add(key);
+      
+      const idx = (cy * canvas.width + cx) * 4;
+      const r = data[idx];
+      const g = data[idx + 1];
+      const b = data[idx + 2];
+      
+      // Match if color is within tolerance of the clicked pixel
+      const dist = Math.sqrt(
+        Math.pow(r - targetR, 2) + 
+        Math.pow(g - targetG, 2) + 
+        Math.pow(b - targetB, 2)
+      );
+      
+      if (dist < tolerance) {
+        data[idx + 3] = 0; // Make transparent
+        queue.push([cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]);
+      }
+    }
+    
+    ctx.putImageData(imageData, 0, 0);
+    setWandHistory(prev => [...prev, turnaroundUrl]);
+    setTurnaroundUrl(canvas.toDataURL());
+  }
+
+  const handleUndo = () => {
+    if (wandHistory.length === 0) return;
+    const previous = wandHistory[wandHistory.length - 1];
+    setWandHistory(prev => prev.slice(0, -1));
+    setTurnaroundUrl(previous);
+  }
+
+  const openOutputFolder = async () => {
+    try {
+      await fetch(`${apiBase}/open-output-folder`);
+    } catch (err) {
+      console.error("Failed to open folder:", err);
+    }
+  }
+
+  const handleRig = async () => {
+    setRigging(true)
+    try {
+      const res = await fetch(`${apiBase}/rig-poses`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          frame_urls: slicedUrls,
+          project_id: activeProjectId
+        })
+      })
+      const data = await res.json()
+      if (data.status === 'success') {
+        setRigData(data.rigs)
+        setStage('rigging')
+      }
+    } catch (err) {
+      console.error("Error rigging:", err)
+    } finally {
+      setRigging(false)
     }
   }
 
@@ -299,16 +502,13 @@ function App() {
   const handleStitchFrames = async () => {
     setLoading(true)
     try {
-      const relativeUrls = frameUrls
-        .filter((_, i) => !excludedFrames.has(i))
-        .map(u => {
-          const url = new URL(u)
-          return url.pathname
-        })
       const response = await fetch(`${apiBase}/stitch-frames`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ frame_urls: relativeUrls })
+        body: JSON.stringify({ 
+          frame_urls: frameUrls.filter((_, i) => !excludedFrames.has(i)),
+          project_id: activeProjectId
+        })
       });
       const data = await response.json();
       if (data.status === 'success') {
@@ -363,6 +563,27 @@ function App() {
     setDescribing(false)
   }
 
+  // Global Keyboard Shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      // Ctrl+Z for Undo
+      if (e.ctrlKey && e.key === 'z') {
+        if (stage === 'prompt' && isTurnaroundModalOpen) {
+          handleUndo();
+        }
+      }
+      // Ctrl+S for Save
+      if (e.ctrlKey && e.key === 's') {
+        if (stage === 'prompt' && isTurnaroundModalOpen) {
+          e.preventDefault();
+          handleSaveProject();
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [stage, isTurnaroundModalOpen, wandHistory, activeProjectId, turnaroundUrl, prompt]);
+
   return (
     <div className="app-container">
       <header className="fade-in" style={{ textAlign: 'center', marginBottom: '4rem' }}>
@@ -399,39 +620,44 @@ function App() {
 
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <div style={{ display: 'flex', gap: '1rem' }}>
-                  <button className="btn-secondary" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <button 
+                    className="btn-secondary" 
+                    style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }} 
+                    onClick={() => setIsOptionsOpen(true)}
+                    disabled={!apiReady}
+                  >
                     <Settings size={18} />
                     Options
                   </button>
-                  {hasSavedAnchor && (
-                    <button 
-                      className="btn-secondary" 
-                      style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', borderColor: 'var(--accent-secondary)', color: 'var(--accent-secondary)' }}
-                      onClick={handleOpenSavesModal}
-                    >
-                      <Upload size={18} />
-                      Load Saved Anchor
-                    </button>
-                  )}
+                  <button 
+                    className="btn-secondary" 
+                    style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}
+                    onClick={fetchSavedProjects}
+                    disabled={!apiReady}
+                  >
+                    <FolderOpen size={18} />
+                    Load Saved Sprite
+                  </button>
+                  <button 
+                    className="btn-secondary" 
+                    style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', opacity: 0.7 }}
+                    onClick={openOutputFolder}
+                    disabled={!apiReady}
+                    title="Open Output_Saves folder in Explorer"
+                  >
+                    <Download size={18} />
+                    Open Saves Folder
+                  </button>
                 </div>
                 <div style={{ display: 'flex', gap: '1rem' }}>
                   <button 
                     className="btn-primary" 
                     style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem 2rem', background: 'linear-gradient(to right, #8b5cf6, #d946ef)' }}
                     onClick={handleGenerateTurnaround}
-                    disabled={!prompt.trim() || !apiReady || generatingTurnaround}
+                    disabled={!prompt.trim() || generatingTurnaround || !apiReady}
                   >
                     {generatingTurnaround ? <Loader2 size={18} className="animate-spin" /> : <Sparkles size={18} />}
                     FLUX Turnaround (Exp)
-                  </button>
-                  <button 
-                    className="btn-primary" 
-                    style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem 2rem' }}
-                    onClick={handleForgeAnchor}
-                    disabled={!prompt.trim() || !apiReady}
-                  >
-                    <Wand2 size={18} />
-                    Forge Anchor (SDXL)
                   </button>
                 </div>
               </div>
@@ -813,8 +1039,104 @@ function App() {
                 <button className="btn-secondary" onClick={() => { setStage('prompt'); setSlicedUrls([]); }}>
                   <ArrowLeft size={18} style={{ marginRight: '0.5rem' }} /> Start Over
                 </button>
-                <button className="btn-primary" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem 2rem' }}>
-                  <Wand2 size={18} /> Proceed to Rigging (Phase 4)
+                <button className="btn-secondary" onClick={() => { setStage('prompt'); setIsTurnaroundModalOpen(true); }}>
+                  <ArrowLeft size={18} style={{ marginRight: '0.5rem' }} /> Back to Turnaround
+                </button>
+                <button 
+                  className="btn-primary" 
+                  style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem 2rem' }}
+                  onClick={handleRig}
+                  disabled={rigging}
+                >
+                  {rigging ? <Loader2 size={18} className="animate-spin" /> : <Wand2 size={18} />}
+                  {rigging ? 'Analyzing Joints...' : 'Proceed to Rigging (Phase 4)'}
+                </button>
+              </div>
+            </motion.div>
+          )}
+
+          {stage === 'rigging' && (
+            <motion.div
+              key="rigging"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="glass-card"
+              style={{ maxWidth: '1200px', margin: '0 auto', textAlign: 'center' }}
+            >
+              <h2 style={{ marginBottom: '1.5rem' }}>AI <span className="gradient-text">Skeleton Rigging</span></h2>
+              <p style={{ color: 'var(--text-dim)', marginBottom: '2rem' }}>
+                MediaPipe has detected the skeletal joints. These points will serve as pivots for animation.
+              </p>
+              
+              <div style={{ 
+                display: 'grid', 
+                gridTemplateColumns: 'repeat(5, 1fr)', 
+                gap: '1rem',
+                marginBottom: '3rem'
+              }}>
+                {rigData.map((rig, i) => (
+                  <div key={i} className="glass-card" style={{ padding: '0', overflow: 'hidden', height: '350px', position: 'relative' }}>
+                    <div style={{ 
+                      height: '100%', 
+                      display: 'flex', 
+                      alignItems: 'center', 
+                      justifyContent: 'center',
+                      background: '#111'
+                    }}>
+                      <img src={rig.url} alt={`Pose ${i}`} style={{ maxHeight: '100%', maxWidth: '100%', objectFit: 'contain', opacity: 0.5 }} />
+                      
+                      {/* SVG Overlay for Skeleton */}
+                      <svg 
+                        viewBox="0 0 1 1" 
+                        style={{ 
+                          position: 'absolute', 
+                          top: 0, left: 0, width: '100%', height: '100%',
+                          pointerEvents: 'none'
+                        }}
+                      >
+                        {/* Draw Bones */}
+                        {rig.joints.shoulder_l && rig.joints.elbow_l && (
+                          <line x1={rig.joints.shoulder_l.x} y1={rig.joints.shoulder_l.y} x2={rig.joints.elbow_l.x} y2={rig.joints.elbow_l.y} stroke="rgba(255,255,255,0.5)" strokeWidth="0.01" />
+                        )}
+                        {rig.joints.elbow_l && rig.joints.wrist_l && (
+                          <line x1={rig.joints.elbow_l.x} y1={rig.joints.elbow_l.y} x2={rig.joints.wrist_l.x} y2={rig.joints.wrist_l.y} stroke="rgba(255,255,255,0.5)" strokeWidth="0.01" />
+                        )}
+                        {/* ... add more bones here ... */}
+                        
+                        {/* Draw Joints */}
+                        {Object.entries(rig.joints).map(([name, pos]) => (
+                          <circle 
+                            key={name}
+                            cx={pos.x} 
+                            cy={pos.y} 
+                            r="0.01" 
+                            fill={pos.v > 0.5 ? "#8b5cf6" : "#444"} 
+                            stroke="white" 
+                            strokeWidth="0.002"
+                          />
+                        ))}
+                      </svg>
+                    </div>
+                    <div style={{ padding: '0.5rem', fontSize: '0.8rem', background: 'rgba(0,0,0,0.5)' }}>
+                      Pose {i + 1}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              
+              <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}>
+                <button className="btn-secondary" onClick={() => setStage('slicing')}>
+                  <ArrowLeft size={18} style={{ marginRight: '0.5rem' }} /> Back to Slices
+                </button>
+                <button 
+                  className="btn-primary" 
+                  style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem 2rem' }}
+                  onClick={() => {
+                    alert(`Animation Phase (Phase 5) will use project: ${activeProjectId || 'Temporary'}`);
+                    // Future: handleAnimation(rigData)
+                  }}
+                >
+                  <Play size={18} /> Proceed to Animation (Phase 5)
                 </button>
               </div>
             </motion.div>
@@ -923,19 +1245,77 @@ function App() {
             >
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
                 <h2 style={{ fontSize: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <Sparkles size={24} color="#d946ef" /> FLUX 5-Point Turnaround
+                  <Sparkles size={24} color="#d946ef" /> FLUX 5-Point Turnaround <span style={{fontSize: '0.7rem', opacity: 0.5}}>(Backend: {apiBase})</span>
                 </h2>
-                {!generatingTurnaround && (
-                  <button 
-                    style={{ background: 'none', border: 'none', color: 'var(--text-dim)', cursor: 'pointer', padding: '0.5rem' }}
-                    onClick={() => setIsTurnaroundModalOpen(false)}
-                  >
-                    <X size={24} />
-                  </button>
-                )}
+                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                  {!generatingTurnaround && turnaroundUrl && (
+                    <>
+                      <button 
+                        className="btn-primary"
+                        style={{ padding: '0.4rem 1rem', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.4rem', background: 'var(--accent-secondary)' }}
+                        onClick={handleSaveProject}
+                        title="Save Project (Ctrl+S)"
+                      >
+                        <Save size={14} /> {activeProjectId ? `Save ${activeProjectId}` : 'Save Project'}
+                      </button>
+                      <div style={{ width: '1px', height: '20px', background: 'var(--glass-border)', margin: '0 0.5rem' }} />
+                      <button 
+                        className="btn-secondary"
+                        style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
+                        onClick={handleUndo}
+                        disabled={wandHistory.length === 0}
+                        title="Undo (Ctrl+Z)"
+                      >
+                        <RefreshCw size={14} style={{ transform: 'scaleX(-1)' }} /> Undo
+                      </button>
+                      <button 
+                        className={isWandActive ? "btn-primary" : "btn-secondary"}
+                        style={{ 
+                          padding: '0.4rem 1rem', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.4rem',
+                          background: isWandActive ? 'var(--accent-primary)' : undefined,
+                          borderColor: isWandActive ? 'var(--accent-primary)' : undefined
+                        }}
+                        onClick={() => setIsWandActive(!isWandActive)}
+                      >
+                        <Wand2 size={14} /> Magic Wand {isWandActive ? 'ON' : 'OFF'}
+                      </button>
+                      <button 
+                        className={isZoomed ? "btn-primary" : "btn-secondary"}
+                        style={{ 
+                          padding: '0.4rem 1rem', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.4rem',
+                          background: isZoomed ? 'var(--accent-secondary)' : undefined,
+                          borderColor: isZoomed ? 'var(--accent-secondary)' : undefined
+                        }}
+                        onClick={() => setIsZoomed(!isZoomed)}
+                      >
+                        <Sparkles size={14} /> {isZoomed ? 'Zoom 1.0x' : 'Zoom 1.5x'}
+                      </button>
+                    </>
+                  )}
+                  {!generatingTurnaround && (
+                    <button 
+                      style={{ background: 'none', border: 'none', color: 'var(--text-dim)', cursor: 'pointer', padding: '0.5rem' }}
+                      onClick={() => { setIsTurnaroundModalOpen(false); setIsWandActive(false); }}
+                    >
+                      <X size={24} />
+                    </button>
+                  )}
+                </div>
               </div>
 
-              <div style={{ background: '#050505', borderRadius: '8px', minHeight: '300px', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem', border: '1px solid var(--glass-border)' }}>
+              <div style={{ 
+                background: '#050505', 
+                borderRadius: '8px', 
+                height: '65vh',
+                display: 'flex', 
+                alignItems: isZoomed ? 'flex-start' : 'center', 
+                justifyContent: isZoomed ? 'flex-start' : 'center', 
+                padding: '1rem', 
+                border: '1px solid var(--glass-border)',
+                cursor: isWandActive ? 'crosshair' : 'default',
+                overflow: 'auto',
+                position: 'relative'
+              }}>
                 {generatingTurnaround ? (
                   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '1rem' }}>
                     <Loader2 size={48} className="animate-spin" color="#d946ef" />
@@ -943,7 +1323,20 @@ function App() {
                     <p style={{ fontSize: '0.8rem', color: '#888' }}>This requires ~14GB VRAM and may take 30-60 seconds.</p>
                   </div>
                 ) : turnaroundUrl ? (
-                  <img src={turnaroundUrl} alt="Turnaround Sheet" style={{ maxWidth: '100%', maxHeight: '60vh', objectFit: 'contain' }} />
+                  <img 
+                    src={turnaroundUrl} 
+                    alt="Turnaround Sheet" 
+                    style={{ 
+                      maxWidth: isZoomed ? 'none' : '100%', 
+                      maxHeight: isZoomed ? 'none' : '100%', 
+                      width: isZoomed ? '150%' : 'auto',
+                      height: 'auto',
+                      objectFit: 'contain',
+                      transition: 'width 0.2s ease-in-out'
+                    }} 
+                    onClick={handleWandClick}
+                    crossOrigin="anonymous"
+                  />
                 ) : (
                   <p style={{ color: 'var(--text-dim)' }}>Failed to generate turnaround sheet.</p>
                 )}
@@ -958,7 +1351,7 @@ function App() {
                      <button 
                         className="btn-primary" 
                         style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: 'linear-gradient(to right, #8b5cf6, #d946ef)' }} 
-                        onClick={handleSaveAndSlice}
+                        onClick={handleSlice}
                         disabled={slicing}
                      >
                        {slicing ? <Loader2 size={18} className="animate-spin" /> : <Wand2 size={18} />}
@@ -966,6 +1359,214 @@ function App() {
                      </button>
                   </div>
               )}
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+      
+      {/* Options Modal */}
+      <AnimatePresence>
+        {isOptionsOpen && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            style={{
+              position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+              background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(5px)',
+              zIndex: 150, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '2rem'
+            }}
+            onClick={() => setIsOptionsOpen(false)}
+          >
+            <motion.div 
+              initial={{ scale: 0.95, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.95, y: 20 }}
+              className="glass-card"
+              style={{ width: '100%', maxWidth: '500px', padding: '2rem', textAlign: 'center' }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h2 style={{ marginBottom: '1.5rem' }}>Pipeline <span className="gradient-text">Options</span></h2>
+              <div style={{ textAlign: 'left', marginBottom: '2rem' }}>
+                <p style={{ color: 'var(--text-dim)', marginBottom: '1rem' }}>FLUX Parameters:</p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '1.5rem' }}>
+                  <label style={{ fontSize: '0.9rem', color: '#888' }}>Inference Steps: 20</label>
+                  <label style={{ fontSize: '0.9rem', color: '#888' }}>Guidance Scale: 3.5</label>
+                  <label style={{ fontSize: '0.9rem', color: '#888' }}>VRAM Optimization: 4-bit NF4</label>
+                </div>
+
+                <p style={{ color: 'var(--text-dim)', marginBottom: '1rem' }}>Background Removal:</p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                  <div style={{ display: 'flex', gap: '1rem' }}>
+                    <button 
+                      className={removerType === 'ai' ? "btn-primary" : "btn-secondary"}
+                      style={{ flex: 1, padding: '0.5rem', fontSize: '0.8rem' }}
+                      onClick={() => setRemoverType('ai')}
+                    >
+                      AI Remover
+                    </button>
+                    <button 
+                      className={removerType === 'simple' ? "btn-primary" : "btn-secondary"}
+                      style={{ flex: 1, padding: '0.5rem', fontSize: '0.8rem' }}
+                      onClick={() => setRemoverType('simple')}
+                    >
+                      Simple
+                    </button>
+                    <button 
+                      className={removerType === 'none' ? "btn-primary" : "btn-secondary"}
+                      style={{ flex: 1, padding: '0.5rem', fontSize: '0.8rem' }}
+                      onClick={() => setRemoverType('none')}
+                    >
+                      None
+                    </button>
+                  </div>
+                  
+                  <div style={{ marginBottom: '1rem', padding: '0.8rem', background: 'rgba(255,255,255,0.03)', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)' }}>
+                    <h4 style={{ fontSize: '0.8rem', color: 'var(--accent-primary)', marginBottom: '0.6rem', textTransform: 'uppercase', letterSpacing: '1px' }}>Generation Quality Control</h4>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', fontSize: '0.9rem', cursor: 'pointer' }}>
+                      <input 
+                        type="checkbox" 
+                        checked={enforceWhite} 
+                        onChange={(e) => setEnforceWhite(e.target.checked)} 
+                        style={{ width: '16px', height: '16px' }}
+                      />
+                      <span>Enforce White Background (Auto-Retry)</span>
+                    </label>
+                    <p style={{ fontSize: '0.7rem', color: '#666', marginTop: '0.4rem' }}>
+                      * Automatically re-rolls the generation if the background is too dark.
+                    </p>
+                  </div>
+                  <div style={{ marginTop: '1rem', display: 'flex', flexDirection: 'column', gap: '0.8rem' }}>
+                    <div style={{ marginBottom: '0.5rem' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem', alignItems: 'center' }}>
+                        <label style={{ fontSize: '0.9rem' }}>Removal Sensitivity: {removalSensitivity}</label>
+                        <button 
+                          style={{ background: 'none', border: 'none', color: 'var(--accent-primary)', fontSize: '0.7rem', cursor: 'pointer', textDecoration: 'underline', padding: 0 }}
+                          onClick={() => setRemovalSensitivity(240)}
+                        >
+                          Reset Default
+                        </button>
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.3rem' }}>
+                        <span style={{ fontSize: '0.7rem', color: '#666' }}>
+                          {removalSensitivity > 245 ? 'Low (Keep More)' : removalSensitivity < 210 ? 'High (Cut More)' : 'Balanced'}
+                        </span>
+                      </div>
+                      <input 
+                        type="range" 
+                        min="100" max="255" step="1"
+                        value={removalSensitivity}
+                        onChange={(e) => setRemovalSensitivity(parseInt(e.target.value))}
+                        style={{ width: '100%', cursor: 'pointer' }}
+                      />
+                      <p style={{ fontSize: '0.7rem', color: '#666', marginTop: '0.4rem' }}>
+                        * Adjust this if parts are missing or neighbors leak in.
+                      </p>
+                    </div>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem', padding: '0.8rem', background: 'rgba(255,255,255,0.03)', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)' }}>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', fontSize: '0.9rem', cursor: 'pointer', color: 'var(--accent-primary)' }}>
+                        <input 
+                          type="checkbox" 
+                          checked={forceReslice} 
+                          onChange={(e) => setForceReslice(e.target.checked)} 
+                          style={{ width: '16px', height: '16px' }}
+                        />
+                        <span>Force Fresh Slice (Ignore Cache)</span>
+                      </label>
+
+                      {removerType === 'ai' && (
+                        <label style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', fontSize: '0.9rem', cursor: 'pointer' }}>
+                          <input 
+                            type="checkbox" 
+                            checked={alphaMatting} 
+                            onChange={(e) => setAlphaMatting(e.target.checked)} 
+                            style={{ width: '16px', height: '16px' }}
+                          />
+                          <span>Enable Alpha Matting (Refined Edges)</span>
+                        </label>
+                      )}
+                    </div>
+                    
+                    {removerType === 'simple' && (
+                      <p style={{ fontSize: '0.8rem', color: '#666', fontStyle: 'italic', textAlign: 'left' }}>
+                        * Simple mode targets pure backgrounds. Best for high-contrast sheets.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <button className="btn-primary" style={{ width: '100%', marginTop: '1rem' }} onClick={() => setIsOptionsOpen(false)}>
+                Close
+              </button>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+      
+      {/* Load Project Modal */}
+      <AnimatePresence>
+        {isLoadModalOpen && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            style={{
+              position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+              background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(8px)',
+              zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '2rem'
+            }}
+            onClick={() => setIsLoadModalOpen(false)}
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 30 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 30 }}
+              className="glass-card"
+              style={{ width: '100%', maxWidth: '900px', maxHeight: '80vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div style={{ padding: '1.5rem', borderBottom: '1px solid var(--glass-border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <h2 style={{ fontSize: '1.5rem' }}>Project <span className="gradient-text">Library</span></h2>
+                <button onClick={() => setIsLoadModalOpen(false)} style={{ background: 'none', border: 'none', color: '#888', cursor: 'pointer' }}>
+                  <X size={24} />
+                </button>
+              </div>
+              
+              <div style={{ flex: 1, overflowY: 'auto', padding: '1.5rem' }}>
+                {savedProjects.length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-dim)' }}>
+                    <FolderOpen size={48} style={{ marginBottom: '1rem', opacity: 0.3 }} />
+                    <p>No saved sprites found yet.</p>
+                  </div>
+                ) : (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))', gap: '1.5rem' }}>
+                    {savedProjects.map(project => (
+                      <motion.div 
+                        key={project.id}
+                        whileHover={{ y: -5, borderColor: 'var(--accent-primary)' }}
+                        className="glass-card"
+                        style={{ padding: '1rem', cursor: 'pointer', transition: 'border-color 0.2s' }}
+                        onClick={() => handleLoadProject(project)}
+                      >
+                        <div style={{ 
+                          width: '100%', aspectRatio: '16/9', background: '#000', borderRadius: '4px', overflow: 'hidden', marginBottom: '1rem',
+                          border: '1px solid var(--glass-border)'
+                        }}>
+                          <img src={`${apiBase}${project.image_url}`} style={{ width: '100%', height: '100%', objectFit: 'contain' }} alt={project.id} />
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                          <span style={{ fontWeight: 'bold', color: 'var(--accent-primary)' }}>{project.id}</span>
+                          <span style={{ fontSize: '0.7rem', color: '#555' }}>{new Date(project.timestamp * 1000).toLocaleDateString()}</span>
+                        </div>
+                        <p style={{ fontSize: '0.8rem', color: 'var(--text-dim)', overflow: 'hidden', textOverflow: 'ellipsis', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>
+                          {project.prompt}
+                        </p>
+                      </motion.div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </motion.div>
           </motion.div>
         )}
