@@ -18,7 +18,10 @@ import cv2
 from diffusers import (
     StableDiffusionXLControlNetPipeline,
     ControlNetModel,
+    FluxPipeline,
+    FluxTransformer2DModel,
 )
+from transformers import BitsAndBytesConfig
 from diffusers.utils import load_image
 from rembg import remove, new_session
 import gc
@@ -850,6 +853,202 @@ async def regenerate_frame(
         return {"status": "success", "url": f"/output/{frame_filename}"}
     except Exception as e:
         logger.error(f"Error regenerating frame: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class TurnaroundRequest(BaseModel):
+    session_id: str
+    prompt: str
+
+@app.post("/generate-turnaround")
+async def generate_turnaround(req: TurnaroundRequest):
+    """Isolated FLUX experiment to generate a 5-point turnaround sheet."""
+    try:
+        logger.info(f"Generating experimental FLUX turnaround for session {req.session_id}")
+        
+        # 1. Unload SDXL to free VRAM
+        manager.unload_all()
+        if manager.device == "cuda":
+            torch.cuda.empty_cache()
+            gc.collect()
+            
+        # 3. Load FLUX Text-to-Image Pipeline with 4-bit Quantization
+        logger.info("Loading FLUX.1-dev for Turnaround generation...")
+        
+        # Load the massive 24GB transformer in 4-bit precision to fit in 16GB VRAM without thrashing
+        nf4_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16
+        )
+        
+        logger.info("  Loading 4-bit Transformer...")
+        transformer = FluxTransformer2DModel.from_pretrained(
+            "black-forest-labs/FLUX.1-dev",
+            subfolder="transformer",
+            quantization_config=nf4_config,
+            torch_dtype=torch.bfloat16
+        )
+        
+        logger.info("  Loading Pipeline...")
+        flux_pipe = FluxPipeline.from_pretrained(
+            "black-forest-labs/FLUX.1-dev", 
+            transformer=transformer,
+            torch_dtype=torch.bfloat16
+        )
+        
+        # Enable offloading to fit in 16GB VRAM
+        flux_pipe.enable_model_cpu_offload()
+        
+        # 4. Load the LoRA
+        lora_path = os.path.join("loras", "turnaround.safetensors")
+        if not os.path.exists(lora_path):
+             raise HTTPException(status_code=400, detail="Turnaround LoRA not found. Please manually download the .safetensors file from Civitai to backend/loras/turnaround.safetensors")
+        
+        flux_pipe.load_lora_weights(lora_path)
+        logger.info("LoRA loaded successfully.")
+        
+        # 5. Inference
+        prompt = f"create turnaround sheet of this exact character, {req.prompt}, 5 full-body poses on pure white background: front view, 3/4 left, left profile, back view, right profile, 3/4 right — evenly spaced in a clean horizontal row, consistent lighting and style, no background noise, no shadows, same proportions and detailing across all views"
+        
+        logger.info("Starting FLUX generation...")
+        image = flux_pipe(
+            prompt=prompt,
+            num_inference_steps=30,
+            guidance_scale=3.5,
+            width=1536,
+            height=768,
+            joint_attention_kwargs={"scale": 1.0}
+        ).images[0]
+        
+        # Remove background from the generated sheet
+        image = remove(image, session=rembg_session)
+        
+        # 6. Save
+        output_filename = f"turnaround_{req.session_id}_{int(time.time())}.png"
+        output_path = os.path.join("output", output_filename)
+        image.save(output_path)
+        
+        # Unload FLUX after we are done
+        del flux_pipe
+        if manager.device == "cuda":
+            torch.cuda.empty_cache()
+            gc.collect()
+            
+        return {"status": "success", "url": f"/output/{output_filename}"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error during FLUX generation: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class TurnaroundSaveRequest(BaseModel):
+    sheet_url: str
+
+@app.post("/save-turnaround")
+async def save_turnaround(req: TurnaroundSaveRequest):
+    try:
+        sheet_name = os.path.basename(req.sheet_url)
+        source_path = os.path.join("output", sheet_name)
+        if not os.path.exists(source_path):
+             source_path = os.path.join("saves", sheet_name)
+        
+        save_path = os.path.join("saves", sheet_name)
+        if source_path != save_path:
+            shutil.copy2(source_path, save_path)
+            
+        return {"status": "success", "url": f"/saves/{sheet_name}"}
+    except Exception as e:
+        logger.error(f"Error saving turnaround: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class TurnaroundSliceRequest(BaseModel):
+    sheet_url: str
+
+@app.post("/slice-turnaround")
+async def slice_turnaround(req: TurnaroundSliceRequest):
+    try:
+        sheet_name = os.path.basename(req.sheet_url)
+        # Search in saves first since we usually save it, else output
+        sheet_path = os.path.join("saves", sheet_name)
+        if not os.path.exists(sheet_path):
+            sheet_path = os.path.join("output", sheet_name)
+            
+        if not os.path.exists(sheet_path):
+            raise HTTPException(status_code=404, detail="Sheet not found")
+            
+        image = Image.open(sheet_path).convert("RGB")
+        w, h = image.size
+        
+        # We know FLUX was prompted for 5 poses evenly spaced.
+        # Mathematical slicing is more robust than contour detection when ground shadows connect characters.
+        num_poses = 5
+        slice_width = w / num_poses
+        
+        sliced_urls = []
+        logger.info(f"Slicing turnaround sheet ({w}x{h}) into {num_poses} poses...")
+        
+        for i in range(num_poses):
+            # Calculate the center of this slice
+            center_x = (i * slice_width) + (slice_width / 2)
+            
+            # Take a wider crop than just the math slice to ensure we don't cut off arms/hair
+            # We'll take 1.2x the slice width as our crop window
+            crop_w = int(slice_width * 1.2)
+            x1 = max(0, int(center_x - (crop_w / 2)))
+            x2 = min(w, int(center_x + (crop_w / 2)))
+            
+            logger.info(f"  Processing slice {i+1}/{num_poses} (x={x1} to {x2})...")
+            crop = image.crop((x1, 0, x2, h))
+            
+            # Remove background on the isolated crop
+            # This is where the magic happens: rembg will now see only one salient person
+            # and effortlessly wipe out the white background and ground shadows.
+            no_bg = remove(crop, session=rembg_session)
+            
+            # Find the actual character bounding box in the transparent result
+            bbox = no_bg.getbbox()
+            if not bbox:
+                logger.warning(f"    No character detected in slice {i+1}. Skipping.")
+                continue
+                
+            character_sprite = no_bg.crop(bbox)
+            
+            # Paste onto 512x512 canvas, anchored to bottom center
+            canvas = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+            
+            # Scale down if character is too large for 512x512
+            sw, sh = character_sprite.size
+            scale = 1.0
+            if sh > 480:
+                scale = 480 / sh
+            if (sw * scale) > 480:
+                scale = 480 / sw
+                
+            new_w = int(sw * scale)
+            new_h = int(sh * scale)
+            resized_sprite = character_sprite.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            
+            paste_x = (512 - new_w) // 2
+            paste_y = 512 - new_h - 10 # 10px padding from bottom
+            canvas.paste(resized_sprite, (paste_x, paste_y), resized_sprite)
+            
+            out_name = f"slice_{req.sheet_url.split('/')[-1].split('.')[0]}_{i}.png"
+            out_path = os.path.join("output", out_name)
+            canvas.save(out_path)
+            sliced_urls.append(f"/output/{out_name}")
+            
+        if not sliced_urls:
+            raise HTTPException(status_code=400, detail="Could not isolate any characters from the sheet.")
+            
+        return {"status": "success", "urls": sliced_urls}
+    except Exception as e:
+        logger.error(f"Error slicing turnaround: {e}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -8,7 +8,9 @@ function App() {
   const [apiReady, setApiReady] = useState(false)
 
   useEffect(() => {
+    let timeout = null;
     const discover = async () => {
+      let found = false;
       for (let p = 8000; p <= 8010; p++) {
         try {
           const res = await fetch(`http://localhost:${p}/`, { method: 'GET' });
@@ -17,13 +19,18 @@ function App() {
             console.log(`SpriteForge backend found on port ${p}`);
             setApiBase(`http://localhost:${p}`);
             setApiReady(true);
+            found = true;
             return;
           }
         } catch (e) {}
       }
-      console.warn('No SpriteForge backend found on ports 8000-8010');
+      if (!found) {
+        console.warn('Backend not found yet, retrying in 2 seconds...');
+        timeout = setTimeout(discover, 2000);
+      }
     }
     discover();
+    return () => clearTimeout(timeout);
   }, [])
   const [prompt, setPrompt] = useState('')
   const [variants, setVariants] = useState([])
@@ -45,6 +52,14 @@ function App() {
   const [excludedFrames, setExcludedFrames] = useState(new Set())
   const [autoPrompt, setAutoPrompt] = useState('')
   const [describing, setDescribing] = useState(false)
+
+  const [turnaroundUrl, setTurnaroundUrl] = useState(null)
+  const [generatingTurnaround, setGeneratingTurnaround] = useState(false)
+  const [isTurnaroundModalOpen, setIsTurnaroundModalOpen] = useState(false)
+  
+  // Slicing State
+  const [slicedUrls, setSlicedUrls] = useState([])
+  const [slicing, setSlicing] = useState(false)
 
   // Check for saved anchors ONLY after discovery completes
   useEffect(() => {
@@ -216,6 +231,62 @@ function App() {
     }
   }
 
+  const handleGenerateTurnaround = async () => {
+    setGeneratingTurnaround(true)
+    setIsTurnaroundModalOpen(true)
+    try {
+      const response = await fetch(`${apiBase}/generate-turnaround`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          session_id: Date.now().toString(),
+          prompt: prompt
+        })
+      });
+      const data = await response.json();
+      if (data.status === 'success') {
+        setTurnaroundUrl(`${apiBase}${data.url}`)
+      }
+    } catch (error) {
+      console.error("Error generating turnaround:", error);
+    } finally {
+      setGeneratingTurnaround(false)
+    }
+  }
+
+  const handleSaveAndSlice = async () => {
+    setSlicing(true)
+    try {
+      // 1. Save the turnaround sheet permanently
+      const saveRes = await fetch(`${apiBase}/save-turnaround`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sheet_url: turnaroundUrl })
+      })
+      const saveData = await saveRes.json()
+      
+      if (saveData.status === 'success') {
+        // 2. Slice the sheet using OpenCV
+        const sliceRes = await fetch(`${apiBase}/slice-turnaround`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sheet_url: saveData.url })
+        })
+        const sliceData = await sliceRes.json()
+        
+        if (sliceData.status === 'success') {
+          setSlicedUrls(sliceData.urls.map(u => `${apiBase}${u}`))
+          setIsTurnaroundModalOpen(false)
+          setStage('slicing')
+        }
+      }
+    } catch (err) {
+      console.error("Error saving and slicing:", err)
+    } finally {
+      setSlicing(false)
+    }
+  }
+
   const toggleExcludeFrame = (index) => {
     setExcludedFrames(prev => {
       const next = new Set(prev)
@@ -343,15 +414,26 @@ function App() {
                     </button>
                   )}
                 </div>
-                <button 
-                  className="btn-primary" 
-                  style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem 2rem' }}
-                  onClick={handleForgeAnchor}
-                  disabled={!prompt.trim() || !apiReady}
-                >
-                  <Wand2 size={18} />
-                  Forge Anchor
-                </button>
+                <div style={{ display: 'flex', gap: '1rem' }}>
+                  <button 
+                    className="btn-primary" 
+                    style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem 2rem', background: 'linear-gradient(to right, #8b5cf6, #d946ef)' }}
+                    onClick={handleGenerateTurnaround}
+                    disabled={!prompt.trim() || !apiReady || generatingTurnaround}
+                  >
+                    {generatingTurnaround ? <Loader2 size={18} className="animate-spin" /> : <Sparkles size={18} />}
+                    FLUX Turnaround (Exp)
+                  </button>
+                  <button 
+                    className="btn-primary" 
+                    style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem 2rem' }}
+                    onClick={handleForgeAnchor}
+                    disabled={!prompt.trim() || !apiReady}
+                  >
+                    <Wand2 size={18} />
+                    Forge Anchor (SDXL)
+                  </button>
+                </div>
               </div>
             </motion.div>
           )}
@@ -489,7 +571,7 @@ function App() {
                     <button className="btn-secondary" onClick={() => setStage('selecting-anchor')}>
                       <ArrowLeft size={18} style={{ marginRight: '0.5rem' }} /> Back
                     </button>
-                    <button className="btn-primary" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }} onClick={handleAnimate} disabled={describing}>
+                    <button className="btn-primary" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }} onClick={handleAnimate} disabled={describing || generatingTurnaround}>
                       <Play size={18} />
                       Forge Walk Cycle
                     </button>
@@ -692,6 +774,51 @@ function App() {
               </div>
             </motion.div>
           )}
+
+          {stage === 'slicing' && (
+            <motion.div
+              key="slicing"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="glass-card"
+              style={{ maxWidth: '1200px', margin: '0 auto', textAlign: 'center' }}
+            >
+              <h2 style={{ marginBottom: '1.5rem' }}>Segmented <span className="gradient-text">Character Poses</span></h2>
+              <p style={{ color: 'var(--text-dim)', marginBottom: '2rem' }}>
+                OpenCV has automatically detected, isolated, and removed the background from each pose.
+              </p>
+              
+              <div style={{ 
+                display: 'grid', 
+                gridTemplateColumns: 'repeat(5, 1fr)', 
+                gap: '1rem',
+                marginBottom: '3rem'
+              }}>
+                {slicedUrls.map((url, i) => (
+                  <div key={i} className="glass-card" style={{ padding: '0', overflow: 'hidden', height: '250px', background: 'rgba(255,255,255,0.02)' }}>
+                    <div style={{ 
+                      height: '100%', 
+                      display: 'flex', 
+                      alignItems: 'center', 
+                      justifyContent: 'center',
+                      background: 'repeating-conic-gradient(#111 0% 25%, transparent 0% 50%) 50% / 20px 20px'
+                    }}>
+                      <img src={url} alt={`Pose ${i}`} style={{ maxHeight: '100%', maxWidth: '100%', objectFit: 'contain' }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+              
+              <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}>
+                <button className="btn-secondary" onClick={() => { setStage('prompt'); setSlicedUrls([]); }}>
+                  <ArrowLeft size={18} style={{ marginRight: '0.5rem' }} /> Start Over
+                </button>
+                <button className="btn-primary" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem 2rem' }}>
+                  <Wand2 size={18} /> Proceed to Rigging (Phase 4)
+                </button>
+              </div>
+            </motion.div>
+          )}
         </AnimatePresence>
       </main>
 
@@ -765,6 +892,80 @@ function App() {
                   </div>
                 )}
               </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Experimental Turnaround Modal */}
+      <AnimatePresence>
+        {isTurnaroundModalOpen && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            style={{
+              position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+              background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(8px)',
+              zIndex: 110, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '2rem'
+            }}
+            onClick={() => {
+               if (!generatingTurnaround) setIsTurnaroundModalOpen(false)
+            }}
+          >
+            <motion.div 
+              initial={{ scale: 0.95, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.95, y: 20 }}
+              className="glass-card"
+              style={{ width: '100%', maxWidth: '1200px', display: 'flex', flexDirection: 'column', padding: '2rem', textAlign: 'center' }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
+                <h2 style={{ fontSize: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <Sparkles size={24} color="#d946ef" /> FLUX 5-Point Turnaround
+                </h2>
+                {!generatingTurnaround && (
+                  <button 
+                    style={{ background: 'none', border: 'none', color: 'var(--text-dim)', cursor: 'pointer', padding: '0.5rem' }}
+                    onClick={() => setIsTurnaroundModalOpen(false)}
+                  >
+                    <X size={24} />
+                  </button>
+                )}
+              </div>
+
+              <div style={{ background: '#050505', borderRadius: '8px', minHeight: '300px', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem', border: '1px solid var(--glass-border)' }}>
+                {generatingTurnaround ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '1rem' }}>
+                    <Loader2 size={48} className="animate-spin" color="#d946ef" />
+                    <p style={{ color: 'var(--text-dim)' }}>Loading FLUX.1 and generating turnaround sheet...</p>
+                    <p style={{ fontSize: '0.8rem', color: '#888' }}>This requires ~14GB VRAM and may take 30-60 seconds.</p>
+                  </div>
+                ) : turnaroundUrl ? (
+                  <img src={turnaroundUrl} alt="Turnaround Sheet" style={{ maxWidth: '100%', maxHeight: '60vh', objectFit: 'contain' }} />
+                ) : (
+                  <p style={{ color: 'var(--text-dim)' }}>Failed to generate turnaround sheet.</p>
+                )}
+              </div>
+              
+              {!generatingTurnaround && turnaroundUrl && (
+                  <div style={{ marginTop: '1.5rem', display: 'flex', justifyContent: 'center', gap: '1rem' }}>
+                     <button className="btn-secondary" onClick={() => setIsTurnaroundModalOpen(false)}>Close Experiment</button>
+                     <a href={turnaroundUrl} download="turnaround.png" className="btn-secondary" style={{ textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                       <Download size={18} /> Download Sheet
+                     </a>
+                     <button 
+                        className="btn-primary" 
+                        style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: 'linear-gradient(to right, #8b5cf6, #d946ef)' }} 
+                        onClick={handleSaveAndSlice}
+                        disabled={slicing}
+                     >
+                       {slicing ? <Loader2 size={18} className="animate-spin" /> : <Wand2 size={18} />}
+                       {slicing ? 'Slicing...' : 'Save & Slice Poses'}
+                     </button>
+                  </div>
+              )}
             </motion.div>
           </motion.div>
         )}
