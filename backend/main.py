@@ -136,8 +136,8 @@ class ModelManager:
                     subfolder="sdxl_models",
                     weight_name="ip-adapter-plus_sdxl_vit-h.safetensors"
                 )
-                pipe.set_ip_adapter_scale(0.5)
-                logger.info("  IP-Adapter Plus loaded.")
+                pipe.set_ip_adapter_scale(0.8)
+                logger.info("  IP-Adapter Plus loaded with scale 0.8.")
             
             # Use automatic model offloading — each component moves to GPU only when
             # needed and back to CPU after. Keeps peak VRAM much lower than loading
@@ -652,7 +652,9 @@ async def animate_openpose(
             raise HTTPException(status_code=404, detail=f"Anchor image not found at {anchor_path}")
         logger.info(f"  Anchor image: {anchor_path}")
         
-        full_prompt = f"{prompt}, walking pose, front-facing, facing the viewer, game sprite, full body, solid bright green background, consistent character design, arms visible"
+        # Base prompt includes user prompt + base styling
+        base_styling = "game sprite, full body, solid bright green background, consistent character design, arms visible"
+        base_prompt = f"{prompt}, {base_styling}"
         
         seed = 42
         frame_urls = []
@@ -680,9 +682,11 @@ async def animate_openpose(
             
             # Use the specific pose description for this frame, fallback if out of bounds
             frame_pose = pose_prompts[i] if i < len(pose_prompts) else "walking pose"
-            frame_specific_prompt = f"{full_prompt}, {frame_pose}"
             
-            # Load OpenPose skeleton directly (colored lines on black background)
+            # Put the critical pose information at the FRONT of the prompt so it isn't truncated
+            frame_specific_prompt = f"{frame_pose}, walking pose, front-facing, facing the viewer, {base_prompt}"
+            
+            # Load OpenPose skeleton directly
             skel_img = load_image(os.path.join("output", f"skel_{session_id}_{i}.png"))
             skeleton = skel_img.convert("RGB").resize((1024, 1024))
             
@@ -777,7 +781,8 @@ async def regenerate_frame(
         skel_img = load_image(os.path.join("output", skel_name))
         skeleton = skel_img.convert("RGB").resize((1024, 1024))
         
-        full_prompt = f"{prompt}, walking pose, front-facing, facing the viewer, game sprite, full body, solid bright green background, consistent character design, arms visible"
+        # Put critical pose info at the FRONT
+        full_prompt = f"walking pose, front-facing, facing the viewer, {prompt}, game sprite, full body, solid bright green background, consistent character design, arms visible"
         
         if manager.device == "cuda":
             torch.cuda.empty_cache()
@@ -831,15 +836,8 @@ async def regenerate_frame(
         else:
             cropped = image
         
-        # Scale character to fit canvas height (matching original frame proportions)
-        target_h = canvas_h - 20  # Leave 10px padding top and bottom
-        if cropped.height > 0:
-            scale = target_h / cropped.height
-            new_w = int(cropped.width * scale)
-            new_h = int(cropped.height * scale)
-            cropped = cropped.resize((new_w, new_h), Image.LANCZOS)
-        
         # Center on canvas, anchor feet to bottom (same as walk cycle)
+        # REMOVED the artificial stretching logic that was breaking scale and placement!
         pad = 10
         aligned = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
         x = (canvas_w - cropped.width) // 2
