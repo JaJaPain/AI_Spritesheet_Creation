@@ -14,12 +14,11 @@ from PIL import Image
 import numpy as np
 import cv2
 from diffusers import (
-    FluxControlNetPipeline,
-    FluxControlNetModel,
-    FluxMultiControlNetModel,
+    StableDiffusionXLControlNetPipeline,
+    ControlNetModel,
 )
 from diffusers.utils import load_image
-from rembg import remove
+from rembg import remove, new_session
 import gc
 
 # Setup logging
@@ -52,12 +51,15 @@ os.makedirs("templates", exist_ok=True)
 app.mount("/output", StaticFiles(directory="output"), name="output")
 
 
+# Create anime-optimized bg removal session (loaded once, reused)
+rembg_session = new_session("isnet-anime")
+
 class ModelManager:
     def __init__(self):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.pipelines = {}
         logger.info(f"--- ModelManager Initialized on {self.device} ---")
-        logger.info(f"    VRAM: {torch.cuda.get_device_properties(0).total_mem / 1024**3:.1f} GB" if self.device == "cuda" else "    CPU mode")
+        logger.info(f"    VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB" if self.device == "cuda" else "    CPU mode")
 
     def unload_all(self):
         """Clear VRAM before loading a new heavy model."""
@@ -70,43 +72,317 @@ class ModelManager:
             torch.cuda.ipc_collect()
         gc.collect()
 
-    def load_flux(self):
-        """Load FLUX.1-dev + ControlNet-Union-Pro pipeline."""
-        if "flux" in self.pipelines:
-            return self.pipelines["flux"]
+    def load_sdxl(self, controlnet_type="canny"):
+        """Load SDXL + ControlNet pipeline.
+        
+        SDXL is 3.5B params — runs natively on 16GB in fp16:
+        - UNet: ~5GB (fp16)
+        - ControlNet: ~2.5GB (fp16)
+        - CLIP + VAE: ~1GB (fp16)
+        - Total: ~8.5GB → fits with room to spare
+        
+        Args:
+            controlnet_type: 'canny' or 'pose'
+        """
+        key = f"sdxl_{controlnet_type}"
+        if key in self.pipelines:
+            return self.pipelines[key]
         
         self.unload_all()
-        logger.info("Loading FLUX.1-dev + ControlNet-Union-Pro...")
+        logger.info(f"Loading SDXL + ControlNet ({controlnet_type})...")
         
         try:
-            # Load the Union ControlNet (supports Canny=0, Tile=1, Depth=2, Blur=3, Pose=4, Gray=5)
-            logger.info("  Loading ControlNet-Union-Pro...")
-            controlnet_union = FluxControlNetModel.from_pretrained(
-                "Shakker-Labs/FLUX.1-dev-ControlNet-Union-Pro",
-                torch_dtype=torch.bfloat16
-            )
-            controlnet = FluxMultiControlNetModel([controlnet_union])
+            # Load the appropriate ControlNet
+            if controlnet_type == "canny":
+                controlnet = ControlNetModel.from_pretrained(
+                    "diffusers/controlnet-canny-sdxl-1.0",
+                    torch_dtype=torch.float16,
+                    variant="fp16",
+                    use_safetensors=True
+                )
+            else:  # pose/softedge
+                controlnet = ControlNetModel.from_pretrained(
+                    "SargeZT/controlnet-sd-xl-1.0-softedge-dexined",
+                    torch_dtype=torch.float16
+                )
             
-            # Load the FLUX pipeline
-            logger.info("  Loading FLUX.1-dev base model (bfloat16)...")
-            pipe = FluxControlNetPipeline.from_pretrained(
-                "black-forest-labs/FLUX.1-dev",
+            logger.info(f"  ControlNet ({controlnet_type}) loaded.")
+            
+            # Load SDXL base pipeline
+            pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
+                "stabilityai/stable-diffusion-xl-base-1.0",
                 controlnet=controlnet,
-                torch_dtype=torch.bfloat16
+                torch_dtype=torch.float16,
+                variant="fp16",
+                use_safetensors=True
             )
             
-            # Memory optimizations for 16GB VRAM
-            logger.info("  Enabling Tiled VAE + CPU offload...")
-            pipe.vae.enable_tiling()
+            # For pose pipeline, add IP-Adapter for character consistency
+            if controlnet_type == "pose":
+                logger.info("  Loading IP-Adapter Plus for character consistency...")
+                from transformers import CLIPVisionModelWithProjection
+                image_encoder = CLIPVisionModelWithProjection.from_pretrained(
+                    "h94/IP-Adapter",
+                    subfolder="models/image_encoder",
+                    torch_dtype=torch.float16
+                )
+                pipe.image_encoder = image_encoder
+                pipe.load_ip_adapter(
+                    "h94/IP-Adapter",
+                    subfolder="sdxl_models",
+                    weight_name="ip-adapter-plus_sdxl_vit-h.safetensors"
+                )
+                pipe.set_ip_adapter_scale(0.5)
+                logger.info("  IP-Adapter Plus loaded.")
+            
+            # Use automatic model offloading — each component moves to GPU only when
+            # needed and back to CPU after. Keeps peak VRAM much lower than loading
+            # everything to GPU at once. Critical for 16GB cards at 1024x1024.
             pipe.enable_model_cpu_offload()
             
-            self.pipelines["flux"] = pipe
-            logger.info("  FLUX pipeline loaded successfully!")
+            self.pipelines[key] = pipe
+            logger.info(f"  SDXL + {controlnet_type} ControlNet loaded successfully!")
             return pipe
         except Exception as e:
-            logger.error(f"FAILED to load FLUX: {e}")
+            logger.error(f"FAILED to load SDXL: {e}")
             logger.error(traceback.format_exc())
             raise e
+
+    def describe_anchor(self, image_path: str) -> str:
+        """Use BLIP to generate a detailed description of the anchor image.
+        
+        Loads the model, describes, then fully unloads to free VRAM for SDXL.
+        """
+        from transformers import BlipProcessor, BlipForConditionalGeneration
+        
+        logger.info("Loading BLIP-large for anchor description...")
+        
+        # Unload any existing models first
+        self.unload_all()
+        
+        model_id = "Salesforce/blip-image-captioning-large"
+        
+        try:
+            processor = BlipProcessor.from_pretrained(model_id)
+            model = BlipForConditionalGeneration.from_pretrained(
+                model_id,
+                torch_dtype=torch.float16
+            ).to("cuda")
+            
+            # Load and process the anchor image
+            image = Image.open(image_path).convert("RGB")
+            
+            # Use conditional captioning with targeted starter prompts
+            # Each pass focuses on a different aspect of the character
+            captions = []
+            prompts = [
+                "this is a character with",
+                "the character's hair is",
+                "on top the character is wearing",
+                "on the bottom the character is wearing",
+                "on the feet the character is wearing",
+                "the character's accessories include",
+                "the art style is",
+            ]
+            
+            for starter in prompts:
+                inputs = processor(images=image, text=starter, return_tensors="pt").to("cuda", torch.float16)
+                with torch.no_grad():
+                    output = model.generate(**inputs, max_new_tokens=60)
+                caption = processor.decode(output[0], skip_special_tokens=True)
+                captions.append(caption)
+            
+            # Deduplicate: remove repeated phrases across captions
+            seen = set()
+            unique_parts = []
+            for cap in captions:
+                # Normalize and check if substantially new
+                normalized = cap.strip().lower()
+                if normalized not in seen:
+                    seen.add(normalized)
+                    unique_parts.append(cap.strip())
+            
+            combined = ". ".join(unique_parts)
+            logger.info(f"  BLIP captions: {combined}")
+            
+            # Fully unload BLIP
+            del model
+            del processor
+            if self.device == "cuda":
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+            gc.collect()
+            logger.info("  BLIP unloaded. VRAM freed for SDXL.")
+            
+            return combined
+            
+        except Exception as e:
+            logger.error(f"BLIP description failed: {e}")
+            logger.error(traceback.format_exc())
+            if self.device == "cuda":
+                torch.cuda.empty_cache()
+            gc.collect()
+            raise e
+
+    def quality_check_variants(self, image_paths: list) -> list:
+        """Check variant quality using BLIP captioning + pixel analysis.
+        
+        Returns list of booleans (True=pass).
+        """
+        from transformers import BlipProcessor, BlipForConditionalGeneration
+        
+        logger.info(f"Quality checking {len(image_paths)} variants...")
+        
+        model_id = "Salesforce/blip-image-captioning-large"
+        
+        try:
+            processor = BlipProcessor.from_pretrained(model_id)
+            model = BlipForConditionalGeneration.from_pretrained(
+                model_id,
+                torch_dtype=torch.float16
+            ).to("cuda")
+            
+            results = []
+            
+            for idx, img_path in enumerate(image_paths):
+                image = Image.open(img_path).convert("RGBA")
+                passed = True
+                reasons = []
+                
+                # Check 1: Image isn't mostly empty (sliver/artifact detection)
+                # Count non-transparent pixels
+                alpha = np.array(image)[:, :, 3]
+                non_transparent = np.sum(alpha > 20)
+                total_pixels = alpha.shape[0] * alpha.shape[1]
+                fill_ratio = non_transparent / total_pixels
+                
+                if fill_ratio < 0.05:
+                    passed = False
+                    reasons.append(f"Too empty: {fill_ratio:.1%} fill")
+                elif fill_ratio > 0.85:
+                    passed = False
+                    reasons.append(f"Background not removed: {fill_ratio:.1%} fill")
+                
+                # Check 2: Character isn't too narrow (sliver detection)
+                col_has_content = np.any(alpha > 20, axis=0)
+                content_width = np.sum(col_has_content)
+                width_ratio = content_width / alpha.shape[1]
+                
+                if width_ratio < 0.15:
+                    passed = False
+                    reasons.append(f"Too narrow: {width_ratio:.1%} width")
+                
+                # Check 3: Character isn't too short (cut-off detection)
+                row_has_content = np.any(alpha > 20, axis=1)
+                content_height = np.sum(row_has_content)
+                height_ratio = content_height / alpha.shape[0]
+                
+                if height_ratio < 0.4:
+                    passed = False
+                    reasons.append(f"Too short: {height_ratio:.1%} height")
+                
+                # Check 4: Multiple characters detection via gap analysis
+                # Look for large transparent gaps in the middle of content
+                if passed and col_has_content.any():
+                    content_cols = np.where(col_has_content)[0]
+                    gaps = np.diff(content_cols)
+                    max_gap = np.max(gaps) if len(gaps) > 0 else 0
+                    if max_gap > alpha.shape[1] * 0.15:
+                        passed = False
+                        reasons.append(f"Multiple figures detected (gap: {max_gap}px)")
+                
+                # Check 5: Aspect ratio — a standing character is ALWAYS taller than wide
+                # Multiple side-by-side characters make the content wider than tall
+                if passed and content_width > 0 and content_height > 0:
+                    aspect = content_width / content_height
+                    if aspect > 0.85:
+                        passed = False
+                        reasons.append(f"Too wide for single character (aspect: {aspect:.2f})")
+                
+                # Check 6: Arm detection via zone width comparison
+                # Arms at sides make the torso zone wider than the leg zone
+                if passed:
+                    content_rows = np.where(row_has_content)[0]
+                    if len(content_rows) > 10:
+                        top_row = content_rows[0]
+                        bot_row = content_rows[-1]
+                        char_height = bot_row - top_row
+                        
+                        # Torso/arm zone: 25-50% of character height
+                        torso_start = top_row + int(char_height * 0.25)
+                        torso_end = top_row + int(char_height * 0.50)
+                        torso_zone = alpha[torso_start:torso_end, :]
+                        torso_width = np.sum(np.any(torso_zone > 20, axis=0))
+                        
+                        # Leg zone: 65-85% of character height
+                        leg_start = top_row + int(char_height * 0.65)
+                        leg_end = top_row + int(char_height * 0.85)
+                        leg_zone = alpha[leg_start:leg_end, :]
+                        leg_width = np.sum(np.any(leg_zone > 20, axis=0))
+                        
+                        if leg_width > 0:
+                            arm_ratio = torso_width / leg_width
+                            logger.info(f"    Arm check: torso={torso_width}px, legs={leg_width}px, ratio={arm_ratio:.2f}")
+                            if arm_ratio < 1.25:
+                                passed = False
+                                reasons.append(f"Missing arms (torso/leg ratio: {arm_ratio:.2f})")
+                
+                # Check 6: BLIP caption sanity checks
+                # Composite onto solid background so BLIP sees it like a game would render it
+                if passed:
+                    bg = Image.new("RGBA", image.size, (200, 200, 200, 255))
+                    bg.paste(image, (0, 0), image)
+                    rgb_image = bg.convert("RGB")
+                    
+                    # 6a: Multi-character check
+                    inputs = processor(images=rgb_image, text="how many people", return_tensors="pt").to("cuda", torch.float16)
+                    with torch.no_grad():
+                        output = model.generate(**inputs, max_new_tokens=30)
+                    caption = processor.decode(output[0], skip_special_tokens=True).strip().lower()
+                    
+                    multi_words = ["two people", "three people", "two characters", "group", "couple", "pair"]
+                    if any(w in caption for w in multi_words):
+                        passed = False
+                        reasons.append(f"BLIP multi-char: {caption}")
+                
+                # 6b: Face check — reject blank/featureless heads
+                if passed:
+                    inputs = processor(images=rgb_image, text="the character's face has", return_tensors="pt").to("cuda", torch.float16)
+                    with torch.no_grad():
+                        output = model.generate(**inputs, max_new_tokens=30)
+                    face_caption = processor.decode(output[0], skip_special_tokens=True).strip().lower()
+                    
+                    face_words = ["eyes", "eye", "mouth", "face", "smile", "nose", "expression"]
+                    has_face = any(w in face_caption for w in face_words)
+                    if not has_face:
+                        passed = False
+                        reasons.append(f"No face detected: {face_caption}")
+                
+                if passed:
+                    logger.info(f"  Variant {idx+1}: PASSED (fill:{fill_ratio:.0%} w:{width_ratio:.0%} h:{height_ratio:.0%})")
+                else:
+                    logger.info(f"  Variant {idx+1}: FAILED - {'; '.join(reasons)}")
+                
+                results.append(passed)
+            
+            # Unload BLIP
+            del model
+            del processor
+            if self.device == "cuda":
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+            gc.collect()
+            logger.info("  Quality checker unloaded.")
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Quality check failed: {e}")
+            logger.error(traceback.format_exc())
+            if self.device == "cuda":
+                torch.cuda.empty_cache()
+            gc.collect()
+            return [True] * len(image_paths)
 
 
 manager = ModelManager()
@@ -117,67 +393,123 @@ async def root():
     return {"status": "active", "device": manager.device}
 
 
+@app.post("/describe-anchor")
+async def describe_anchor(
+    image_url: str = Body(..., embed=True)
+):
+    """Use BLIP vision model to auto-describe the selected anchor image."""
+    try:
+        # Resolve image path
+        name = os.path.basename(image_url)
+        image_path = os.path.join("output", name)
+        
+        if not os.path.exists(image_path):
+            raise HTTPException(status_code=404, detail="Anchor image not found")
+        
+        caption = manager.describe_anchor(image_path)
+        
+        return {"status": "success", "description": caption}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error describing anchor: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/generate-anchor")
 async def generate_anchor(
     prompt: str = Body(..., embed=True),
     template_id: str = Body("default", embed=True),
     num_variants: int = Body(4, embed=True)
 ):
-    """Generate anchor character variants using FLUX + Canny ControlNet."""
+    """Generate anchor character variants with BLIP VQA quality gate."""
     try:
-        pipe = manager.load_flux()
-        
         # Load template for Canny edge guidance
         template_path = f"templates/{template_id}.png"
         if not os.path.exists(template_path):
             template_path = "templates/default.png"
         
+        use_controlnet = False
+        control_image = None
         if os.path.exists(template_path):
-            template_image = load_image(template_path).resize((768, 768))
-            # Generate Canny edges from template
+            template_image = load_image(template_path).resize((512, 512))
             template_np = np.array(template_image.convert("RGB"))
             canny_edges = cv2.Canny(template_np, 50, 150)
             control_image = Image.fromarray(np.stack([canny_edges]*3, axis=-1))
             use_controlnet = True
             logger.info(f"  Using template Canny edges from: {template_path}")
         else:
-            use_controlnet = False
             logger.info("  No template found, generating without ControlNet guidance")
         
-        full_prompt = f"{prompt}, pixel art style, high quality, 8-bit, game sprite, solid dark gray background, full body, front facing, neutral standing pose"
-
-        urls = []
-        for i in range(num_variants):
-            logger.info(f"Generating variant {i+1}/{num_variants}...")
+        full_prompt = f"{prompt}, high quality, game sprite, solid bright green background, full body, front facing, neutral standing pose, arms visible at sides"
+        
+        # Track which slots still need a good variant
+        # Each slot: { 'url': str, 'filepath': str, 'passed': bool }
+        slots = [None] * num_variants
+        max_retries = 3
+        
+        # Load SDXL once — keep it loaded alongside BLIP (9GB + 1.5GB = fits in 16GB)
+        pipe = manager.load_sdxl("canny")
+        
+        for attempt in range(max_retries):
+            # Figure out which slots need generation
+            slots_to_generate = [i for i in range(num_variants) if slots[i] is None or not slots[i]['passed']]
             
-            if manager.device == "cuda":
-                torch.cuda.empty_cache()
-                gc.collect()
+            if not slots_to_generate:
+                logger.info("All variants passed quality check!")
+                break
             
-            gen_kwargs = {
-                "prompt": full_prompt,
-                "num_inference_steps": 20,
-                "guidance_scale": 3.5,
-                "height": 768,
-                "width": 768,
-                "generator": torch.Generator(device="cpu").manual_seed(random.randint(0, 2**32 - 1))
-            }
+            logger.info(f"Quality gate attempt {attempt+1}/{max_retries}: generating {len(slots_to_generate)} variant(s)...")
             
-            if use_controlnet:
-                gen_kwargs["control_image"] = [control_image]
-                gen_kwargs["control_mode"] = [0]  # Canny mode
-                gen_kwargs["controlnet_conditioning_scale"] = [0.5]
+            for i in slots_to_generate:
+                logger.info(f"  Generating variant for slot {i+1}/{num_variants}...")
+                
+                if manager.device == "cuda":
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                
+                gen_kwargs = {
+                    "prompt": full_prompt,
+                    "negative_prompt": "blurry, low quality, deformed, ugly, bad anatomy, extra limbs, cape, cloak, flowing fabric, wings",
+                    "num_inference_steps": 25,
+                    "guidance_scale": 7.5,
+                    "height": 512,
+                    "width": 512,
+                    "generator": torch.Generator(device="cpu").manual_seed(random.randint(0, 2**32 - 1))
+                }
+                
+                if use_controlnet:
+                    gen_kwargs["image"] = control_image
+                    gen_kwargs["controlnet_conditioning_scale"] = 0.3
+                
+                image = pipe(**gen_kwargs).images[0]
+                
+                logger.info(f"  Removing background for variant {i+1}...")
+                image = remove(image, session=rembg_session)
+                
+                filename = f"anchor_{uuid.uuid4()}.png"
+                filepath = os.path.join("output", filename)
+                image.save(filepath)
+                slots[i] = {'url': f"/output/{filename}", 'filepath': filepath, 'passed': False}
             
-            image = pipe(**gen_kwargs).images[0]
-
-            logger.info(f"  Removing background for variant {i+1}...")
-            image = remove(image)
-
-            filename = f"anchor_{uuid.uuid4()}.png"
-            filepath = os.path.join("output", filename)
-            image.save(filepath)
-            urls.append(f"/output/{filename}")
-
+            # Quality check WITHOUT unloading SDXL — both fit in VRAM at 512x512
+            
+            # Run BLIP VQA quality check on all pending variants
+            paths_to_check = [slots[i]['filepath'] for i in slots_to_generate]
+            results = manager.quality_check_variants(paths_to_check)
+            
+            for idx, slot_idx in enumerate(slots_to_generate):
+                slots[slot_idx]['passed'] = results[idx]
+            
+            passed_count = sum(1 for s in slots if s and s['passed'])
+            logger.info(f"  Quality gate: {passed_count}/{num_variants} passed")
+            
+            # If all passed or last attempt, break
+            if passed_count == num_variants:
+                break
+        
+        # Return all variants (passed or not on final attempt)
+        urls = [s['url'] for s in slots if s]
         return {"status": "success", "urls": urls}
     except Exception as e:
         logger.error(f"Error during anchor generation: {e}")
@@ -231,7 +563,7 @@ async def animate_openpose(
 ):
     """Generate a walk cycle using FLUX + ControlNet-Union Pose mode."""
     try:
-        logger.info(f"FLUX walk cycle requested for {image_url} ({num_frames} frames)")
+        logger.info(f"SDXL walk cycle requested for {image_url} ({num_frames} frames)")
         
         session_id = str(uuid.uuid4())[:8]
         
@@ -257,9 +589,9 @@ async def animate_openpose(
         
         logger.info(f"  Using {len(selected)} skeleton frames from pre-made set.")
         
-        # Step 2: Load FLUX + ControlNet-Union and generate
-        logger.info("Step 2/3: Loading FLUX + ControlNet-Union...")
-        pipe = manager.load_flux()
+        # Step 2: Load SDXL + OpenPose ControlNet and generate
+        logger.info("Step 2/3: Loading SDXL + OpenPose ControlNet...")
+        pipe = manager.load_sdxl("pose")
         
         # Load anchor image (used in prompt description, not IP-Adapter)
         anchor_name = os.path.basename(image_url)
@@ -268,7 +600,7 @@ async def animate_openpose(
             raise HTTPException(status_code=404, detail="Anchor image not found")
         logger.info(f"  Anchor image: {anchor_path}")
         
-        full_prompt = f"{prompt}, walking pose, pixel art style, game sprite, full body, solid dark gray background, consistent character design"
+        full_prompt = f"{prompt}, walking pose, front-facing, facing the viewer, game sprite, full body, solid bright green background, consistent character design, arms visible"
         
         seed = 42
         frame_urls = []
@@ -277,27 +609,32 @@ async def animate_openpose(
         for i in range(len(selected)):
             logger.info(f"  Generating frame {i+1}/{len(selected)}...")
             
-            # Load skeleton and resize to generation resolution
-            skeleton = load_image(os.path.join("output", f"skel_{session_id}_{i}.png")).resize((768, 768))
+            # Load skeleton, convert to soft edge, resize to 1024
+            skel_img = load_image(os.path.join("output", f"skel_{session_id}_{i}.png"))
+            skel_gray = np.array(skel_img.convert("L"))
+            skel_soft = cv2.GaussianBlur(skel_gray, (5, 5), 0)
+            skeleton = Image.fromarray(skel_soft).convert("RGB").resize((1024, 1024))
             
             if manager.device == "cuda":
                 torch.cuda.empty_cache()
                 gc.collect()
             
-            # Use ControlNet-Union in Pose mode (mode=4)
+            # Use SoftEdge ControlNet + IP-Adapter (anchor as reference)
+            anchor_image = load_image(anchor_path).resize((1024, 1024))
             image = pipe(
                 prompt=full_prompt,
-                control_image=[skeleton],
-                control_mode=[4],  # 4 = Pose mode in Union-Pro
-                controlnet_conditioning_scale=[0.8],
-                num_inference_steps=20,
-                guidance_scale=3.5,
-                height=768,
-                width=768,
+                negative_prompt="blurry, low quality, deformed, ugly, bad anatomy, extra limbs, cape, cloak, flowing fabric, wings, rear view, back view, from behind, turned away",
+                image=skeleton,
+                ip_adapter_image=anchor_image,
+                controlnet_conditioning_scale=0.8,
+                num_inference_steps=30,
+                guidance_scale=7.5,
+                height=1024,
+                width=1024,
                 generator=torch.Generator(device="cpu").manual_seed(seed)
             ).images[0]
             
-            image = remove(image)
+            image = remove(image, session=rembg_session)
             generated_frames.append(image)
         
         # Post-processing: Align all frames to consistent center
@@ -344,7 +681,7 @@ async def animate_openpose(
             "anchor_url": image_url
         }
     except Exception as e:
-        logger.error(f"Error during FLUX walk cycle: {e}")
+        logger.error(f"Error during SDXL walk cycle: {e}")
         logger.error(traceback.format_exc())
         manager.unload_all()
         raise HTTPException(status_code=500, detail=str(e))
@@ -358,17 +695,20 @@ async def regenerate_frame(
     prompt: str = Body(..., embed=True),
     session_id: str = Body(..., embed=True)
 ):
-    """Regenerate a single frame using FLUX + ControlNet-Union Pose mode."""
+    """Regenerate a single frame using SDXL + SoftEdge ControlNet."""
     try:
         logger.info(f"Regenerating frame {frame_index} for session {session_id}")
         
-        pipe = manager.load_flux()
+        pipe = manager.load_sdxl("pose")
         
-        # Load skeleton
+        # Load skeleton and convert to soft edge
         skel_name = os.path.basename(skeleton_url)
-        skeleton = load_image(os.path.join("output", skel_name)).resize((768, 768))
+        skel_img = load_image(os.path.join("output", skel_name))
+        skel_gray = np.array(skel_img.convert("L"))
+        skel_soft = cv2.GaussianBlur(skel_gray, (5, 5), 0)
+        skeleton = Image.fromarray(skel_soft).convert("RGB").resize((1024, 1024))
         
-        full_prompt = f"{prompt}, walking pose, pixel art style, game sprite, full body, solid dark gray background, consistent character design"
+        full_prompt = f"{prompt}, walking pose, front-facing, facing the viewer, game sprite, full body, solid bright green background, consistent character design, arms visible"
         
         if manager.device == "cuda":
             torch.cuda.empty_cache()
@@ -377,26 +717,62 @@ async def regenerate_frame(
         seed = random.randint(0, 2**32 - 1)
         logger.info(f"  Using seed {seed}")
         
-        # Use ControlNet-Union in Pose mode (mode=4)
+        # Use SoftEdge ControlNet + IP-Adapter (anchor as reference)
+        anchor_name_ref = os.path.basename(anchor_url)
+        anchor_path_ref = os.path.join("output", anchor_name_ref)
+        anchor_image = load_image(anchor_path_ref).resize((1024, 1024))
+        
         image = pipe(
             prompt=full_prompt,
-            control_image=[skeleton],
-            control_mode=[4],  # Pose mode
-            controlnet_conditioning_scale=[0.8],
-            num_inference_steps=20,
-            guidance_scale=3.5,
-            height=768,
-            width=768,
+            negative_prompt="blurry, low quality, deformed, ugly, bad anatomy, extra limbs, cape, cloak, flowing fabric, wings, rear view, back view, from behind, turned away",
+            image=skeleton,
+            ip_adapter_image=anchor_image,
+            controlnet_conditioning_scale=0.8,
+            num_inference_steps=30,
+            guidance_scale=7.5,
+            height=1024,
+            width=1024,
             generator=torch.Generator(device="cpu").manual_seed(seed)
         ).images[0]
         
-        image = remove(image)
+        image = remove(image, session=rembg_session)
         
-        # Overwrite the frame file
+        # Post-processing: Match the same crop/align logic as walk cycle generation
         frame_filename = f"frame_{session_id}_{frame_index}.png"
         frame_path = os.path.join("output", frame_filename)
-        image.save(frame_path)
-        logger.info(f"  Frame {frame_index} regenerated: {frame_path}")
+        
+        # Get target canvas size from existing frame
+        if os.path.exists(frame_path):
+            existing = Image.open(frame_path)
+            canvas_w, canvas_h = existing.size
+            existing.close()
+        else:
+            canvas_w, canvas_h = 512, 512
+        
+        # Crop to bounding box (remove transparent border)
+        bbox = image.getbbox()
+        if bbox:
+            cropped = image.crop(bbox)
+        else:
+            cropped = image
+        
+        # Scale character to fit canvas height (matching original frame proportions)
+        target_h = canvas_h - 20  # Leave 10px padding top and bottom
+        if cropped.height > 0:
+            scale = target_h / cropped.height
+            new_w = int(cropped.width * scale)
+            new_h = int(cropped.height * scale)
+            cropped = cropped.resize((new_w, new_h), Image.LANCZOS)
+        
+        # Center on canvas, anchor feet to bottom (same as walk cycle)
+        pad = 10
+        aligned = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+        x = (canvas_w - cropped.width) // 2
+        y = canvas_h - cropped.height - pad  # Feet alignment
+        aligned.paste(cropped, (x, y), cropped)
+        
+        aligned.save(frame_path)
+        logger.info(f"  Frame {frame_index} regenerated and aligned ({canvas_w}x{canvas_h}): {frame_path}")
         
         return {"status": "success", "url": f"/output/{frame_filename}"}
     except Exception as e:
@@ -431,6 +807,7 @@ async def stitch_frames(
         
         sheet = Image.new("RGBA", (max_w * len(frames), max_h), (0, 0, 0, 0))
         for i, f in enumerate(frames):
+            f = f.convert("RGBA")  # Ensure RGBA for mask compatibility
             x = i * max_w + (max_w - f.width) // 2
             y = (max_h - f.height) // 2
             sheet.paste(f, (x, y), f)

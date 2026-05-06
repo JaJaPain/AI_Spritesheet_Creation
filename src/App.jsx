@@ -39,6 +39,9 @@ function App() {
   const [redoingFrame, setRedoingFrame] = useState(null)
   const [animFrame, setAnimFrame] = useState(0)
   const [hasSavedAnchor, setHasSavedAnchor] = useState(false)
+  const [excludedFrames, setExcludedFrames] = useState(new Set())
+  const [autoPrompt, setAutoPrompt] = useState('')
+  const [describing, setDescribing] = useState(false)
 
   // Check for saved anchor ONLY after discovery completes
   useEffect(() => {
@@ -57,12 +60,16 @@ function App() {
   const animRef = useRef(null)
   useEffect(() => {
     if (stage === 'editing' && frameUrls.length > 0) {
+      const includedIndices = frameUrls.map((_, i) => i).filter(i => !excludedFrames.has(i))
+      if (includedIndices.length === 0) return
+      let pos = 0
       animRef.current = setInterval(() => {
-        setAnimFrame(prev => (prev + 1) % frameUrls.length)
+        pos = (pos + 1) % includedIndices.length
+        setAnimFrame(includedIndices[pos])
       }, 150)
       return () => clearInterval(animRef.current)
     }
-  }, [stage, frameUrls.length])
+  }, [stage, frameUrls.length, excludedFrames])
 
   const handleForgeAnchor = async () => {
     setLoading(true)
@@ -94,6 +101,28 @@ function App() {
         setPrompt(data.prompt)
         setSelectedAnchor(`${apiBase}${data.image_url}`)
         setStage('animating')
+        
+        // Auto-describe the loaded anchor with BLIP
+        setDescribing(true)
+        setAutoPrompt('')
+        try {
+          const descRes = await fetch(`${apiBase}/describe-anchor`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image_url: data.image_url })
+          });
+          const descData = await descRes.json();
+          if (descData.status === 'success') {
+            setAutoPrompt(descData.description)
+          } else {
+            setAutoPrompt(data.prompt)
+          }
+        } catch (err) {
+          console.error('Error describing anchor:', err)
+          setAutoPrompt(data.prompt)
+        } finally {
+          setDescribing(false)
+        }
       }
     } catch (error) {
       console.error("Error loading anchor:", error);
@@ -122,7 +151,7 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           image_url: selectedAnchor,
-          prompt: prompt,
+          prompt: autoPrompt || prompt,
           num_frames: 12
         })
       });
@@ -152,7 +181,7 @@ function App() {
           frame_index: index,
           skeleton_url: skeletonUrls[index],
           anchor_url: anchorUrl,
-          prompt: prompt,
+          prompt: autoPrompt || prompt,
           session_id: sessionId
         })
       });
@@ -171,13 +200,24 @@ function App() {
     }
   }
 
+  const toggleExcludeFrame = (index) => {
+    setExcludedFrames(prev => {
+      const next = new Set(prev)
+      if (next.has(index)) next.delete(index)
+      else next.add(index)
+      return next
+    })
+  }
+
   const handleStitchFrames = async () => {
     setLoading(true)
     try {
-      const relativeUrls = frameUrls.map(u => {
-        const url = new URL(u)
-        return url.pathname
-      })
+      const relativeUrls = frameUrls
+        .filter((_, i) => !excludedFrames.has(i))
+        .map(u => {
+          const url = new URL(u)
+          return url.pathname
+        })
       const response = await fetch(`${apiBase}/stitch-frames`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -195,9 +235,30 @@ function App() {
     }
   }
 
-  const selectAnchor = (variant) => {
+  const selectAnchor = async (variant) => {
     setSelectedAnchor(variant)
     setStage('animating')
+    setDescribing(true)
+    setAutoPrompt('')
+    try {
+      const url = new URL(variant)
+      const response = await fetch(`${apiBase}/describe-anchor`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image_url: url.pathname })
+      });
+      const data = await response.json();
+      if (data.status === 'success') {
+        setAutoPrompt(data.description)
+      } else {
+        setAutoPrompt(prompt) // Fallback to original prompt
+      }
+    } catch (error) {
+      console.error('Error describing anchor:', error)
+      setAutoPrompt(prompt) // Fallback to original prompt
+    } finally {
+      setDescribing(false)
+    }
   }
 
   const reset = () => {
@@ -210,6 +271,9 @@ function App() {
     setSkeletonUrls([])
     setSessionId(null)
     setAnchorUrl(null)
+    setExcludedFrames(new Set())
+    setAutoPrompt('')
+    setDescribing(false)
   }
 
   return (
@@ -370,14 +434,37 @@ function App() {
                 </div>
               ) : (
                 <>
-                  <p style={{ color: 'var(--text-dim)', marginBottom: '2rem' }}>
-                    We'll generate a 12-frame walk cycle using clean skeleton references. You can redo any frame afterwards.
-                  </p>
+                  {describing ? (
+                    <div style={{ marginBottom: '1.5rem' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', justifyContent: 'center', color: 'var(--accent-primary)' }}>
+                        <Loader2 size={16} className="animate-spin" />
+                        <span style={{ fontSize: '0.9rem' }}>PaliGemma is analyzing your character...</span>
+                      </div>
+                    </div>
+                  ) : autoPrompt ? (
+                    <div style={{ marginBottom: '1.5rem', textAlign: 'left' }}>
+                      <label style={{ fontSize: '0.75rem', color: 'var(--accent-primary)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: '0.5rem', display: 'block' }}>
+                        AI-Generated Prompt (edit as needed)
+                      </label>
+                      <textarea
+                        value={autoPrompt}
+                        onChange={(e) => setAutoPrompt(e.target.value)}
+                        style={{ height: '80px', resize: 'vertical', fontSize: '0.85rem', lineHeight: '1.4' }}
+                      />
+                      <p style={{ fontSize: '0.7rem', color: 'var(--text-dim)', marginTop: '0.4rem' }}>
+                        This describes what BLIP sees in your anchor. Edit to remove unwanted details (e.g., hats) before generating.
+                      </p>
+                    </div>
+                  ) : (
+                    <p style={{ color: 'var(--text-dim)', marginBottom: '1.5rem', fontSize: '0.85rem' }}>
+                      We'll generate a 12-frame walk cycle using clean skeleton references. You can redo any frame afterwards.
+                    </p>
+                  )}
                   <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}>
                     <button className="btn-secondary" onClick={() => setStage('selecting-anchor')}>
                       <ArrowLeft size={18} style={{ marginRight: '0.5rem' }} /> Back
                     </button>
-                    <button className="btn-primary" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }} onClick={handleAnimate}>
+                    <button className="btn-primary" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }} onClick={handleAnimate} disabled={describing}>
                       <Play size={18} />
                       Forge Walk Cycle
                     </button>
@@ -411,7 +498,7 @@ function App() {
                     <motion.div
                       key={i}
                       className="glass-card"
-                      style={{ padding: '0', overflow: 'hidden', textAlign: 'center' }}
+                      style={{ padding: '0', overflow: 'hidden', textAlign: 'center', opacity: excludedFrames.has(i) ? 0.35 : 1 }}
                       initial={{ opacity: 0, y: 10 }}
                       animate={{ opacity: 1, y: 0 }}
                       transition={{ delay: i * 0.04 }}
@@ -438,11 +525,11 @@ function App() {
                           background: 'rgba(0,0,0,0.7)', padding: '1px 5px', borderRadius: '3px'
                         }}>F{i + 1}</span>
                       </div>
-                      <div style={{ padding: '0.35rem' }}>
+                      <div style={{ padding: '0.35rem', display: 'flex', gap: '0.25rem' }}>
                         <button 
                           className="btn-secondary" 
                           style={{ 
-                            width: '100%', 
+                            flex: 1, 
                             fontSize: '0.7rem', 
                             padding: '0.3rem 0.4rem',
                             display: 'flex',
@@ -460,6 +547,23 @@ function App() {
                             <><RefreshCw size={10} /> Redo</>
                           )}
                         </button>
+                        <label
+                          style={{
+                            display: 'flex', alignItems: 'center', gap: '0.2rem',
+                            fontSize: '0.6rem', color: excludedFrames.has(i) ? '#f44' : 'var(--text-dim)',
+                            cursor: 'pointer', padding: '0 0.3rem',
+                            userSelect: 'none'
+                          }}
+                          title={excludedFrames.has(i) ? 'Excluded from sprite sheet' : 'Click to exclude'}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={excludedFrames.has(i)}
+                            onChange={() => toggleExcludeFrame(i)}
+                            style={{ width: '12px', height: '12px', cursor: 'pointer', accentColor: '#f44' }}
+                          />
+                          ✕
+                        </label>
                       </div>
                     </motion.div>
                   ))}
@@ -512,7 +616,7 @@ function App() {
                     )}
                   </div>
                   <span style={{ fontSize: '0.65rem', color: 'var(--text-dim)', padding: '0.5rem' }}>
-                    Frame {animFrame + 1}/{frameUrls.length}
+                    Frame {animFrame + 1}/{frameUrls.length} ({frameUrls.length - excludedFrames.size} included)
                   </span>
                 </motion.div>
               </div>
