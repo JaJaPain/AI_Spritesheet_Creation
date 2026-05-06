@@ -2,6 +2,116 @@ import React, { useState, useEffect, useRef } from 'react'
 import { Sparkles, Wand2, Play, Download, Settings, Image as ImageIcon, Loader2, ArrowLeft, RefreshCw, Save, Upload, X, Check, FolderOpen } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 
+function LivePreview({ rig, params }) {
+  const canvasRef = useRef(null);
+  const [time, setTime] = useState(0);
+
+  useEffect(() => {
+    let frame;
+    const tick = (t) => {
+      setTime(t / 1000 * params.speed);
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [params.speed]);
+
+  useEffect(() => {
+    if (!canvasRef.current || !rig) return;
+    const ctx = canvasRef.current.getContext('2d');
+    const width = canvasRef.current.width;
+    const height = canvasRef.current.height;
+
+    ctx.clearRect(0, 0, width, height);
+    
+    // Simulate Joint Positions
+    const phase = (time * 2) % (Math.PI * 2);
+    const { stride, bounce } = params;
+    const simulatedJoints = {};
+    
+    Object.entries(rig.joints).forEach(([name, pos]) => {
+      let nx = pos.x;
+      let ny = pos.y;
+      
+      if (name.includes('knee_l') || name.includes('ankle_l') || name.includes('foot_l')) {
+          nx += Math.sin(phase) * stride;
+          ny += Math.max(0, Math.cos(phase)) * bounce;
+      } else if (name.includes('knee_r') || name.includes('ankle_r') || name.includes('foot_r')) {
+          nx += Math.sin(phase + Math.PI) * stride;
+          ny += Math.max(0, Math.cos(phase + Math.PI)) * bounce;
+      }
+      
+      if (name.includes('hip') || name.includes('torso') || name.includes('shoulder') || name.includes('nose')) {
+          ny += Math.abs(Math.sin(phase * 2)) * (bounce * 0.5);
+      }
+      
+      if (name.includes('wrist_l') || name.includes('elbow_l')) {
+          nx += Math.sin(phase + Math.PI) * (stride * 0.5);
+      } else if (name.includes('wrist_r') || name.includes('elbow_r')) {
+          nx += Math.sin(phase) * (stride * 0.5);
+      }
+      
+      simulatedJoints[name] = { x: nx, y: ny };
+    });
+
+    // Draw Skeletal Simulation
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+    ctx.lineWidth = 2;
+    
+    // Draw Bones (Lines)
+    const bones = [
+      ['shoulder_l', 'elbow_l'], ['elbow_l', 'wrist_l'],
+      ['shoulder_r', 'elbow_r'], ['elbow_r', 'wrist_r'],
+      ['hip_l', 'knee_l'], ['knee_l', 'ankle_l'],
+      ['hip_r', 'knee_r'], ['knee_r', 'ankle_r'],
+      ['shoulder_l', 'shoulder_r'], ['hip_l', 'hip_r']
+    ];
+
+    bones.forEach(([a, b]) => {
+      if (simulatedJoints[a] && simulatedJoints[b]) {
+        ctx.beginPath();
+        ctx.moveTo(simulatedJoints[a].x * width, simulatedJoints[a].y * height);
+        ctx.lineTo(simulatedJoints[b].x * width, simulatedJoints[b].y * height);
+        ctx.stroke();
+      }
+    });
+
+    // Draw Joints
+    Object.entries(simulatedJoints).forEach(([name, pos]) => {
+      ctx.fillStyle = name.includes('_l') ? '#8b5cf6' : name.includes('_r') ? '#d946ef' : '#fff';
+      ctx.beginPath();
+      ctx.arc(pos.x * width, pos.y * height, 4, 0, Math.PI * 2);
+      ctx.fill();
+    });
+
+    // Label
+    ctx.fillStyle = '#666';
+    ctx.font = '10px Inter';
+    ctx.fillText("Real-time Skeletal Overlay", 10, height - 10);
+
+  }, [time, rig, params]);
+
+  return (
+    <div style={{ position: 'relative', width: '100%', height: '100%', minHeight: '350px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <img src={rig?.url} style={{ maxHeight: '80%', maxWidth: '80%', objectFit: 'contain', opacity: 0.3, filter: 'grayscale(1)' }} />
+      <canvas 
+        ref={canvasRef} 
+        width={400} 
+        height={400} 
+        style={{ 
+          position: 'absolute', 
+          top: '50%', 
+          left: '50%', 
+          transform: 'translate(-50%, -50%)',
+          width: '100%',
+          height: '100%',
+          pointerEvents: 'none'
+        }} 
+      />
+    </div>
+  );
+}
+
 function App() {
   const [apiBase, setApiBase] = useState(null)
   const [stage, setStage] = useState('prompt') // prompt, selecting-anchor, animating, editing, preview
@@ -519,6 +629,66 @@ function App() {
       console.error("Error stitching:", error);
     } finally {
       setLoading(false)
+    }
+  }
+
+  const handleGenerateAnimation = async () => {
+    if (!rigData || rigData.length === 0) return;
+    setLoading(true);
+    try {
+      // Use the first rig for the walk cycle for now (or let user pick)
+      const activeRig = rigData[0];
+      const res = await fetch(`${apiBase}/generate-animation`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          frame_url: activeRig.url,
+          joints: activeRig.joints,
+          project_id: activeProjectId,
+          anim_type: "walk",
+          stride: walkParams.stride,
+          bounce: walkParams.bounce,
+          num_frames: 12
+        })
+      });
+      const data = await res.json();
+      if (data.status === 'success') {
+        setAnimFrames(data.urls.map(u => `${apiBase}${u}`));
+        setStage('preview-animation');
+      }
+    } catch (err) {
+      console.error("Animation failed:", err);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const [walkParams, setWalkParams] = useState({ stride: 0.15, bounce: 0.05, speed: 1.0 });
+  const [animFrames, setAnimFrames] = useState([]);
+  const [currentAnimIdx, setCurrentAnimIdx] = useState(0);
+
+  useEffect(() => {
+    if (stage === 'preview-animation' && animFrames.length > 0) {
+      const interval = setInterval(() => {
+        setCurrentAnimIdx(prev => (prev + 1) % animFrames.length);
+      }, 100 / walkParams.speed);
+      return () => clearInterval(interval);
+    }
+  }, [stage, animFrames, walkParams.speed]);
+
+  const handleBuildIndex = async () => {
+    try {
+      const res = await fetch(`${apiBase}/build-character-index`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project_id: activeProjectId })
+      });
+      const data = await res.json();
+      if (data.status === 'success') {
+        alert(`Character Index created! Totality package ready at ${data.index_url}`);
+      }
+    } catch (err) {
+      console.error("Index build failed:", err);
     }
   }
 
@@ -1094,16 +1264,6 @@ function App() {
                           pointerEvents: 'none'
                         }}
                       >
-                        {/* Draw Bones */}
-                        {rig.joints.shoulder_l && rig.joints.elbow_l && (
-                          <line x1={rig.joints.shoulder_l.x} y1={rig.joints.shoulder_l.y} x2={rig.joints.elbow_l.x} y2={rig.joints.elbow_l.y} stroke="rgba(255,255,255,0.5)" strokeWidth="0.01" />
-                        )}
-                        {rig.joints.elbow_l && rig.joints.wrist_l && (
-                          <line x1={rig.joints.elbow_l.x} y1={rig.joints.elbow_l.y} x2={rig.joints.wrist_l.x} y2={rig.joints.wrist_l.y} stroke="rgba(255,255,255,0.5)" strokeWidth="0.01" />
-                        )}
-                        {/* ... add more bones here ... */}
-                        
-                        {/* Draw Joints */}
                         {Object.entries(rig.joints).map(([name, pos]) => (
                           <circle 
                             key={name}
@@ -1117,26 +1277,137 @@ function App() {
                         ))}
                       </svg>
                     </div>
-                    <div style={{ padding: '0.5rem', fontSize: '0.8rem', background: 'rgba(0,0,0,0.5)' }}>
-                      Pose {i + 1}
-                    </div>
                   </div>
                 ))}
               </div>
               
               <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}>
                 <button className="btn-secondary" onClick={() => setStage('slicing')}>
-                  <ArrowLeft size={18} style={{ marginRight: '0.5rem' }} /> Back to Slices
+                  <ArrowLeft size={18} /> Back to Slices
                 </button>
                 <button 
                   className="btn-primary" 
                   style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem 2rem' }}
-                  onClick={() => {
-                    alert(`Animation Phase (Phase 5) will use project: ${activeProjectId || 'Temporary'}`);
-                    // Future: handleAnimation(rigData)
-                  }}
+                  onClick={() => setStage('anim-tuner')}
                 >
-                  <Play size={18} /> Proceed to Animation (Phase 5)
+                  <Play size={18} /> Proceed to Animation Tuner
+                </button>
+              </div>
+            </motion.div>
+          )}
+
+          {stage === 'anim-tuner' && (
+            <motion.div
+              key="anim-tuner"
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              className="glass-card"
+              style={{ maxWidth: '1000px', margin: '0 auto', textAlign: 'center', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2rem' }}
+            >
+              <div style={{ textAlign: 'left' }}>
+                <h2 style={{ marginBottom: '1.5rem' }}>Animation <span className="gradient-text">Tuner</span></h2>
+                <p style={{ color: 'var(--text-dim)', marginBottom: '2rem' }}>
+                  Adjust the parameters for the Mesh Deformation walk cycle.
+                </p>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem', textAlign: 'left', marginBottom: '2rem' }}>
+                  <div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+                       <label style={{ fontSize: '0.9rem' }}>Stride Length</label>
+                       <span style={{ color: 'var(--accent-primary)', fontWeight: 'bold' }}>{walkParams.stride}</span>
+                    </div>
+                    <input type="range" min="0.05" max="0.4" step="0.01" value={walkParams.stride} onChange={(e) => setWalkParams({...walkParams, stride: parseFloat(e.target.value)})} style={{ width: '100%' }} />
+                  </div>
+                  <div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+                       <label style={{ fontSize: '0.9rem' }}>Bounce / Lift</label>
+                       <span style={{ color: 'var(--accent-primary)', fontWeight: 'bold' }}>{walkParams.bounce}</span>
+                    </div>
+                    <input type="range" min="0" max="0.15" step="0.01" value={walkParams.bounce} onChange={(e) => setWalkParams({...walkParams, bounce: parseFloat(e.target.value)})} style={{ width: '100%' }} />
+                  </div>
+                  <div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+                       <label style={{ fontSize: '0.9rem' }}>Playback Speed</label>
+                       <span style={{ color: 'var(--accent-primary)', fontWeight: 'bold' }}>{walkParams.speed}x</span>
+                    </div>
+                    <input type="range" min="0.5" max="2.0" step="0.1" value={walkParams.speed} onChange={(e) => setWalkParams({...walkParams, speed: parseFloat(e.target.value)})} style={{ width: '100%' }} />
+                  </div>
+                </div>
+
+                <div style={{ display: 'flex', gap: '1rem' }}>
+                  <button className="btn-secondary" onClick={() => setStage('rigging')}>Back</button>
+                  <button 
+                    className="btn-primary" 
+                    style={{ flex: 1, padding: '0.75rem' }}
+                    onClick={handleGenerateAnimation}
+                    disabled={loading}
+                  >
+                    {loading ? <Loader2 className="animate-spin" /> : <Play size={18} />} Bake Walk Cycle
+                  </button>
+                </div>
+              </div>
+
+              {/* Real-time Preview */}
+              <div style={{ 
+                background: '#050505', 
+                borderRadius: '12px', 
+                border: '1px solid var(--glass-border)',
+                position: 'relative',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                overflow: 'hidden'
+              }}>
+                <LivePreview 
+                  rig={rigData[0]} 
+                  params={walkParams} 
+                />
+                <div style={{ position: 'absolute', top: '10px', left: '10px', background: 'rgba(0,0,0,0.5)', padding: '2px 8px', borderRadius: '4px', fontSize: '0.7rem', color: 'var(--accent-primary)' }}>
+                  LIVE PREVIEW (REAL-TIME)
+                </div>
+              </div>
+            </motion.div>
+          )}
+
+          {stage === 'preview-animation' && (
+            <motion.div
+              key="preview-animation"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="glass-card"
+              style={{ maxWidth: '600px', margin: '0 auto', textAlign: 'center' }}
+            >
+              <h2 style={{ marginBottom: '1.5rem' }}>Animation <span className="gradient-text">Preview</span></h2>
+              
+              <div style={{ 
+                width: '100%', 
+                aspectRatio: '1/1', 
+                background: '#050505', 
+                borderRadius: '12px', 
+                border: '1px solid var(--glass-border)',
+                marginBottom: '2rem',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                overflow: 'hidden'
+              }}>
+                {animFrames.length > 0 && (
+                  <img 
+                    src={animFrames[currentAnimIdx]} 
+                    alt="Animated Preview" 
+                    style={{ maxHeight: '90%', maxWidth: '90%', objectFit: 'contain', imageRendering: 'pixelated' }} 
+                  />
+                )}
+              </div>
+
+              <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}>
+                <button className="btn-secondary" onClick={() => setStage('anim-tuner')}>Adjust Parameters</button>
+                <button 
+                  className="btn-primary"
+                  onClick={handleBuildIndex}
+                  style={{ background: 'var(--accent-secondary)' }}
+                >
+                  Export Character Index (Totality)
                 </button>
               </div>
             </motion.div>

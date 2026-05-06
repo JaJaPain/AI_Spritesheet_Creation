@@ -1438,7 +1438,17 @@ async def rig_poses(req: RigPosesRequest):
                     if not joints:
                         raise Exception("No joints detected by AI")
                         
-                    rig_data.append({"pose_index": i, "url": url, "joints": joints, "method": "ai"})
+                    # Generate mesh for this pose
+                    animator = AffineMeshAnimator(img, joints)
+                    triangles = animator.triangles.tolist() # Convert to list for JSON
+                    
+                    rig_data.append({
+                        "pose_index": i, 
+                        "url": url, 
+                        "joints": joints, 
+                        "triangles": triangles,
+                        "method": "ai"
+                    })
         except Exception as ai_err:
             logger.warning(f"MediaPipe AI Rigging failed, using mathematical fallback: {ai_err}")
             # Fallback to standard human proportions if AI fails
@@ -1453,13 +1463,117 @@ async def rig_poses(req: RigPosesRequest):
                     "ankle_l": {"x": 0.46, "y": 0.9, "v": 1.0}, "ankle_r": {"x": 0.54, "y": 0.9, "v": 1.0},
                     "foot_l": {"x": 0.45, "y": 0.95, "v": 1.0}, "foot_r": {"x": 0.55, "y": 0.95, "v": 1.0}
                 }
-                rig_data.append({"pose_index": i, "url": url, "joints": fallback_joints, "method": "fallback"})
+                # Use a dummy triangulation for fallback (simple grid)
+                rig_data.append({
+                    "pose_index": i, 
+                    "url": url, 
+                    "joints": fallback_joints, 
+                    "triangles": [], # Empty for now
+                    "method": "fallback"
+                })
                 
         return {"status": "success", "rigs": rig_data}
         
     except Exception as e:
         logger.error(f"Critical error in rigging endpoint: {e}")
         logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+from animator import AffineMeshAnimator, create_walk_cycle
+
+class GenerateAnimationRequest(BaseModel):
+    frame_url: str
+    joints: dict
+    project_id: Optional[str] = None
+    anim_type: str = "walk"
+    stride: float = 0.2
+    bounce: float = 0.05
+    num_frames: int = 12
+
+@app.post("/generate-animation")
+async def generate_animation(req: GenerateAnimationRequest):
+    try:
+        logger.info(f"Generating {req.anim_type} animation for {req.frame_url}...")
+        
+        img_path = resolve_image_path(req.frame_url)
+        if not os.path.exists(img_path):
+            raise HTTPException(status_code=404, detail="Frame not found")
+            
+        img = Image.open(img_path).convert("RGBA")
+        
+        # Initialize animator
+        animator = AffineMeshAnimator(img, req.joints)
+        
+        # Generate frames
+        if req.anim_type == "walk":
+            frames = create_walk_cycle(animator, stride=req.stride, bounce=req.bounce, num_frames=req.num_frames)
+        else:
+            # For now, just return base frame if type unknown
+            frames = [img] * req.num_frames
+            
+        # Save frames
+        urls = []
+        project_dir = os.path.join("Output_Saves", req.project_id) if req.project_id else "output"
+        os.makedirs(project_dir, exist_ok=True)
+        
+        anim_id = f"{req.anim_type}_{int(time.time())}"
+        anim_subdir = os.path.join(project_dir, "animations", anim_id)
+        os.makedirs(anim_subdir, exist_ok=True)
+        
+        for i, f in enumerate(frames):
+            filename = f"frame_{i:03d}.png"
+            filepath = os.path.join(anim_subdir, filename)
+            f.save(filepath)
+            
+            # Relative URL
+            rel_url = f"/output_saves/{req.project_id}/animations/{anim_id}/{filename}" if req.project_id else f"/output/{filename}"
+            urls.append(rel_url)
+            
+        return {"status": "success", "urls": urls, "anim_id": anim_id}
+    except Exception as e:
+        logger.error(f"Error generating animation: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+class BuildIndexRequest(BaseModel):
+    project_id: str
+
+@app.post("/build-character-index")
+async def build_character_index(req: BuildIndexRequest):
+    try:
+        project_dir = os.path.join("Output_Saves", req.project_id)
+        if not os.path.exists(project_dir):
+            raise HTTPException(status_code=404, detail="Project not found")
+            
+        # Scan for animations
+        anims_dir = os.path.join(project_dir, "animations")
+        if not os.path.exists(anims_dir):
+             return {"status": "success", "index": {"id": req.project_id, "animations": {}}}
+             
+        index = {
+            "id": req.project_id,
+            "animations": {}
+        }
+        
+        # Each subfolder in animations/ is a sequence
+        for anim_id in os.listdir(anims_dir):
+            anim_path = os.path.join(anims_dir, anim_id)
+            if not os.path.isdir(anim_path): continue
+            
+            frames = sorted([f for f in os.listdir(anim_path) if f.endswith(".png")])
+            index["animations"][anim_id] = {
+                "frames": [f"/output_saves/{req.project_id}/animations/{anim_id}/{f}" for f in frames]
+            }
+            
+        # Save index.json
+        index_path = os.path.join(project_dir, "character_index.json")
+        with open(index_path, "w") as f:
+            json.dump(index, f, indent=2)
+            
+        return {"status": "success", "index_url": f"/output_saves/{req.project_id}/character_index.json"}
+    except Exception as e:
+        logger.error(f"Error building character index: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -1,0 +1,21 @@
+{
+  "id": "A00005",
+  "animations": {
+    "walk_1778108259": {
+      "frames": [
+        "/output_saves/A00005/animations/walk_1778108259/frame_000.png",
+        "/output_saves/A00005/animations/walk_1778108259/frame_001.png",
+        "/output_saves/A00005/animations/walk_1778108259/frame_002.png",
+        "/output_saves/A00005/animations/walk_1778108259/frame_003.png",
+        "/output_saves/A00005/animations/walk_1778108259/frame_004.png",
+        "/output_saves/A00005/animations/walk_1778108259/frame_005.png",
+        "/output_saves/A00005/animations/walk_1778108259/frame_006.png",
+        "/output_saves/A00005/animations/walk_1778108259/frame_007.png",
+        "/output_saves/A00005/animations/walk_1778108259/frame_008.png",
+        "/output_saves/A00005/animations/walk_1778108259/frame_009.png",
+        "/output_saves/A00005/animations/walk_1778108259/frame_010.png",
+        "/output_saves/A00005/animations/walk_1778108259/frame_011.png"
+      ]
+    }
+  }
+}
