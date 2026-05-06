@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { Sparkles, Wand2, Play, Download, Settings, Image as ImageIcon, Loader2, ArrowLeft, RefreshCw, Save, Upload } from 'lucide-react'
+import { Sparkles, Wand2, Play, Download, Settings, Image as ImageIcon, Loader2, ArrowLeft, RefreshCw, Save, Upload, X, Check } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 
 function App() {
@@ -39,18 +39,25 @@ function App() {
   const [redoingFrame, setRedoingFrame] = useState(null)
   const [animFrame, setAnimFrame] = useState(0)
   const [hasSavedAnchor, setHasSavedAnchor] = useState(false)
+  const [isSaveModalOpen, setIsSaveModalOpen] = useState(false)
+  const [savesList, setSavesList] = useState([])
+  const [saveStatus, setSaveStatus] = useState({}) // { [url]: 'saving' | 'saved' }
   const [excludedFrames, setExcludedFrames] = useState(new Set())
   const [autoPrompt, setAutoPrompt] = useState('')
   const [describing, setDescribing] = useState(false)
 
-  // Check for saved anchor ONLY after discovery completes
+  // Check for saved anchors ONLY after discovery completes
   useEffect(() => {
     if (!apiReady || !apiBase) return;
     const check = async () => {
       try {
-        const res = await fetch(`${apiBase}/load-anchor`);
-        if (res.ok) setHasSavedAnchor(true);
-        else setHasSavedAnchor(false);
+        const res = await fetch(`${apiBase}/list-saves`);
+        const data = await res.json();
+        if (data.status === 'success' && data.saves.length > 0) {
+          setHasSavedAnchor(true);
+        } else {
+          setHasSavedAnchor(false);
+        }
       } catch (e) { setHasSavedAnchor(false); }
     }
     check();
@@ -93,43 +100,50 @@ function App() {
     }
   }
 
-  const handleLoadAnchor = async () => {
+  const handleOpenSavesModal = async () => {
     try {
-      const res = await fetch(`${apiBase}/load-anchor`);
+      const res = await fetch(`${apiBase}/list-saves`);
       const data = await res.json();
       if (data.status === 'success') {
-        setPrompt(data.prompt)
-        setSelectedAnchor(`${apiBase}${data.image_url}`)
-        setStage('animating')
-        
-        // Auto-describe the loaded anchor with BLIP
-        setDescribing(true)
-        setAutoPrompt('')
-        try {
-          const descRes = await fetch(`${apiBase}/describe-anchor`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ image_url: data.image_url })
-          });
-          const descData = await descRes.json();
-          if (descData.status === 'success') {
-            setAutoPrompt(descData.description)
-          } else {
-            setAutoPrompt(data.prompt)
-          }
-        } catch (err) {
-          console.error('Error describing anchor:', err)
-          setAutoPrompt(data.prompt)
-        } finally {
-          setDescribing(false)
-        }
+        setSavesList(data.saves)
+        setIsSaveModalOpen(true)
       }
     } catch (error) {
-      console.error("Error loading anchor:", error);
+      console.error("Error loading saves:", error);
+    }
+  }
+
+  const handleLoadSave = async (saveData) => {
+    setIsSaveModalOpen(false)
+    setPrompt(saveData.prompt)
+    setSelectedAnchor(`${apiBase}${saveData.image_url}`)
+    setStage('animating')
+    
+    // Auto-describe the loaded anchor with BLIP
+    setDescribing(true)
+    setAutoPrompt('')
+    try {
+      const descRes = await fetch(`${apiBase}/describe-anchor`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image_url: saveData.image_url })
+      });
+      const descData = await descRes.json();
+      if (descData.status === 'success') {
+        setAutoPrompt(descData.description)
+      } else {
+        setAutoPrompt(saveData.prompt)
+      }
+    } catch (err) {
+      console.error('Error describing anchor:', err)
+      setAutoPrompt(saveData.prompt)
+    } finally {
+      setDescribing(false)
     }
   }
 
   const handleSaveAnchor = async (anchorFullUrl) => {
+    setSaveStatus(prev => ({ ...prev, [anchorFullUrl]: 'saving' }))
     try {
       await fetch(`${apiBase}/save-anchor`, {
         method: 'POST',
@@ -137,8 +151,10 @@ function App() {
         body: JSON.stringify({ image_url: anchorFullUrl, prompt })
       });
       setHasSavedAnchor(true)
+      setSaveStatus(prev => ({ ...prev, [anchorFullUrl]: 'saved' }))
     } catch (error) {
       console.error("Error saving anchor:", error);
+      setSaveStatus(prev => ({ ...prev, [anchorFullUrl]: null }))
     }
   }
 
@@ -320,7 +336,7 @@ function App() {
                     <button 
                       className="btn-secondary" 
                       style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', borderColor: 'var(--accent-secondary)', color: 'var(--accent-secondary)' }}
-                      onClick={handleLoadAnchor}
+                      onClick={handleOpenSavesModal}
                     >
                       <Upload size={18} />
                       Load Saved Anchor
@@ -386,11 +402,20 @@ function App() {
                         <button className="btn-secondary" style={{ flex: 1 }}>Select</button>
                         <button 
                           className="btn-secondary" 
-                          style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', padding: '0.5rem 0.75rem' }}
+                          style={{ 
+                            display: 'flex', alignItems: 'center', gap: '0.3rem', padding: '0.5rem 0.75rem',
+                            borderColor: saveStatus[v] === 'saved' ? '#4ade80' : undefined,
+                            color: saveStatus[v] === 'saved' ? '#4ade80' : undefined,
+                            background: saveStatus[v] === 'saved' ? 'rgba(74, 222, 128, 0.1)' : undefined
+                          }}
                           onClick={(e) => { e.stopPropagation(); handleSaveAnchor(v); }}
-                          title="Save this anchor for quick loading later"
+                          title="Save this anchor permanently"
+                          disabled={saveStatus[v] === 'saving' || saveStatus[v] === 'saved'}
                         >
-                          <Save size={14} />
+                          {saveStatus[v] === 'saving' ? <Loader2 size={14} className="animate-spin" /> : 
+                           saveStatus[v] === 'saved' ? <Check size={14} /> : 
+                           <Save size={14} />}
+                          {saveStatus[v] === 'saved' && <span style={{fontSize: '0.7rem'}}>Saved!</span>}
                         </button>
                       </div>
                     </motion.div>
@@ -673,6 +698,77 @@ function App() {
       <footer style={{ marginTop: '5rem', textAlign: 'center', color: 'var(--text-dim)', fontSize: '0.9rem' }}>
         <p>© 2026 SpriteForge AI Pipeline • Powered by Local AI</p>
       </footer>
+
+      {/* Save Modal Overlay */}
+      <AnimatePresence>
+        {isSaveModalOpen && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            style={{
+              position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+              background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(5px)',
+              zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '2rem'
+            }}
+            onClick={() => setIsSaveModalOpen(false)}
+          >
+            <motion.div 
+              initial={{ scale: 0.95, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.95, y: 20 }}
+              className="glass-card"
+              style={{ width: '100%', maxWidth: '1000px', maxHeight: '80vh', display: 'flex', flexDirection: 'column', padding: '2rem' }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
+                <h2 style={{ fontSize: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <Upload size={24} color="var(--accent-secondary)" /> Load Saved Project
+                </h2>
+                <button 
+                  style={{ background: 'none', border: 'none', color: 'var(--text-dim)', cursor: 'pointer', padding: '0.5rem' }}
+                  onClick={() => setIsSaveModalOpen(false)}
+                >
+                  <X size={24} />
+                </button>
+              </div>
+
+              <div style={{ flex: 1, overflowY: 'auto', paddingRight: '0.5rem' }}>
+                {savesList.length === 0 ? (
+                  <div style={{ padding: '3rem', textAlign: 'center', color: 'var(--text-dim)' }}>
+                    No saved projects found.
+                  </div>
+                ) : (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '1rem' }}>
+                    {savesList.map((save, i) => (
+                      <div 
+                        key={save.id || i}
+                        className="glass-card"
+                        style={{ padding: '0', overflow: 'hidden', cursor: 'pointer', display: 'flex', flexDirection: 'column', height: '280px' }}
+                        onClick={() => handleLoadSave(save)}
+                      >
+                        <div style={{ height: '180px', background: 'rgba(255,255,255,0.02)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0.5rem' }}>
+                          <img src={`${apiBase}${save.image_url}`} alt="Saved Sprite" style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', imageRendering: 'pixelated' }} />
+                        </div>
+                        <div style={{ padding: '0.75rem', borderTop: '1px solid var(--glass-border)', flex: 1, overflow: 'hidden' }}>
+                          <p style={{ fontSize: '0.75rem', color: 'var(--text-dim)', display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+                            {save.prompt}
+                          </p>
+                          {save.timestamp && (
+                            <p style={{ fontSize: '0.65rem', color: 'var(--accent-primary)', marginTop: '0.5rem' }}>
+                              {new Date(save.timestamp * 1000).toLocaleDateString()}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   )
 }

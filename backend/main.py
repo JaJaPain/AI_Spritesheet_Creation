@@ -6,6 +6,8 @@ import traceback
 import logging
 import json
 import random
+import time
+import shutil
 from fastapi import FastAPI, Body, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -46,9 +48,11 @@ app.add_middleware(
 # Ensure directories exist
 os.makedirs("output", exist_ok=True)
 os.makedirs("templates", exist_ok=True)
+os.makedirs("saves", exist_ok=True)
 
-# Serve generated images
+# Serve generated images and saves
 app.mount("/output", StaticFiles(directory="output"), name="output")
+app.mount("/saves", StaticFiles(directory="saves"), name="saves")
 
 
 # Create anime-optimized bg removal session (loaded once, reused)
@@ -100,9 +104,9 @@ class ModelManager:
                     variant="fp16",
                     use_safetensors=True
                 )
-            else:  # pose/softedge
+            else:  # pose/openpose
                 controlnet = ControlNetModel.from_pretrained(
-                    "SargeZT/controlnet-sd-xl-1.0-softedge-dexined",
+                    "thibaud/controlnet-openpose-sdxl-1.0",
                     torch_dtype=torch.float16
                 )
             
@@ -292,10 +296,11 @@ class ModelManager:
                         reasons.append(f"Multiple figures detected (gap: {max_gap}px)")
                 
                 # Check 5: Aspect ratio — a standing character is ALWAYS taller than wide
-                # Multiple side-by-side characters make the content wider than tall
+                # A single human sprite has an aspect ratio around 0.35 - 0.45
+                # Multiple side-by-side characters make the content wider than 0.55
                 if passed and content_width > 0 and content_height > 0:
                     aspect = content_width / content_height
-                    if aspect > 0.85:
+                    if aspect > 0.55:
                         passed = False
                         reasons.append(f"Too wide for single character (aspect: {aspect:.2f})")
                 
@@ -357,6 +362,18 @@ class ModelManager:
                     if not has_face:
                         passed = False
                         reasons.append(f"No face detected: {face_caption}")
+
+                # 6c: Scenery/Background check — reject if it sees environmental objects
+                if passed:
+                    inputs = processor(images=rgb_image, text="describe the setting and background", return_tensors="pt").to("cuda", torch.float16)
+                    with torch.no_grad():
+                        output = model.generate(**inputs, max_new_tokens=30)
+                    bg_caption = processor.decode(output[0], skip_special_tokens=True).strip().lower()
+                    
+                    bg_words = ["tree", "room", "wall", "landscape", "floor", "building", "scenery", "forest", "city", "street", "furniture"]
+                    if any(w in bg_caption for w in bg_words):
+                        passed = False
+                        reasons.append(f"Background elements detected: {bg_caption}")
                 
                 if passed:
                     logger.info(f"  Variant {idx+1}: PASSED (fill:{fill_ratio:.0%} w:{width_ratio:.0%} h:{height_ratio:.0%})")
@@ -401,10 +418,15 @@ async def describe_anchor(
     try:
         # Resolve image path
         name = os.path.basename(image_url)
-        image_path = os.path.join("output", name)
+        
+        # Determine if this is a temporary anchor or a permanently saved one
+        if "/saves/" in image_url:
+            image_path = os.path.join("saves", name)
+        else:
+            image_path = os.path.join("output", name)
         
         if not os.path.exists(image_path):
-            raise HTTPException(status_code=404, detail="Anchor image not found")
+            raise HTTPException(status_code=404, detail=f"Anchor image not found at {image_path}")
         
         caption = manager.describe_anchor(image_path)
         
@@ -441,12 +463,12 @@ async def generate_anchor(
         else:
             logger.info("  No template found, generating without ControlNet guidance")
         
-        full_prompt = f"{prompt}, high quality, game sprite, solid bright green background, full body, front facing, neutral standing pose, arms visible at sides"
+        full_prompt = f"{prompt}, high quality, detailed face, visible eyes, highly detailed, concept art, game sprite, solid bright green background, full body, front facing, neutral standing pose, arms visible at sides"
         
         # Track which slots still need a good variant
         # Each slot: { 'url': str, 'filepath': str, 'passed': bool }
         slots = [None] * num_variants
-        max_retries = 3
+        max_retries = 5
         
         # Load SDXL once — keep it loaded alongside BLIP (9GB + 1.5GB = fits in 16GB)
         pipe = manager.load_sdxl("canny")
@@ -470,7 +492,7 @@ async def generate_anchor(
                 
                 gen_kwargs = {
                     "prompt": full_prompt,
-                    "negative_prompt": "blurry, low quality, deformed, ugly, bad anatomy, extra limbs, cape, cloak, flowing fabric, wings",
+                    "negative_prompt": "flat colors, vector art, clip art, silhouette, thick outline, faceless, blank face, missing eyes, missing mouth, blurry, low quality, deformed, ugly, bad anatomy, extra limbs, cape, cloak, flowing fabric, wings",
                     "num_inference_steps": 25,
                     "guidance_scale": 7.5,
                     "height": 512,
@@ -522,35 +544,61 @@ async def save_anchor(
     image_url: str = Body(..., embed=True),
     prompt: str = Body(..., embed=True)
 ):
-    """Save an anchor image + prompt for quick reloading later."""
+    """Save an anchor image + prompt permanently."""
     try:
         anchor_name = os.path.basename(image_url)
-        save_data = {"image_url": f"/output/{anchor_name}", "prompt": prompt}
-        save_path = os.path.join("output", "saved_anchor.json")
-        with open(save_path, "w") as f:
+        source_img_path = os.path.join("output", anchor_name)
+        
+        if not os.path.exists(source_img_path):
+            raise HTTPException(status_code=404, detail="Anchor image not found")
+            
+        timestamp = int(time.time())
+        save_id = f"save_{timestamp}"
+        
+        # Copy image to permanent saves folder
+        ext = os.path.splitext(anchor_name)[1]
+        dest_img_name = f"{save_id}{ext}"
+        dest_img_path = os.path.join("saves", dest_img_name)
+        shutil.copy2(source_img_path, dest_img_path)
+        
+        # Save metadata
+        save_data = {
+            "id": save_id,
+            "image_url": f"/saves/{dest_img_name}", 
+            "prompt": prompt,
+            "timestamp": timestamp
+        }
+        
+        save_json_path = os.path.join("saves", f"{save_id}.json")
+        with open(save_json_path, "w") as f:
             json.dump(save_data, f)
-        logger.info(f"Saved anchor: {anchor_name} with prompt: {prompt[:50]}...")
-        return {"status": "success"}
+            
+        logger.info(f"Saved project: {save_id} with prompt: {prompt[:50]}...")
+        return {"status": "success", "save_id": save_id}
     except Exception as e:
         logger.error(f"Error saving anchor: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/load-anchor")
-async def load_anchor():
-    """Load a previously saved anchor image + prompt."""
+@app.get("/list-saves")
+async def list_saves():
+    """Returns a list of all saved projects."""
     try:
-        save_path = os.path.join("output", "saved_anchor.json")
-        if not os.path.exists(save_path):
-            raise HTTPException(status_code=404, detail="No saved anchor found")
-        with open(save_path, "r") as f:
-            data = json.load(f)
-        logger.info(f"Loaded saved anchor: {data['image_url']}")
-        return {"status": "success", **data}
-    except HTTPException:
-        raise
+        saves = []
+        for filename in os.listdir("saves"):
+            if filename.endswith(".json"):
+                with open(os.path.join("saves", filename), "r") as f:
+                    try:
+                        data = json.load(f)
+                        saves.append(data)
+                    except Exception as e:
+                        logger.error(f"Error reading save {filename}: {e}")
+                        
+        # Sort newest first
+        saves.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+        return {"status": "success", "saves": saves}
     except Exception as e:
-        logger.error(f"Error loading anchor: {e}")
+        logger.error(f"Error listing saves: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -595,9 +643,13 @@ async def animate_openpose(
         
         # Load anchor image (used in prompt description, not IP-Adapter)
         anchor_name = os.path.basename(image_url)
-        anchor_path = os.path.join("output", anchor_name)
+        if "/saves/" in image_url:
+            anchor_path = os.path.join("saves", anchor_name)
+        else:
+            anchor_path = os.path.join("output", anchor_name)
+            
         if not os.path.exists(anchor_path):
-            raise HTTPException(status_code=404, detail="Anchor image not found")
+            raise HTTPException(status_code=404, detail=f"Anchor image not found at {anchor_path}")
         logger.info(f"  Anchor image: {anchor_path}")
         
         full_prompt = f"{prompt}, walking pose, front-facing, facing the viewer, game sprite, full body, solid bright green background, consistent character design, arms visible"
@@ -609,11 +661,30 @@ async def animate_openpose(
         for i in range(len(selected)):
             logger.info(f"  Generating frame {i+1}/{len(selected)}...")
             
-            # Load skeleton, convert to soft edge, resize to 1024
+            # Map the 12 frames to specific physical descriptions to reinforce the ControlNet
+            # 0-5: Left leg forward cycle. 6-11: Right leg forward cycle.
+            pose_prompts = [
+                "left leg stepping forward, right arm swinging forward",  # 0: Contact L
+                "left foot planted, body lowering",                       # 1: Down L
+                "standing straight on left leg, right leg passing",       # 2: Passing L (early)
+                "standing straight on left leg, right leg passing",       # 3: Passing L (mid)
+                "right leg lifting, pushing up",                          # 4: Up L (early)
+                "right leg high, reaching forward",                       # 5: Up L (late)
+                "right leg stepping forward, left arm swinging forward",  # 6: Contact R
+                "right foot planted, body lowering",                      # 7: Down R
+                "standing straight on right leg, left leg passing",       # 8: Passing R (early)
+                "standing straight on right leg, left leg passing",       # 9: Passing R (mid)
+                "left leg lifting, pushing up",                           # 10: Up R (early)
+                "left leg high, reaching forward"                         # 11: Up R (late)
+            ]
+            
+            # Use the specific pose description for this frame, fallback if out of bounds
+            frame_pose = pose_prompts[i] if i < len(pose_prompts) else "walking pose"
+            frame_specific_prompt = f"{full_prompt}, {frame_pose}"
+            
+            # Load OpenPose skeleton directly (colored lines on black background)
             skel_img = load_image(os.path.join("output", f"skel_{session_id}_{i}.png"))
-            skel_gray = np.array(skel_img.convert("L"))
-            skel_soft = cv2.GaussianBlur(skel_gray, (5, 5), 0)
-            skeleton = Image.fromarray(skel_soft).convert("RGB").resize((1024, 1024))
+            skeleton = skel_img.convert("RGB").resize((1024, 1024))
             
             if manager.device == "cuda":
                 torch.cuda.empty_cache()
@@ -622,7 +693,7 @@ async def animate_openpose(
             # Use SoftEdge ControlNet + IP-Adapter (anchor as reference)
             anchor_image = load_image(anchor_path).resize((1024, 1024))
             image = pipe(
-                prompt=full_prompt,
+                prompt=frame_specific_prompt,
                 negative_prompt="blurry, low quality, deformed, ugly, bad anatomy, extra limbs, cape, cloak, flowing fabric, wings, rear view, back view, from behind, turned away",
                 image=skeleton,
                 ip_adapter_image=anchor_image,
@@ -701,12 +772,10 @@ async def regenerate_frame(
         
         pipe = manager.load_sdxl("pose")
         
-        # Load skeleton and convert to soft edge
+        # Load OpenPose skeleton directly
         skel_name = os.path.basename(skeleton_url)
         skel_img = load_image(os.path.join("output", skel_name))
-        skel_gray = np.array(skel_img.convert("L"))
-        skel_soft = cv2.GaussianBlur(skel_gray, (5, 5), 0)
-        skeleton = Image.fromarray(skel_soft).convert("RGB").resize((1024, 1024))
+        skeleton = skel_img.convert("RGB").resize((1024, 1024))
         
         full_prompt = f"{prompt}, walking pose, front-facing, facing the viewer, game sprite, full body, solid bright green background, consistent character design, arms visible"
         
@@ -717,9 +786,15 @@ async def regenerate_frame(
         seed = random.randint(0, 2**32 - 1)
         logger.info(f"  Using seed {seed}")
         
-        # Use SoftEdge ControlNet + IP-Adapter (anchor as reference)
+        # Use ControlNet + IP-Adapter (anchor as reference)
         anchor_name_ref = os.path.basename(anchor_url)
-        anchor_path_ref = os.path.join("output", anchor_name_ref)
+        if "/saves/" in anchor_url:
+            anchor_path_ref = os.path.join("saves", anchor_name_ref)
+        else:
+            anchor_path_ref = os.path.join("output", anchor_name_ref)
+            
+        if not os.path.exists(anchor_path_ref):
+             raise HTTPException(status_code=404, detail=f"Anchor image not found at {anchor_path_ref}")
         anchor_image = load_image(anchor_path_ref).resize((1024, 1024))
         
         image = pipe(
