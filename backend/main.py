@@ -25,11 +25,14 @@ from diffusers import (
     ControlNetModel,
     FluxPipeline,
     FluxTransformer2DModel,
+    FluxFillPipeline,
 )
 from transformers import BitsAndBytesConfig
 from diffusers.utils import load_image
 from rembg import remove, new_session
 import gc
+from animator import AffineMeshAnimator, create_walk_cycle, LIMB_HIERARCHY, pad_image_for_outpaint
+from limb_borrower import borrow_and_warp_limb
 
 # Setup logging
 logging.basicConfig(
@@ -226,6 +229,66 @@ class ModelManager:
             logger.error(traceback.format_exc())
             raise e
 
+    def load_flux_fill(self):
+        """Load FLUX.1-Fill-dev pipeline for inpainting/outpainting."""
+        key = "flux_fill"
+        if key in self.pipelines:
+            return self.pipelines[key]
+        
+        self.unload_all()
+        logger.info("Loading FLUX.1-Fill-dev for surgery...")
+        
+        try:
+            nf4_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.bfloat16
+            )
+            
+            # Load Transformer in 4-bit
+            transformer = FluxTransformer2DModel.from_pretrained(
+                "black-forest-labs/FLUX.1-Fill-dev",
+                subfolder="transformer",
+                quantization_config=nf4_config,
+                torch_dtype=torch.bfloat16
+            )
+            
+            # Load T5 in 4-bit to save VRAM and prevent device mismatch
+            from transformers import T5EncoderModel
+            text_encoder_2 = T5EncoderModel.from_pretrained(
+                "black-forest-labs/FLUX.1-Fill-dev",
+                subfolder="text_encoder_2",
+                quantization_config=nf4_config,
+                torch_dtype=torch.bfloat16
+            )
+            
+            pipe = FluxFillPipeline.from_pretrained(
+                "black-forest-labs/FLUX.1-Fill-dev",
+                transformer=transformer,
+                text_encoder_2=text_encoder_2,
+                torch_dtype=torch.bfloat16
+            )
+            
+            # Explicitly move to cuda before offloading to ensure hooks are initialized on the right device
+            pipe.to("cuda")
+            pipe.enable_model_cpu_offload()
+            pipe.vae.enable_tiling()
+            
+            """
+            # Load the turnaround LoRA if it exists (for style consistency)
+            lora_path = os.path.join("loras", "turnaround.safetensors")
+            if os.path.exists(lora_path):
+                pipe.load_lora_weights(lora_path)
+                logger.info("  LoRA loaded for style consistency in Fill pipeline.")
+            """
+                
+            self.pipelines[key] = pipe
+            return pipe
+        except Exception as e:
+            logger.error(f"FAILED to load FLUX Fill: {e}")
+            logger.error(traceback.format_exc())
+            raise e
+
     def describe_anchor(self, image_path: str) -> str:
         """Use BLIP to generate a detailed description of the anchor image.
         
@@ -250,8 +313,6 @@ class ModelManager:
             # Load and process the anchor image
             image = Image.open(image_path).convert("RGB")
             
-            # Use conditional captioning with targeted starter prompts
-            # Each pass focuses on a different aspect of the character
             captions = []
             prompts = [
                 "this is a character with",
@@ -586,6 +647,13 @@ async def generate_anchor(
                 filename = f"anchor_{uuid.uuid4()}.png"
                 filepath = os.path.join("output", filename)
                 image.save(filepath)
+                
+                # Save the slice
+                if req.project_id:
+                    save_path = os.path.join(project_dir, filename)
+                    isolated.save(save_path)
+                    logger.info(f"    Saved slice {i+1} to {save_path}")
+            
                 slots[i] = {'url': f"/output/{filename}", 'filepath': filepath, 'passed': False}
             
             # Quality check WITHOUT unloading SDXL — both fit in VRAM at 512x512
@@ -727,8 +795,7 @@ async def animate_openpose(
         logger.info(f"  Anchor image: {anchor_path}")
         
         # Base prompt includes user prompt + base styling
-        base_styling = "game sprite, full body, solid bright green background, consistent character design, arms visible"
-        base_prompt = f"{prompt}, {base_styling}"
+        base_prompt = f"{prompt}, game sprite, full body, solid bright green background, consistent character design, arms visible"
         
         seed = 42
         frame_urls = []
@@ -987,8 +1054,7 @@ async def generate_turnaround(req: TurnaroundRequest):
         logger.info("LoRA loaded successfully.")
         
         # 5. Inference - Slimmed down and reordered to prevent token truncation
-        # Placing technical constraints at the front ensures they are seen by the CLIP tokenizer
-        tech_prefix = "character turnaround sheet, 5 views, no shadows, same proportions, consistent detailing, white background"
+        tech_prefix = "character turnaround sheet, 5 views: front view, side view, back view, front-quarter view, back-quarter view. no shadows, same proportions, consistent detailing, white background"
         prompt_text = f"{tech_prefix}, {req.prompt}"
         
         logger.info(f"Starting FLUX generation (in threadpool)...")
@@ -1064,6 +1130,7 @@ class SliceRequest(BaseModel):
     project_id: Optional[str] = None
     remover_type: Optional[str] = "ai" # "ai", "simple", or "none"
     alpha_matting: Optional[bool] = False
+    force_reslice: Optional[bool] = False
     foreground_threshold: Optional[int] = 240
     background_threshold: Optional[int] = 10
 
@@ -1139,6 +1206,18 @@ async def save_project(req: SaveProjectRequest):
 @app.post("/slice-turnaround")
 async def slice_turnaround(req: SliceRequest):
     try:
+        # 0. Initialize Project if needed
+        pid = req.project_id
+        is_new_project = False
+        if not pid:
+            pid = get_next_project_id()
+            is_new_project = True
+            logger.info(f"Auto-initializing project {pid} for slicing.")
+            
+        # Determine output directory
+        output_dir = os.path.join("Output_Saves", pid)
+        os.makedirs(output_dir, exist_ok=True)
+            
         # Robust URL handling using helper
         sheet_path = resolve_image_path(req.image_url)
         
@@ -1152,84 +1231,89 @@ async def slice_turnaround(req: SliceRequest):
         slice_width = w / num_poses
         
         sliced_urls = []
-        logger.info(f"Slicing turnaround sheet ({w}x{h}) into {num_poses} poses...")
+        logger.info(f"Slicing turnaround sheet ({w}x{h}) into {num_poses} poses for project {pid}...")
         
-        # Check for existing slices if project_id is provided
-        if req.project_id:
-            output_dir = os.path.join("Output_Saves", req.project_id, "slices")
+        # Save a copy of the turnaround sheet to the project if it's not already there
+        project_sheet_name = f"{pid}_turnaround.png"
+        project_sheet_path = os.path.join(output_dir, project_sheet_name)
+        if not os.path.exists(project_sheet_path):
+            shutil.copy2(sheet_path, project_sheet_path)
             
-            # Smart check: If slices exist and the sheet hasn't changed, skip re-slicing
-            if os.path.exists(output_dir) and len(os.listdir(output_dir)) >= num_poses:
-                sheet_mtime = os.path.getmtime(sheet_path)
-                
-                # Get the mtime of the newest slice file to be extra safe
-                files = [os.path.join(output_dir, f) for f in os.listdir(output_dir) if f.endswith(".png")]
-                if files:
-                    newest_slice_mtime = max(os.path.getmtime(f) for f in files)
-                    
-                    # If the sheet is OLDER than the newest slice, it means the sheet 
-                    # hasn't been touched since those slices were created.
-                    if sheet_mtime < newest_slice_mtime and not getattr(req, 'force_reslice', False):
-                        logger.info(f"Reusing existing slices for project {req.project_id} (Sheet: {sheet_mtime} < Newest Slice: {newest_slice_mtime})")
-                        existing_files = sorted([f for f in os.listdir(output_dir) if f.endswith(".png")])
-                        sliced_urls = [f"/output_saves/{req.project_id}/slices/{f}" for f in existing_files[:num_poses]]
-                        return {"status": "success", "urls": sliced_urls}
+        # Ensure metadata exists
+        meta_path = os.path.join(output_dir, "metadata.json")
+        if not os.path.exists(meta_path):
+            with open(meta_path, "w") as f:
+                json.dump({"id": pid, "created_at": time.time(), "image_url": f"/output_saves/{pid}/{project_sheet_name}"}, f)
             
-            os.makedirs(output_dir, exist_ok=True)
-        else:
-            output_dir = "output"
+        # Smart Cache: Only reuse if files exist AND sheet hasn't changed AND we aren't forcing
+        if not is_new_project and not getattr(req, 'force_reslice', False):
+            if os.path.exists(output_dir):
+                pose_files = [os.path.join(output_dir, f) for f in os.listdir(output_dir) if f.startswith(f"{pid}_pose_")]
+                if len(pose_files) >= num_poses:
+                    sheet_mtime = os.path.getmtime(sheet_path)
+                    newest_slice = max(os.path.getmtime(f) for f in pose_files)
+                    if sheet_mtime < newest_slice:
+                        logger.info(f"Reusing existing slices for project {pid}")
+                        sliced_urls = [f"/output_saves/{pid}/{os.path.basename(f)}" for f in sorted(pose_files)]
+                        return {"status": "success", "urls": sliced_urls[:num_poses], "project_id": pid}
             
         # Dynamic Detection: Use horizontal projection to find gaps and isolate characters
         num_poses = 5
         
         # 1. Prepare mask for detection (ignore background)
-        # We'll use a grayscale version to find where the characters are
         detection_img = image.convert("RGBA")
         data = np.array(detection_img)
         r, g, b, a = data.T
         
-        # Determine if background is likely white or black
-        # Sample corners
         corners = [data[0,0], data[0,-1], data[-1,0], data[-1,-1]]
         avg_corner = np.mean(corners, axis=0)
         is_white_bg = np.mean(avg_corner[:3]) > 128
         
+        # Use a slightly stricter threshold for DYNAMIC DETECTION to find gaps
+        # We want to ignore near-white/near-black noise in the gaps
         if is_white_bg:
-            mask = (r < 240) | (g < 240) | (b < 240)
+            detect_thresh = min(220, (req.foreground_threshold or 240) - 20)
+            mask = (r < detect_thresh) | (g < detect_thresh) | (b < detect_thresh)
         else:
-            mask = (r > 15) | (g > 15) | (b > 15)
+            detect_thresh = max(35, (req.foreground_threshold or 15) + 20)
+            mask = (r > detect_thresh) | (g > detect_thresh) | (b > detect_thresh)
             
         # 2. Horizontal Projection (sum along Y axis)
         projection = np.sum(mask, axis=0)
         
         # 3. Find segments (islands of pixels)
-        threshold = 5 # Minimum pixels in a column to be part of a character
+        # Use a higher threshold to ignore tiny noise specks in gaps
+        min_pixels_in_col = 15 
         segments = []
         in_segment = False
         start_x = 0
         
         for x, val in enumerate(projection):
-            if val > threshold and not in_segment:
+            if val > min_pixels_in_col and not in_segment:
                 in_segment = True
                 start_x = x
-            elif val <= threshold and in_segment:
+            elif val <= min_pixels_in_col and in_segment:
                 in_segment = False
                 segments.append((start_x, x))
         if in_segment:
             segments.append((start_x, len(projection)-1))
             
         # 4. Refine segments (merge small gaps, filter noise)
-        min_gap = 20 # Minimum pixels to be considered a real gap between poses
+        min_gap = 50 # Slightly wider gap requirement
         refined = []
         if segments:
             curr_s, curr_e = segments[0]
             for next_s, next_e in segments[1:]:
+                # Merge if gap is tiny OR if segments are tiny (likely noise)
                 if next_s - curr_e < min_gap:
                     curr_e = next_e
                 else:
                     refined.append((curr_s, curr_e))
                     curr_s, curr_e = next_s, next_e
             refined.append((curr_s, curr_e))
+            
+        # Filter out very narrow segments (likely noise)
+        refined = [s for s in refined if (s[1] - s[0]) > 40]
             
         logger.info(f"Dynamic Slicer: Found {len(refined)} potential character islands.")
         
@@ -1297,12 +1381,15 @@ async def slice_turnaround(req: SliceRequest):
                     avg_corner = np.mean(corners, axis=0)
                     is_white_bg = np.mean(avg_corner[:3]) > 128
                     
+                    # Use user threshold if available
+                    thresh = req.foreground_threshold or (240 if is_white_bg else 15)
+                    
                     if is_white_bg:
-                        # Character is not white (be sensitive)
-                        binary_mask = ((r.T < 250) | (g.T < 250) | (b.T < 250)).astype(np.uint8)
+                        # Character is not background (be sensitive)
+                        binary_mask = ((r.T < thresh) | (g.T < thresh) | (b.T < thresh)).astype(np.uint8)
                     else:
-                        # Character is not black (be VERY sensitive for dark outfits)
-                        binary_mask = ((r.T > 5) | (g.T > 5) | (b.T > 5)).astype(np.uint8)
+                        # Character is not background (be VERY sensitive for dark outfits)
+                        binary_mask = ((r.T > (thresh//2)) | (g.T > (thresh//2)) | (b.T > (thresh//2))).astype(np.uint8)
                 
                 # 2. Find all connected components (islands)
                 num_labels, labels = cv2.connectedComponents(binary_mask)
@@ -1319,24 +1406,39 @@ async def slice_turnaround(req: SliceRequest):
                     # Get unique labels and their counts in the center
                     unique, counts = np.unique(center_region[center_region > 0], return_counts=True)
                     
-                    target_label = None
+                    target_labels = []
                     if len(unique) > 0:
-                        # Pick the label with the most pixels in the center
-                        target_label = unique[np.argmax(counts)]
-                    elif num_labels == 2:
-                        # Only one island found at all? Just keep it!
-                        target_label = 1
+                        # Find the dominant label (the one with most pixels in center)
+                        dominant_idx = np.argmax(counts)
+                        dominant_label = unique[dominant_idx]
+                        dominant_count = counts[dominant_idx]
+                        
+                        # Keep any label that has at least 15% of the dominant label's presence in the center
+                        # This catches detached limbs/accessories while still excluding neighbor bleed-in
+                        threshold = dominant_count * 0.15
+                        for label, count in zip(unique, counts):
+                            if count >= threshold:
+                                target_labels.append(label)
+                    else:
+                        # CENTER SCAN FAILED: Fallback to largest island
+                        labels_list, island_counts = np.unique(labels[labels > 0], return_counts=True)
+                        if len(labels_list) > 0:
+                            target_labels = [labels_list[np.argmax(island_counts)]]
+                            logger.info(f"    Center scan failed for slice {i+1}, falling back to largest island")                    
                     
-                    if target_label is not None:
+                    if target_labels:
                         # Prepare final output data
                         if no_bg.mode != 'RGBA':
                             no_bg = no_bg.convert('RGBA')
                             iso_data = np.array(no_bg)
                             
-                        # Set alpha to 0 for all pixels NOT belonging to our target character
-                        iso_data[..., 3][labels != target_label] = 0
+                        # Create a mask of all allowed labels
+                        final_mask = np.isin(labels, target_labels)
+                        
+                        # Set alpha to 0 for all pixels NOT in our target list
+                        iso_data[..., 3][~final_mask] = 0
                         no_bg = Image.fromarray(iso_data)
-                        logger.info(f"    Isolated central character in slice {i+1} (Target Label: {target_label})")
+                        logger.info(f"    Isolated character parts in slice {i+1} (Labels: {target_labels})")
             except Exception as iso_err:
                 logger.warning(f"    Auto-isolation failed for slice {i+1}: {iso_err}")
             
@@ -1369,18 +1471,21 @@ async def slice_turnaround(req: SliceRequest):
             paste_y = 512 - new_h - 10
             canvas.paste(resized_sprite, (paste_x, paste_y), resized_sprite)
             
-            out_name = f"{req.project_id or 'temp'}_pose_{i}.png"
-                
-            out_path = os.path.join(output_dir, out_name)
-            canvas.save(out_path)
-            
-            url_prefix = "/output/" if not req.project_id else f"/output_saves/{req.project_id}/slices/"
+            out_name = f"{pid}_pose_{i}.png"
+            url_prefix = f"/output_saves/{pid}/"
             sliced_urls.append(f"{url_prefix}{out_name}")
+            
+            # Save the slice
+            save_path = os.path.join(output_dir, out_name)
+            canvas.save(save_path)
+            logger.info(f"    Saved slice {i+1} to {save_path}")
             
         if not sliced_urls:
             raise HTTPException(status_code=400, detail="Could not isolate any characters.")
             
-        return {"status": "success", "urls": sliced_urls}
+        return {"status": "success", "urls": sliced_urls, "project_id": pid}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error slicing turnaround: {e}")
         logger.error(traceback.format_exc())
@@ -1439,8 +1544,9 @@ async def rig_poses(req: RigPosesRequest):
                         raise Exception("No joints detected by AI")
                         
                     # Generate mesh for this pose
-                    animator = AffineMeshAnimator(img, joints)
-                    triangles = animator.triangles.tolist() # Convert to list for JSON
+                    with Image.open(img_path).convert("RGBA") as img:
+                        animator = AffineMeshAnimator(img, joints)
+                        triangles = animator.triangles.tolist() # Convert to list for JSON
                     
                     rig_data.append({
                         "pose_index": i, 
@@ -1472,6 +1578,18 @@ async def rig_poses(req: RigPosesRequest):
                     "method": "fallback"
                 })
                 
+        # PERSIST RIGS TO METADATA
+        if req.project_id:
+            project_dir = os.path.join("Output_Saves", req.project_id)
+            meta_path = os.path.join(project_dir, "metadata.json")
+            if os.path.exists(meta_path):
+                with open(meta_path, "r") as f:
+                    meta = json.load(f)
+                meta["rigs"] = rig_data
+                with open(meta_path, "w") as f:
+                    json.dump(meta, f)
+                logger.info(f"  Saved {len(rig_data)} rigs to project {req.project_id} metadata.")
+                
         return {"status": "success", "rigs": rig_data}
         
     except Exception as e:
@@ -1480,7 +1598,110 @@ async def rig_poses(req: RigPosesRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-from animator import AffineMeshAnimator, create_walk_cycle
+class SetPoseLabelRequest(BaseModel):
+    project_id: str
+    pose_index: int
+    label: str
+
+@app.post("/set-pose-label")
+async def set_pose_label(req: SetPoseLabelRequest):
+    """Assigns a semantic label (e.g., 'front', 'back') to a specific pose index."""
+    try:
+        project_dir = os.path.join("Output_Saves", req.project_id)
+        meta_path = os.path.join(project_dir, "metadata.json")
+        if not os.path.exists(meta_path):
+             raise HTTPException(status_code=404, detail="Project metadata not found")
+        
+        with open(meta_path, "r") as f:
+            meta = json.load(f)
+            
+        for rig in meta.get("rigs", []):
+            if rig["pose_index"] == req.pose_index:
+                rig["label"] = req.label
+                break
+                
+        with open(meta_path, "w") as f:
+            json.dump(meta, f)
+            
+        return {"status": "success", "label": req.label}
+    except Exception as e:
+        logger.error(f"Failed to set pose label: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class ExtractLimbsRequest(BaseModel):
+    project_id: str
+    pose_index: int
+    source_pose_index: Optional[int] = 0 # Default to Front view
+    label: Optional[str] = None # e.g. "front", "back"
+
+@app.post("/extract-limbs")
+async def extract_limbs(req: ExtractLimbsRequest):
+    try:
+        project_dir = os.path.join("Output_Saves", req.project_id)
+        if not os.path.exists(project_dir):
+            raise HTTPException(status_code=404, detail="Project not found")
+            
+        # 1. Load target pose and joints
+        # (Assuming we have a way to get joints for a specific pose)
+        # For now, we'll look for saved metadata
+        metadata_path = os.path.join(project_dir, "metadata.json")
+        if not os.path.exists(metadata_path):
+             raise HTTPException(status_code=404, detail="Metadata not found")
+             
+        with open(metadata_path, "r") as f:
+            metadata = json.load(f)
+            
+        target_rig = next((r for r in metadata.get("rigs", []) if r["pose_index"] == req.pose_index), None)
+        if not target_rig:
+             raise HTTPException(status_code=404, detail="Rig not found for pose")
+             
+        img_path = resolve_image_path(target_rig["url"])
+        img = Image.open(img_path).convert("RGBA")
+        animator = AffineMeshAnimator(img, target_rig["joints"])
+        # 3. Industry Standard Advanced Segmentation
+        logger.info("  Running Advanced Silhouette-Aware Segmentation...")
+        limbs = animator.extract_limbs_advanced(overlap_padding=15)
+        
+        # 3. Borrow limbs if needed
+        # We check confidence 'v' of joints in the target rig
+        # If back arm is occluded, borrow from source
+        source_rig = next((r for r in metadata.get("rigs", []) if r["pose_index"] == req.source_pose_index), None)
+        
+        if source_rig:
+            src_img_path = resolve_image_path(source_rig["url"])
+            src_img = Image.open(src_img_path).convert("RGBA")
+            
+            for limb_name, joint_names in LIMB_HIERARCHY.items():
+                # Check if this limb is "bad" in the target
+                avg_v = sum(target_rig["joints"][j].get("v", 1.0) for j in joint_names if j in target_rig["joints"]) / len(joint_names)
+                
+                if avg_v < 0.6: # OCLLUDED! Borrow it
+                    logger.info(f"Limb {limb_name} is occluded in pose {req.pose_index}. Borrowing from pose {req.source_pose_index}...")
+                    borrowed = borrow_and_warp_limb(src_img, source_rig["joints"], target_rig["joints"], limb_name)
+                    limbs[limb_name] = borrowed
+
+        # 4. Save limb pack
+        # Use semantic label for folder name if provided, else fallback to pose index
+        folder_name = req.label if req.label else f"limbs_pose_{req.pose_index}"
+        limb_pack_dir = os.path.join(project_dir, folder_name)
+        os.makedirs(limb_pack_dir, exist_ok=True)
+        
+        urls = {}
+        for name, limb_img in limbs.items():
+            filename = f"{name}.png"
+            limb_img.save(os.path.join(limb_pack_dir, filename))
+            urls[name] = f"/output_saves/{req.project_id}/{folder_name}/{filename}"
+            
+        return {"status": "success", "limb_urls": urls, "folder": folder_name}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error extracting limbs: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 class GenerateAnimationRequest(BaseModel):
     frame_url: str
@@ -1490,6 +1711,7 @@ class GenerateAnimationRequest(BaseModel):
     stride: float = 0.2
     bounce: float = 0.05
     num_frames: int = 12
+    limb_pack: Optional[dict] = None # New: dict of limb_name -> url
 
 @app.post("/generate-animation")
 async def generate_animation(req: GenerateAnimationRequest):
@@ -1501,16 +1723,40 @@ async def generate_animation(req: GenerateAnimationRequest):
             raise HTTPException(status_code=404, detail="Frame not found")
             
         img = Image.open(img_path).convert("RGBA")
-        
-        # Initialize animator
         animator = AffineMeshAnimator(img, req.joints)
         
-        # Generate frames
-        if req.anim_type == "walk":
-            frames = create_walk_cycle(animator, stride=req.stride, bounce=req.bounce, num_frames=req.num_frames)
+        # Determine if we are doing layered animation
+        frames = []
+        if req.limb_pack:
+            logger.info("  Using Hierarchical Paper-Doll Rig (Industry Standard)...")
+            limb_images = {}
+            for name, url in req.limb_pack.items():
+                l_path = resolve_image_path(url)
+                if os.path.exists(l_path):
+                    limb_images[name] = Image.open(l_path).convert("RGBA")
+            
+            from animator import HierarchicalAnimator, create_animation_hierarchical
+            h_animator = HierarchicalAnimator(limb_images, req.joints)
+            frames = create_animation_hierarchical(
+                h_animator, 
+                anim_type=req.anim_type, 
+                stride=req.stride, 
+                bounce=req.bounce, 
+                num_frames=req.num_frames,
+                direction="S" # Default to South/Front for now
+            )
         else:
-            # For now, just return base frame if type unknown
-            frames = [img] * req.num_frames
+            # Standard single-mesh animation
+            if req.anim_type == "walk":
+                frames = create_walk_cycle(animator, stride=req.stride, bounce=req.bounce, num_frames=req.num_frames)
+            elif req.anim_type == "jump":
+                from animator import create_jump_cycle
+                frames = create_jump_cycle(animator, height=req.bounce * 5, num_frames=req.num_frames)
+            elif req.anim_type == "attack":
+                from animator import create_attack_cycle
+                frames = create_attack_cycle(animator, reach=req.stride, num_frames=req.num_frames)
+            else:
+                frames = [img] * req.num_frames
             
         # Save frames
         urls = []
@@ -1635,6 +1881,477 @@ async def stitch_frames(req: StitchFramesRequest):
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
+
+class CorrectPoseRequest(BaseModel):
+    project_id: str
+    sheet_url: str
+    mask_image: str # Base64 mask
+    target_rotation: str # e.g. "front-quarter"
+    prompt_override: Optional[str] = None
+
+@app.post("/correct-pose")
+async def correct_pose(req: CorrectPoseRequest):
+    """Surgically correct a specific pose on the turnaround sheet using FLUX Fill."""
+    try:
+        logger.info(f"Correcting pose on sheet {req.sheet_url} for project {req.project_id}")
+        
+        # 1. Resolve images
+        sheet_path = resolve_image_path(req.sheet_url)
+        if not os.path.exists(sheet_path):
+            raise HTTPException(status_code=404, detail="Sheet not found")
+            
+        sheet_img = Image.open(sheet_path).convert("RGB")
+        
+        # Decode mask
+        import base64
+        import io
+        mask_data = base64.b64decode(req.mask_image.split(",")[-1])
+        mask_img = Image.open(io.BytesIO(mask_data)).convert("L")
+        
+        # 2. Get Metadata for style consistency
+        project_dir = os.path.join("Output_Saves", req.project_id)
+        meta_path = os.path.join(project_dir, "metadata.json")
+        anchor_prompt = ""
+        if os.path.exists(meta_path):
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+                anchor_prompt = meta.get("prompt", "")
+        
+        # 3. Prepare Prompt
+        style_ref = f", consistent character design, {anchor_prompt}" if anchor_prompt else ""
+        full_prompt = f"{req.target_rotation} view of the character, {req.prompt_override or ''}{style_ref}, flat 2d game asset, high resolution, white background"
+        
+        # 4. Load FLUX Fill
+        pipe = manager.load_flux_fill()
+        
+        # DEBUG: Save mask
+        debug_mask_path = os.path.join(project_dir, f"debug_mask_{uuid.uuid4().hex[:4]}.png")
+        mask_img.save(debug_mask_path)
+        logger.info(f"  Debug mask saved: {debug_mask_path}")
+        
+        def do_fill():
+            return pipe(
+                prompt=full_prompt,
+                image=sheet_img,
+                mask_image=mask_img,
+                num_inference_steps=50, # Higher steps for better structural change
+                guidance_scale=4.5, # Stronger guidance for rotation changes
+                width=sheet_img.width,
+                height=sheet_img.height,
+            ).images[0]
+            
+        image = await run_in_threadpool(do_fill)
+        
+        # 5. Clean up the corrected area to prevent background artifacts
+        # We run rembg on the corrected image to isolate the character
+        logger.info("  Cleaning background of corrected pose...")
+        image_no_bg = await run_in_threadpool(
+            remove, 
+            image, 
+            session=rembg_session
+        )
+        
+        # 6. Composite the clean character back onto the original sheet
+        # First, prepare a "clean" original sheet by wiping the masked area to the background color
+        # Detect background color from corners of original sheet
+        sheet_arr = np.array(sheet_img)
+        corners = [sheet_arr[0,0], sheet_arr[0,-1], sheet_arr[-1,0], sheet_arr[-1,-1]]
+        avg_bg = tuple(np.mean(corners, axis=0).astype(int))
+        
+        # Create a "clean" background by filling the masked area with avg_bg
+        clean_bg = sheet_img.copy()
+        wipe_mask = mask_img.point(lambda p: 255 if p > 128 else 0)
+        bg_fill = Image.new("RGB", sheet_img.size, avg_bg)
+        clean_bg.paste(bg_fill, (0, 0), wipe_mask)
+        
+        # Now paste the isolated character from the corrected image
+        # We only want to paste where the character actually is in the corrected image
+        final_image = clean_bg.copy()
+        final_image.paste(image_no_bg, (0, 0), image_no_bg)
+        
+        # Save the result
+        filename = f"corrected_{uuid.uuid4().hex[:8]}.png"
+        filepath = os.path.join(project_dir, filename)
+        final_image.save(filepath)
+        
+        # PERSIST NEW SHEET TO METADATA
+        meta_path = os.path.join(project_dir, "metadata.json")
+        if os.path.exists(meta_path):
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+            meta["image_url"] = f"/output_saves/{req.project_id}/{filename}"
+            with open(meta_path, "w") as f:
+                json.dump(meta, f)
+            logger.info(f"  Updated project metadata with corrected sheet: {filename}")
+            
+        return {"status": "success", "url": f"/output_saves/{req.project_id}/{filename}"}
+    except Exception as e:
+        logger.error(f"Error correcting pose: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+            
+class ExplodeLimbRequest(BaseModel):
+    project_id: str
+    limb_name: str # e.g. "left arm"
+    anchor_url: Optional[str] = None
+
+@app.post("/generate-isolated-limb")
+async def generate_isolated_limb(req: ExplodeLimbRequest):
+    """Asset Exploder: Generate a brand new isolated limb for a character."""
+    try:
+        logger.info(f"Exploding limb '{req.limb_name}' for project {req.project_id}")
+        
+        project_dir = os.path.join("Output_Saves", req.project_id)
+        if not os.path.exists(project_dir):
+            raise HTTPException(status_code=404, detail="Project not found")
+            
+        # 1. Resolve Anchor Image
+        anchor_url = req.anchor_url
+        meta_path = os.path.join(project_dir, "metadata.json")
+        anchor_prompt = ""
+        
+        if os.path.exists(meta_path):
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+                anchor_prompt = meta.get("prompt", "")
+                if not anchor_url:
+                    # Fallback to Front view if available
+                    front_rig = next((r for r in meta.get("rigs", []) if r["pose_index"] == 0), None)
+                    if front_rig:
+                        anchor_url = front_rig["url"]
+                    else:
+                        # Fallback to turnaround sheet
+                        anchor_url = meta.get("image_url")
+
+        if not anchor_url:
+             raise HTTPException(status_code=400, detail="Could not determine anchor image for style reference")
+
+        anchor_path = resolve_image_path(anchor_url)
+        if not os.path.exists(anchor_path):
+             raise HTTPException(status_code=404, detail=f"Anchor image not found at {anchor_path}")
+             
+        anchor_img = Image.open(anchor_path).convert("RGB")
+        
+        # 2. In-Place Reconstruction Canvas
+        # Use Neutral Gray (128,128,128) to prevent background color bleed/washout
+        canvas = Image.new("RGB", (1024, 1024), (128, 128, 128))
+        
+        # Fit character into the center (Zoom in to 950px for max detail density)
+        # Handle transparency by compositing onto neutral gray first
+        anchor_rgba = Image.open(anchor_path).convert("RGBA")
+        a_w, a_h = anchor_rgba.size
+        scale = min(950 / a_w, 950 / a_h)
+        new_w, new_h = int(a_w * scale), int(a_h * scale)
+        anchor_scaled = anchor_rgba.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        
+        offset_x = (1024 - new_w) // 2
+        offset_y = (1024 - new_h) // 2
+        
+        # Composite onto a temporary gray background to avoid sharp edges
+        temp_bg = Image.new("RGBA", anchor_scaled.size, (128, 128, 128, 255))
+        temp_bg.paste(anchor_scaled, (0, 0), anchor_scaled)
+        canvas.paste(temp_bg.convert("RGB"), (offset_x, offset_y))
+        
+        # 3. Targeted Mask & Surgical Erasure
+        mask_data = np.zeros((1024, 1024), dtype=np.uint8)
+        canvas_arr = np.array(canvas)
+        
+        # Find the rig for this anchor to get joint positions
+        target_rig = next((r for r in meta.get("rigs", []) if r["url"] in anchor_url or anchor_url in r["url"]), None)
+        
+        if target_rig:
+            # ERASURE: Paint non-target limbs Neutral Gray to prevent context conflict
+            for limb_name, joint_list in LIMB_HIERARCHY.items():
+                if limb_name.lower() == req.limb_name.lower():
+                    continue # This is our target, don't erase!
+                
+                # Draw a thick gray line/polygon over the "other" limb
+                other_points = []
+                for jn in joint_list:
+                    if jn in target_rig["joints"]:
+                        j = target_rig["joints"][jn]
+                        px = int(j["x"] * new_w) + offset_x
+                        py = int(j["y"] * new_h) + offset_y
+                        other_points.append([px, py])
+                
+                if len(other_points) >= 2:
+                    pts = np.array(other_points, np.int32)
+                    # Use a thick line to ensure the limb is fully "deleted" from the context
+                    cv2.polylines(canvas_arr, [pts], False, (128, 128, 128), thickness=60)
+            
+            # Update canvas with erased parts
+            canvas = Image.fromarray(canvas_arr)
+            
+            # MASK: Focus only on the target limb
+            joint_names = LIMB_HIERARCHY.get(req.limb_name, [])
+            points = []
+            for jn in joint_names:
+                if jn in target_rig["joints"]:
+                    j = target_rig["joints"][jn]
+                    px = int(j["x"] * new_w) + offset_x
+                    py = int(j["y"] * new_h) + offset_y
+                    points.append([px, py])
+            
+            if len(points) >= 2:
+                pts = np.array(points, np.int32)
+                x, y, w, h = cv2.boundingRect(pts)
+                pad = 30 # Increased padding for better structural context
+                cv2.rectangle(mask_data, (x-pad, y-pad), (x+w+pad, y+h+pad), 255, -1)
+            else:
+                mask_data[256:768, 256:768] = 255
+        else:
+            mask_data[256:768, 256:768] = 255
+            
+        mask_img = Image.fromarray(mask_data)
+        
+        # 4. Refined Prompt (Strict Isolation & Directional Accuracy)
+        style_ref = f"matching {anchor_prompt}" if anchor_prompt else "high quality character"
+        
+        isolation = ""
+        if "torso" in req.limb_name.lower():
+            isolation = ", standalone 2D game asset, detached and isolated torso, no arms or legs attached, clean anatomical sockets"
+        else:
+            isolation = ", isolated and detached anatomical limb, 2d game sprite, clean edges"
+
+        full_prompt = f"a highly detailed {req.limb_name} of this character{isolation}, {style_ref}, high contrast, full color, deep saturation, vibrant textures, studio lighting, neutral grey background, sharp focus, professional 2d asset, high fidelity"
+        
+        # 5. Run FLUX Fill
+        pipe = manager.load_flux_fill()
+        
+        def do_explode():
+            return pipe(
+                prompt=full_prompt,
+                image=canvas,
+                mask_image=mask_img,
+                num_inference_steps=40,
+                guidance_scale=4.5,
+                width=1024,
+                height=1024,
+            ).images[0]
+            
+        result = await run_in_threadpool(do_explode)
+        
+        # 6. Extraction
+        if target_rig and len(points) >= 2:
+            pts = np.array(points, np.int32)
+            x, y, w, h = cv2.boundingRect(pts)
+            pad = 120
+            crop_box = (max(0, x-pad), max(0, y-pad), min(1024, x+w+pad), min(1024, y+h+pad))
+        else:
+            crop_box = (128, 128, 896, 896)
+            
+        limb_crop = result.crop(crop_box)
+        
+        # Background removal
+        final_limb = remove(limb_crop, session=rembg_session)
+        
+        # Auto-crop to content
+        bbox = final_limb.getbbox()
+        if bbox:
+            final_limb = final_limb.crop(bbox)
+        
+        # Save
+        clean_name = req.limb_name.replace(" ", "_").lower()
+        filename = f"exploded_{clean_name}_{uuid.uuid4().hex[:4]}.png"
+        save_dir = os.path.join(project_dir, "exploded_limbs")
+        os.makedirs(save_dir, exist_ok=True)
+        filepath = os.path.join(save_dir, filename)
+        final_limb.save(filepath)
+        
+        return {"status": "success", "url": f"/output_saves/{req.project_id}/exploded_limbs/{filename}", "limb_name": req.limb_name}
+    except HTTPException:
+        raise
+class CompleteSocketRequest(BaseModel):
+    project_id: str
+    limb_url: str
+    limb_name: str
+    torso_url: str # Contextual anchor
+
+@app.post("/complete-limb-socket")
+async def complete_limb_socket(req: CompleteSocketRequest):
+    """Industry Standard: Rounds out the joint area using Torso as a style anchor."""
+    try:
+        logger.info(f"Completing socket for {req.limb_name} with Torso context")
+        
+        project_dir = os.path.join("Output_Saves", req.project_id)
+        limb_path = resolve_image_path(req.limb_url)
+        torso_path = resolve_image_path(req.torso_url)
+        
+        if not os.path.exists(limb_path) or not os.path.exists(torso_path):
+            raise HTTPException(status_code=404, detail="Required assets (limb or torso) missing")
+            
+        # 1. Load Assets
+        limb_img = Image.open(limb_path).convert("RGBA")
+        torso_img = Image.open(torso_path).convert("RGBA")
+        
+        # 2. Create 1024x1024 Contextual Canvas
+        canvas_size = 1024
+        canvas = Image.new("RGB", (canvas_size, canvas_size), (128, 128, 128))
+        
+        # Position them relative to each other
+        t_w, t_h = torso_img.size
+        l_w, l_h = limb_img.size
+        t_pos = (canvas_size // 2 - t_w // 2, canvas_size // 2 - t_h // 2)
+        canvas.paste(torso_img, t_pos, torso_img)
+        
+        # Paste Limb touching the torso
+        l_pos = (t_pos[0] + t_w // 2 - l_w // 2, t_pos[1] + t_h // 2 - l_h // 2)
+        canvas.paste(limb_img, l_pos, limb_img)
+        
+        # 3. Targeted Mask (The "Socket")
+        limb_alpha = np.array(limb_img)[:, :, 3]
+        kernel = np.ones((150, 150), np.uint8)
+        dilated = cv2.dilate(limb_alpha, kernel, iterations=1)
+        socket_mask_local = (dilated > 0) & (limb_alpha == 0)
+        
+        mask_full = Image.new("L", (canvas_size, canvas_size), 0)
+        mask_local_img = Image.fromarray((socket_mask_local * 255).astype(np.uint8))
+        mask_full.paste(mask_local_img, l_pos)
+        
+        # 4. Refined Prompt
+        meta_path = os.path.join(project_dir, "metadata.json")
+        style = "character sprite"
+        if os.path.exists(meta_path):
+            with open(meta_path, "r") as f:
+                style = json.load(f).get("prompt", "character sprite")[:100]
+
+        full_prompt = f"joint socket for {req.limb_name}, matching {style}, studio lighting, soft shadows, neutral studio background, game asset, high fidelity, 2d digital painting"
+        
+        # 5. Run FLUX Fill
+        pipe = manager.load_flux_fill()
+        
+        def do_fill():
+            return pipe(
+                prompt=full_prompt,
+                image=canvas,
+                mask_image=mask_full,
+                num_inference_steps=30,
+                guidance_scale=4.5,
+                width=1024,
+                height=1024,
+            ).images[0]
+            
+        result = await run_in_threadpool(do_fill)
+        
+        # 6. Extraction
+        crop_box = (l_pos[0] - 20, l_pos[1] - 20, l_pos[0] + l_w + 20, l_pos[1] + l_h + 20)
+        final_limb_patch = result.crop(crop_box)
+        final_no_bg = remove(final_limb_patch, session=rembg_session)
+        
+        filename = f"fixed_{req.limb_name}_{uuid.uuid4().hex[:4]}.png"
+        save_path = os.path.join(project_dir, "exploded_limbs", filename)
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        final_no_bg.save(save_path)
+        
+        return {"status": "success", "url": f"/output_saves/{req.project_id}/exploded_limbs/{filename}"}
+        
+    except Exception as e:
+        logger.error(f"Socket completion failed: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+class DirectionalPoseRequest(BaseModel):
+    project_id: str
+    target_direction: str # "SE", "SW", "NE", "NW"
+
+@app.post("/generate-directional-poses")
+async def generate_directional_poses(req: DirectionalPoseRequest):
+    """Industry Standard: Interpolates 45-degree angles from cardinal views."""
+    try:
+        logger.info(f"Interpolating {req.target_direction} pose for project {req.project_id}")
+        
+        project_dir = os.path.join("Output_Saves", req.project_id)
+        meta_path = os.path.join(project_dir, "metadata.json")
+        if not os.path.exists(meta_path):
+             raise HTTPException(status_code=404, detail="Project metadata not found")
+             
+        with open(meta_path, "r") as f:
+            meta = json.load(f)
+            
+        # cardinal views: Front=0, Side=2, Back=4
+        rigs = meta.get("rigs", [])
+        front = next((r["url"] for r in rigs if r["pose_index"] == 0), None)
+        side = next((r["url"] for r in rigs if r["pose_index"] == 2), None)
+        back = next((r["url"] for r in rigs if r["pose_index"] == 4), None)
+        
+        # Determine references based on target
+        ref1_url, ref2_url = None, None
+        if req.target_direction == "SE":
+            ref1_url, ref2_url = front, side
+        elif req.target_direction == "SW":
+            ref1_url, ref2_url = front, side # Side will be flipped in logic if needed
+        elif req.target_direction == "NE":
+            ref1_url, ref2_url = back, side
+        elif req.target_direction == "NW":
+            ref1_url, ref2_url = back, side
+            
+        if not ref1_url or not ref2_url:
+             raise HTTPException(status_code=400, detail="Missing cardinal views (Front/Side/Back) required for interpolation")
+
+        # Load and resize refs
+        ref1 = Image.open(resolve_image_path(ref1_url)).convert("RGB").resize((341, 512))
+        ref2 = Image.open(resolve_image_path(ref2_url)).convert("RGB").resize((341, 512))
+        
+        # Create triple-width canvas (1024px width total)
+        # Layout: [Ref 1] [Ref 2] [Empty Space for Target]
+        canvas = Image.new("RGB", (1024, 512), (255, 255, 255))
+        canvas.paste(ref1, (0, 0))
+        canvas.paste(ref2, (341, 0))
+        
+        # Mask for the target area (rightmost 342px)
+        mask_data = np.zeros((512, 1024), dtype=np.uint8)
+        mask_data[:, 682:] = 255
+        mask_img = Image.fromarray(mask_data)
+        
+        # 3. Prompt
+        dir_name = {
+            "SE": "front-right three-quarter",
+            "SW": "front-left three-quarter",
+            "NE": "back-right three-quarter",
+            "NW": "back-left three-quarter"
+        }[req.target_direction]
+        
+        full_prompt = f"a {dir_name} view of the character, matching character design, {meta.get('prompt', '')}, flat 2d game asset, high resolution, white background"
+        
+        # 4. Run FLUX Fill
+        pipe = manager.load_flux_fill()
+        
+        def do_fill():
+            return pipe(
+                prompt=full_prompt,
+                image=canvas,
+                mask_image=mask_img,
+                num_inference_steps=50,
+                guidance_scale=5.0,
+                width=1024,
+                height=512,
+            ).images[0]
+            
+        result = await run_in_threadpool(do_fill)
+        
+        # Crop target
+        target_img = result.crop((682, 0, 1024, 512))
+        
+        # Background removal
+        target_no_bg = remove(target_img, session=rembg_session)
+        
+        # Save
+        filename = f"pose_{req.target_direction}_{uuid.uuid4().hex[:4]}.png"
+        filepath = os.path.join(project_dir, filename)
+        target_no_bg.save(filepath)
+        
+        # Update metadata
+        if "directional_poses" not in meta: meta["directional_poses"] = {}
+        meta["directional_poses"][req.target_direction] = f"/output_saves/{req.project_id}/{filename}"
+        with open(meta_path, "w") as f:
+            json.dump(meta, f)
+            
+        return {"status": "success", "url": meta["directional_poses"][req.target_direction]}
+        
+    except Exception as e:
+        logger.error(f"Error generating directional pose: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
 
 def find_free_port(start_port):
     import socket
