@@ -8,6 +8,8 @@ import json
 import random
 import time
 import shutil
+import base64
+import io
 from typing import Optional
 from fastapi import FastAPI, Body, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -47,11 +49,20 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
-# Enable CORS
+# Custom StaticFiles to ensure CORS headers are sent for canvas loading
+class CORSStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "*"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+        return response
+
+# Enable global CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -71,10 +82,10 @@ os.makedirs("templates", exist_ok=True)
 os.makedirs("saves", exist_ok=True)
 os.makedirs("Output_Saves", exist_ok=True)
 
-# Serve generated images and saves
-app.mount("/output", StaticFiles(directory="output"), name="output")
-app.mount("/saves", StaticFiles(directory="saves"), name="saves")
-app.mount("/output_saves", StaticFiles(directory="Output_Saves"), name="output_saves")
+# Serve generated images and saves with CORS enabled
+app.mount("/output", CORSStaticFiles(directory="output"), name="output")
+app.mount("/saves", CORSStaticFiles(directory="saves"), name="saves")
+app.mount("/output_saves", CORSStaticFiles(directory="Output_Saves"), name="output_saves")
 
 def get_next_project_id():
     """Finds the highest AXXXXXX folder and returns the next ID."""
@@ -1994,6 +2005,7 @@ class ExplodeLimbRequest(BaseModel):
     project_id: str
     limb_name: str # e.g. "left arm"
     anchor_url: Optional[str] = None
+    mask_image: Optional[str] = None # Base64 mask from user
 
 @app.post("/generate-isolated-limb")
 async def generate_isolated_limb(req: ExplodeLimbRequest):
@@ -2078,11 +2090,16 @@ async def generate_isolated_limb(req: ExplodeLimbRequest):
                     pts = np.array(other_points, np.int32)
                     # Use a thick line to ensure the limb is fully "deleted" from the context
                     cv2.polylines(canvas_arr, [pts], False, (128, 128, 128), thickness=60)
+                elif len(other_points) == 1:
+                    # Single joint limbs (like Head or Hands)
+                    center = tuple(other_points[0])
+                    # Draw a large circle to cover head/hair or hands
+                    cv2.circle(canvas_arr, center, 85, (128, 128, 128), -1)
             
             # Update canvas with erased parts
             canvas = Image.fromarray(canvas_arr)
             
-            # MASK: Focus only on the target limb
+            # Define joint-based points for automatic fallback
             joint_names = LIMB_HIERARCHY.get(req.limb_name, [])
             points = []
             for jn in joint_names:
@@ -2091,8 +2108,28 @@ async def generate_isolated_limb(req: ExplodeLimbRequest):
                     px = int(j["x"] * new_w) + offset_x
                     py = int(j["y"] * new_h) + offset_y
                     points.append([px, py])
-            
-            if len(points) >= 2:
+
+            if req.mask_image:
+                # User provided a manual mask. Decode, resize and offset to match canvas.
+                header, encoded = req.mask_image.split(",", 1)
+                mask_bytes = base64.b64decode(encoded)
+                user_mask = Image.open(io.BytesIO(mask_bytes))
+                if user_mask.mode == "RGBA":
+                    # Convert transparent mask to black/white for FLUX
+                    new_mask = Image.new("L", user_mask.size, 0)
+                    # Use alpha channel or anything non-transparent as mask
+                    alpha = user_mask.split()[-1]
+                    new_mask.paste(255, (0, 0), alpha)
+                    user_mask = new_mask
+                else:
+                    user_mask = user_mask.convert("L")
+
+                # Resize and offset user mask same as character
+                user_mask_scaled = user_mask.resize((new_w, new_h), Image.Resampling.NEAREST)
+                mask_img_temp = Image.new("L", (1024, 1024), 0)
+                mask_img_temp.paste(user_mask_scaled, (offset_x, offset_y))
+                mask_data = np.array(mask_img_temp)
+            elif len(points) >= 2:
                 pts = np.array(points, np.int32)
                 x, y, w, h = cv2.boundingRect(pts)
                 pad = 30 # Increased padding for better structural context
@@ -2109,11 +2146,11 @@ async def generate_isolated_limb(req: ExplodeLimbRequest):
         
         isolation = ""
         if "torso" in req.limb_name.lower():
-            isolation = ", standalone 2D game asset, detached and isolated torso, no arms or legs attached, clean anatomical sockets"
+            isolation = ", professional game asset, isolated character body, solid opaque skin and clothing, clean 2D sprite textures, no limbs, no face, no eyes, detached torso only, clean background"
         else:
-            isolation = ", isolated and detached anatomical limb, 2d game sprite, clean edges"
+            isolation = ", professional game asset, isolated character limb, solid opaque textures, clean background, detached part"
 
-        full_prompt = f"a highly detailed {req.limb_name} of this character{isolation}, {style_ref}, high contrast, full color, deep saturation, vibrant textures, studio lighting, neutral grey background, sharp focus, professional 2d asset, high fidelity"
+        full_prompt = f"a professional game asset of a {req.limb_name}{isolation}, {style_ref}, vibrant bold colors, solid character textures, high contrast, sharp focus, masterpiece, high fidelity, neutral grey background"
         
         # 5. Run FLUX Fill
         pipe = manager.load_flux_fill()
@@ -2121,17 +2158,28 @@ async def generate_isolated_limb(req: ExplodeLimbRequest):
         def do_explode():
             return pipe(
                 prompt=full_prompt,
-                image=canvas,
+                image=canvas, 
                 mask_image=mask_img,
-                num_inference_steps=40,
-                guidance_scale=4.5,
+                num_inference_steps=50, 
+                guidance_scale=5.0, # Higher guidance for more solid character colors
                 width=1024,
                 height=1024,
             ).images[0]
             
         result = await run_in_threadpool(do_explode)
         
-        # 6. Extraction
+        # 6. Surgical Extraction (Use the mask as Alpha)
+        # Instead of AI background removal (rembg), which can be too aggressive,
+        # we use the user's own mask to define the transparency.
+        
+        # Convert mask_img to Alpha
+        mask_alpha = mask_img.convert("L")
+        
+        # Composite: Result pixels where mask is white, transparent elsewhere
+        final_limb = Image.new("RGBA", (1024, 1024), (0, 0, 0, 0))
+        final_limb.paste(result.convert("RGBA"), (0, 0), mask_alpha)
+        
+        # Crop to the mask area
         if target_rig and len(points) >= 2:
             pts = np.array(points, np.int32)
             x, y, w, h = cv2.boundingRect(pts)
@@ -2140,10 +2188,7 @@ async def generate_isolated_limb(req: ExplodeLimbRequest):
         else:
             crop_box = (128, 128, 896, 896)
             
-        limb_crop = result.crop(crop_box)
-        
-        # Background removal
-        final_limb = remove(limb_crop, session=rembg_session)
+        final_limb = final_limb.crop(crop_box)
         
         # Auto-crop to content
         bbox = final_limb.getbbox()

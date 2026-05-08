@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { Sparkles, Wand2, Play, Download, Settings, Image as ImageIcon, Loader2, ArrowLeft, RefreshCw, Save, Upload, X, Check, FolderOpen } from 'lucide-react'
+import { Sparkles, Wand2, Play, Download, Settings, Image as ImageIcon, Loader2, ArrowLeft, RefreshCw, Save, Upload, X, Check, FolderOpen, HelpCircle } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 
 function LivePreview({ rig, params }) {
@@ -111,13 +111,31 @@ function LivePreview({ rig, params }) {
     </div>
   );
 }
-function LimbMasker({ imageUrl, onSave, onCancel }) {
+function LimbMasker({ imageUrl, onSave, onCancel, title, initialMask }) {
   const canvasRef = useRef(null);
   const maskCanvasRef = useRef(null);
   const [isDrawing, setIsDrawing] = useState(false);
+  const [isPanning, setIsPanning] = useState(false);
   const [brushSize, setBrushSize] = useState(30);
+  const [isErasing, setIsErasing] = useState(false);
+  const [zoom, setZoom] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [history, setHistory] = useState([]);
+  const [lastPos, setLastPos] = useState(null);
 
   const [baseImage, setBaseImage] = useState(null);
+  const containerRef = useRef(null);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const handleWheelEvent = (e) => {
+      e.preventDefault();
+      handleWheel(e);
+    };
+    container.addEventListener('wheel', handleWheelEvent, { passive: false });
+    return () => container.removeEventListener('wheel', handleWheelEvent);
+  }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -137,10 +155,59 @@ function LimbMasker({ imageUrl, onSave, onCancel }) {
       ctx.drawImage(img, 0, 0);
       setBaseImage(img);
       
-      // Initialize mask canvas as transparent
       mctx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+      
+      if (initialMask) {
+        const maskImg = new Image();
+        maskImg.src = initialMask;
+        maskImg.onload = () => {
+          mctx.drawImage(maskImg, 0, 0);
+          // Directly call updateDisplay with the new img context
+          const tintCanvas = document.createElement('canvas');
+          tintCanvas.width = img.width;
+          tintCanvas.height = img.height;
+          const tctx = tintCanvas.getContext('2d');
+          tctx.drawImage(maskCanvas, 0, 0);
+          tctx.globalCompositeOperation = 'source-in';
+          tctx.fillStyle = '#ff0000';
+          tctx.fillRect(0, 0, tintCanvas.width, tintCanvas.height);
+          
+          ctx.clearRect(0, 0, img.width, img.height);
+          ctx.drawImage(img, 0, 0);
+          ctx.globalAlpha = 0.5;
+          ctx.drawImage(tintCanvas, 0, 0);
+          ctx.globalAlpha = 1.0;
+          
+          saveHistory();
+        };
+      } else {
+        saveHistory();
+      }
     };
   }, [imageUrl]);
+
+  const saveHistory = () => {
+    const maskCanvas = maskCanvasRef.current;
+    if (!maskCanvas) return;
+    const data = maskCanvas.toDataURL();
+    setHistory(prev => [...prev.slice(-19), data]); // Keep last 20 steps
+  };
+
+  const handleUndo = () => {
+    if (history.length <= 1) return;
+    const newHistory = history.slice(0, -1);
+    const lastState = newHistory[newHistory.length - 1];
+    
+    const img = new Image();
+    img.src = lastState;
+    img.onload = () => {
+      const mctx = maskCanvasRef.current.getContext('2d');
+      mctx.clearRect(0, 0, maskCanvasRef.current.width, maskCanvasRef.current.height);
+      mctx.drawImage(img, 0, 0);
+      setHistory(newHistory);
+      updateDisplay();
+    };
+  };
 
   const getCoordinates = (e) => {
     const canvas = canvasRef.current;
@@ -153,9 +220,38 @@ function LimbMasker({ imageUrl, onSave, onCancel }) {
     };
   };
 
-  const startDrawing = (e) => {
+  const handleMouseDown = (e) => {
+    if (e.button === 2 || e.altKey || e.ctrlKey) {
+      setIsPanning(true);
+      setLastPos({ x: e.clientX, y: e.clientY });
+      return;
+    }
     setIsDrawing(true);
     draw(e);
+  };
+
+  const handleMouseMove = (e) => {
+    if (isPanning) {
+      const dx = e.clientX - lastPos.x;
+      const dy = e.clientY - lastPos.y;
+      setOffset(prev => ({ x: prev.x + dx, y: prev.y + dy }));
+      setLastPos({ x: e.clientX, y: e.clientY });
+      return;
+    }
+    if (isDrawing) draw(e);
+  };
+
+  const handleMouseUp = () => {
+    if (isDrawing) saveHistory();
+    setIsDrawing(false);
+    setIsPanning(false);
+    setLastPos(null);
+  };
+
+  const handleWheel = (e) => {
+    e.preventDefault();
+    const delta = e.deltaY > 0 ? 0.9 : 1.1;
+    setZoom(prev => Math.min(Math.max(prev * delta, 0.5), 8));
   };
 
   const draw = (e) => {
@@ -163,12 +259,11 @@ function LimbMasker({ imageUrl, onSave, onCancel }) {
     const mctx = maskCanvasRef.current.getContext('2d');
     const { x, y } = getCoordinates(e);
 
+    mctx.globalCompositeOperation = isErasing ? 'destination-out' : 'source-over';
     mctx.fillStyle = 'white';
     mctx.beginPath();
-    mctx.arc(x, y, brushSize, 0, Math.PI * 2);
+    mctx.arc(x, y, brushSize / zoom, 0, Math.PI * 2);
     mctx.fill();
-    
-    // Trigger re-render of the visible overlay
     updateDisplay();
   };
 
@@ -181,91 +276,141 @@ function LimbMasker({ imageUrl, onSave, onCancel }) {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(baseImage, 0, 0);
     
-    // Create a temporary canvas to tint the mask red
     const tintCanvas = document.createElement('canvas');
     tintCanvas.width = canvas.width;
     tintCanvas.height = canvas.height;
     const tctx = tintCanvas.getContext('2d');
     
-    // Draw the B/W mask
     tctx.drawImage(maskCanvas, 0, 0);
-    
-    // Use 'source-in' to fill only the white areas with red
     tctx.globalCompositeOperation = 'source-in';
     tctx.fillStyle = '#ff0000';
     tctx.fillRect(0, 0, tintCanvas.width, tintCanvas.height);
     
-    // Draw the red mask on top of the character
     ctx.globalAlpha = 0.5;
     ctx.drawImage(tintCanvas, 0, 0);
     ctx.globalAlpha = 1.0;
   };
 
   const handleSave = () => {
-    // Backend needs White on Black.
-    const canvas = canvasRef.current;
-    const finalMaskCanvas = document.createElement('canvas');
-    finalMaskCanvas.width = canvas.width;
-    finalMaskCanvas.height = canvas.height;
-    const fctx = finalMaskCanvas.getContext('2d');
-    
-    fctx.fillStyle = 'black';
-    fctx.fillRect(0, 0, finalMaskCanvas.width, finalMaskCanvas.height);
-    fctx.drawImage(maskCanvasRef.current, 0, 0);
-    
-    onSave(finalMaskCanvas.toDataURL('image/png'));
+    // Pass the raw transparent mask for persistence and surgical processing
+    onSave(maskCanvasRef.current.toDataURL('image/png'));
   };
 
   return (
-    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.95)', zIndex: 1000, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '2rem' }}>
-      <div className="glass-card" style={{ padding: '1.2rem 2rem', marginBottom: '1.5rem', display: 'flex', gap: '2rem', alignItems: 'center', border: '1px solid var(--accent-primary)' }}>
-        <div style={{ textAlign: 'left' }}>
-          <h3 style={{ margin: 0, fontSize: '1.4rem' }}>Surgical <span className="gradient-text">Masking</span></h3>
-          <p style={{ margin: 0, fontSize: '0.8rem', color: '#888' }}>Paint white over the pose to replace. AI will ignore the rest.</p>
+    <div 
+      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.98)', zIndex: 1000, display: 'flex', flexDirection: 'column', alignItems: 'center', overflow: 'hidden' }}
+      onContextMenu={(e) => e.preventDefault()}
+    >
+      {/* Toolbar */}
+      <div className="glass-card" style={{ 
+        margin: '1.5rem', 
+        padding: '0.8rem 1.5rem', 
+        display: 'flex', 
+        gap: '1.5rem', 
+        alignItems: 'center', 
+        border: '1px solid var(--accent-primary)',
+        zIndex: 10,
+        boxShadow: '0 10px 30px rgba(0,0,0,0.5)'
+      }}>
+        <div style={{ textAlign: 'left', borderRight: '1px solid rgba(255,255,255,0.1)', paddingRight: '1.5rem' }}>
+          <h3 style={{ margin: 0, fontSize: '1.1rem' }}>Surgical <span className="gradient-text">Studio</span></h3>
+          <p style={{ margin: 0, fontSize: '0.7rem', color: '#666' }}>L-Click: Paint | R-Click/Ctrl: Pan | Wheel: Zoom</p>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem' }}>
+           <button 
+             className="btn-secondary" 
+             style={{ padding: '0.4rem 0.8rem', fontSize: '0.7rem', background: 'rgba(139, 92, 246, 0.1)', color: 'var(--accent-primary)', borderColor: 'var(--accent-primary)' }}
+             onClick={() => alert("SURGERY GUIDE:\n\n1. MASK THE TARGET: Paint over the specific limb you want to re-generate.\n2. ISOLATION: To separate a torso, mask the area where the neck and shoulders used to be.\n3. CLEAN EDGES: Use the Eraser to keep the mask tight to the body.\n4. AI LOGIC: Everything in RED will be re-drawn by the AI. Everything else is kept exactly as is.")}
+           >
+             <HelpCircle size={14} style={{marginRight: '0.3rem'}} /> How to Mask
+           </button>
         </div>
         
-        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', background: 'rgba(255,255,255,0.05)', padding: '0.5rem 1rem', borderRadius: '8px' }}>
-          <label style={{ fontSize: '0.9rem', color: 'var(--accent-primary)', fontWeight: 'bold' }}>Brush Size:</label>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem' }}>
+          <button 
+            className={!isErasing ? "btn-primary" : "btn-secondary"} 
+            onClick={() => setIsErasing(false)}
+            style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem' }}
+          >
+            <Sparkles size={14} style={{marginRight: '0.3rem'}} /> Brush
+          </button>
+          <button 
+            className={isErasing ? "btn-primary" : "btn-secondary"} 
+            onClick={() => setIsErasing(true)}
+            style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem' }}
+          >
+            <X size={14} style={{marginRight: '0.3rem'}} /> Eraser
+          </button>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', background: 'rgba(255,255,255,0.05)', padding: '0.4rem 1rem', borderRadius: '8px' }}>
+          <label style={{ fontSize: '0.8rem', color: 'var(--accent-primary)', fontWeight: 'bold' }}>Size:</label>
           <input 
             type="range" min="5" max="150" 
             value={brushSize} 
             onChange={(e) => setBrushSize(parseInt(e.target.value))} 
-            style={{ width: '150px' }}
+            style={{ width: '100px' }}
           />
-          <span style={{ minWidth: '30px', textAlign: 'right' }}>{brushSize}px</span>
+          <span style={{ minWidth: '25px', fontSize: '0.8rem' }}>{brushSize}px</span>
         </div>
 
-        <div style={{ display: 'flex', gap: '0.8rem' }}>
-          <button className="btn-secondary" onClick={onCancel}>Cancel</button>
-          <button className="btn-primary" onClick={handleSave} style={{ background: 'linear-gradient(to right, #8b5cf6, #d946ef)', border: 'none' }}>
-            <Wand2 size={18} style={{ marginRight: '0.5rem' }} /> Fix This Pose
+        <div style={{ display: 'flex', gap: '0.5rem', borderLeft: '1px solid rgba(255,255,255,0.1)', paddingLeft: '1.5rem' }}>
+          <button className="btn-secondary" onClick={handleUndo} disabled={history.length <= 1} style={{ padding: '0.4rem' }} title="Undo (Ctrl+Z)">
+            <RefreshCw size={16} style={{transform: 'scaleX(-1)'}} />
+          </button>
+          <button className="btn-secondary" onClick={() => { setZoom(1); setOffset({x:0, y:0}); }} style={{ padding: '0.4rem' }} title="Reset View">
+            <RefreshCw size={16} />
+          </button>
+          <div style={{ width: '1px', background: 'rgba(255,255,255,0.1)', margin: '0 0.5rem' }} />
+          <button className="btn-secondary" onClick={onCancel} style={{ padding: '0.4rem 1rem', fontSize: '0.8rem' }}>Cancel</button>
+          <button className="btn-primary" onClick={handleSave} style={{ padding: '0.4rem 1.2rem', fontSize: '0.8rem', background: 'linear-gradient(to right, #8b5cf6, #d946ef)', border: 'none' }}>
+            <Check size={16} style={{ marginRight: '0.3rem' }} /> Apply Surgery
           </button>
         </div>
       </div>
 
-      <div style={{ 
-        position: 'relative', 
-        borderRadius: '12px', 
-        border: '3px solid var(--accent-primary)', 
-        boxShadow: '0 0 40px rgba(139, 92, 246, 0.3)',
-        background: '#111',
-        padding: '10px'
-      }}>
-        <canvas 
-          ref={canvasRef} 
-          onMouseDown={startDrawing}
-          onMouseMove={draw}
-          onMouseUp={() => setIsDrawing(false)}
-          onMouseLeave={() => setIsDrawing(false)}
-          style={{ maxHeight: '80vh', maxWidth: '95vw', display: 'block', cursor: 'crosshair', objectFit: 'contain' }} 
-        />
-        {/* Hidden mask canvas that we actually use to generate the B/W mask for the AI */}
-        <canvas ref={maskCanvasRef} style={{ display: 'none' }} />
+      <div 
+        ref={containerRef}
+        style={{ 
+          flex: 1,
+          width: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          cursor: isPanning ? 'grabbing' : isErasing ? 'crosshair' : 'crosshair',
+          overflow: 'hidden',
+          position: 'relative'
+        }}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+      >
+        <div style={{ 
+          transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})`,
+          transformOrigin: 'center',
+          transition: isPanning ? 'none' : 'transform 0.1s ease-out',
+          position: 'relative'
+        }}>
+          <canvas 
+            ref={canvasRef} 
+            style={{ 
+              display: 'block', 
+              boxShadow: '0 0 50px rgba(0,0,0,0.8)',
+              background: '#111',
+              imageRendering: 'pixelated'
+            }} 
+          />
+          <canvas ref={maskCanvasRef} style={{ display: 'none' }} />
+        </div>
       </div>
       
-      <p style={{ marginTop: '1rem', color: '#666', fontSize: '0.8rem' }}>
-        Tip: Mask the entire character island for the best rotation results.
-      </p>
+      <div style={{ padding: '1rem', color: '#444', fontSize: '0.7rem', display: 'flex', gap: '2rem' }}>
+        <span>Zoom: {Math.round(zoom * 100)}%</span>
+        <span>History: {history.length} steps</span>
+        <span>Tip: Hold Right-Click or Ctrl to Pan the view</span>
+      </div>
     </div>
   );
 }
@@ -366,11 +511,13 @@ function App() {
   
   // Surgery & Correction State
   const [isMasking, setIsMasking] = useState(false)
+  const [activeManualLimb, setActiveManualLimb] = useState(null)
   const [targetRotation, setTargetRotation] = useState('front-quarter')
   const [regeneratingLimb, setRegeneratingLimb] = useState(null)
   const [poseLabels, setPoseLabels] = useState({}) // { index: 'front' }
   const [activeDirection, setActiveDirection] = useState(null)
   const [directionalLimbPacks, setDirectionalLimbPacks] = useState({}) // { 'front': { limbs } }
+  const [directionalLimbMasks, setDirectionalLimbMasks] = useState({}) // { 'front': { 'torso': maskBase64 } }
 
   // Check for saved anchors ONLY after discovery completes
   useEffect(() => {
@@ -966,6 +1113,19 @@ function App() {
 
   const handleFixPose = async (maskBase64) => {
     setIsMasking(false);
+    
+    if (activeManualLimb) {
+      const name = activeManualLimb;
+      // Save mask locally first so it persists even if generation fails
+      setDirectionalLimbMasks(prev => ({
+        ...prev,
+        [activeDirection]: { ...(prev[activeDirection] || {}), [name]: maskBase64 }
+      }));
+      setActiveManualLimb(null);
+      await handleRegenerateLimb(name, maskBase64);
+      return;
+    }
+
     setLoading(true);
     try {
       const res = await fetch(`${apiBase}/correct-pose`, {
@@ -1016,7 +1176,7 @@ function App() {
     }
   }
 
-  const handleRegenerateLimb = async (limbName) => {
+  const handleRegenerateLimb = async (limbName, manualMask = null) => {
     setRegeneratingLimb(limbName);
     const rigIdx = Object.keys(poseLabels).find(key => poseLabels[key] === activeDirection);
     const activeRigUrl = rigIdx !== undefined ? rigData[rigIdx].url : selectedAnchor;
@@ -1028,7 +1188,8 @@ function App() {
         body: JSON.stringify({
           project_id: activeProjectId,
           limb_name: limbName,
-          anchor_url: activeRigUrl
+          anchor_url: activeRigUrl,
+          mask_image: manualMask
         })
       });
       const data = await res.json();
@@ -1734,6 +1895,20 @@ function App() {
                     </button>
                     <button 
                       className="btn-secondary" 
+                      style={{ marginTop: '0.4rem', fontSize: '0.65rem', width: '100%', borderColor: 'rgba(139, 92, 246, 0.3)' }}
+                      onClick={() => {
+                        const rigIdx = Object.keys(poseLabels).find(key => poseLabels[key] === activeDirection);
+                        const url = rigIdx !== undefined ? rigData[rigIdx].url : turnaroundUrl;
+                        setTurnaroundUrl(url); // Ensure we mask the correct view
+                        setActiveManualLimb(name);
+                        setIsMasking(true);
+                      }}
+                      disabled={regeneratingLimb === name}
+                    >
+                      <Wand2 size={12} /> Manual Explode
+                    </button>
+                    <button 
+                      className="btn-secondary" 
                       style={{ marginTop: '0.4rem', fontSize: '0.65rem', width: '100%', borderColor: 'rgba(217, 70, 239, 0.3)' }}
                       onClick={() => handleCompleteSocket(name, url)}
                     >
@@ -2318,7 +2493,9 @@ function App() {
       {isMasking && (
         <LimbMasker 
           imageUrl={turnaroundUrl} 
-          onCancel={() => setIsMasking(false)} 
+          title={activeManualLimb ? `Manual Surgery: ${activeManualLimb}` : "Surgical Masking"}
+          initialMask={activeManualLimb ? (directionalLimbMasks[activeDirection]?.[activeManualLimb]) : null}
+          onCancel={() => { setIsMasking(false); setActiveManualLimb(null); }} 
           onSave={handleFixPose} 
         />
       )}

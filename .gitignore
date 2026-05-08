@@ -40,3 +40,8 @@ checkpoint/
 **/.cache/
 **/.huggingface/
 **/.local/
+
+# Data and Outputs
+backend/Output_Saves/
+backend/saves/
+legacy_archive/
