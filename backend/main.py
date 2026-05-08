@@ -1017,6 +1017,7 @@ class TurnaroundRequest(BaseModel):
     prompt: str
     enforce_white: bool = True
     num_variants: int = 1
+    auto_slice: bool = True # Automatically slice after generation
 
 @app.post("/generate-turnaround")
 async def generate_turnaround(req: TurnaroundRequest):
@@ -1033,7 +1034,7 @@ async def generate_turnaround(req: TurnaroundRequest):
         # 3. Load FLUX Text-to-Image Pipeline with 4-bit Quantization
         logger.info("Loading FLUX.1-dev for Turnaround generation...")
         
-        # Load the massive 24GB transformer in 4-bit precision to fit in 16GB VRAM without thrashing
+        # Load the massive 24GB transformer in 4-bit precision to fit in 16GB VRAM
         nf4_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
@@ -1063,36 +1064,31 @@ async def generate_turnaround(req: TurnaroundRequest):
         # 4. Load the LoRA
         lora_path = os.path.join("loras", "turnaround.safetensors")
         if not os.path.exists(lora_path):
-             raise HTTPException(status_code=400, detail="Turnaround LoRA not found. Please manually download the .safetensors file from Civitai to backend/loras/turnaround.safetensors")
+             raise HTTPException(status_code=400, detail="Turnaround LoRA not found.")
         
         flux_pipe.load_lora_weights(lora_path)
         logger.info("LoRA loaded successfully.")
         
-        # 5. Inference - Slimmed down and reordered to prevent token truncation
+        # 5. Inference
         tech_prefix = "character turnaround sheet, 5 views: front view, side view, back view, front-quarter view, back-quarter view. no shadows, same proportions, consistent detailing, white background"
         prompt_text = f"{tech_prefix}, {req.prompt}"
         
         logger.info(f"Starting FLUX generation (in threadpool)...")
-        print(">>> [AI] Running FLUX.1-dev Inference...")
         last_image_url = None
         last_project_id = None
         
         # Determine number of variants to generate
-        num_to_gen = max(1, min(req.num_variants, 10))
+        num_to_gen = max(1, min(req.num_variants, 200)) 
         logger.info(f"Generating {num_to_gen} variants...")
 
         for v_idx in range(num_to_gen):
-            # --- AUTO-RETRY LOOP (per variant) ---
             max_attempts = 2 if req.enforce_white else 1
-            
-            # Pre-assign project ID for this variant
             pid = get_next_project_id()
             project_dir = os.path.join("Output_Saves", pid)
             os.makedirs(project_dir, exist_ok=True)
             
             variant_success = False
             for attempt in range(max_attempts):
-                # Use explicit random seed for each generation/retry to ensure variety
                 seed = random.randint(0, 2**32 - 1)
                 logger.info(f"Variant {v_idx+1}/{num_to_gen} | Attempt {attempt+1}/{max_attempts} | Seed: {seed}")
                 
@@ -1113,6 +1109,12 @@ async def generate_turnaround(req: TurnaroundRequest):
                 filename = f"{pid}_turnaround.png"
                 filepath = os.path.join(project_dir, filename)
                 image.save(filepath)
+                
+                # --- GOLDEN BACKUP ---
+                # Save a permanent backup that the system will never overwrite
+                backup_path = os.path.join(project_dir, f"{pid}_turnaround_ORIGINAL.png")
+                shutil.copy2(filepath, backup_path)
+                logger.info(f"  Golden Backup created: {backup_path}")
                 
                 # Save initial metadata
                 with open(os.path.join(project_dir, "metadata.json"), "w") as f:
@@ -1135,10 +1137,30 @@ async def generate_turnaround(req: TurnaroundRequest):
                     logger.info(f"  Variant {v_idx+1} Validation Success.")
                     variant_success = True
                     break
-                else:
-                    logger.warning(f"  Variant {v_idx+1} Validation Failed. Retrying with new seed...")
-            
+
+            # --- AUTO-SLICE ---
+            if req.auto_slice:
+                logger.info(f"  [AUTO-SLICE] Processing project {pid}...")
+                try:
+                    slice_req = SliceRequest(
+                        image_url=last_image_url,
+                        project_id=pid,
+                        remover_type="ai",
+                        force_reslice=True
+                    )
+                    await slice_turnaround(slice_req)
+                except Exception as se:
+                    logger.error(f"  [AUTO-SLICE] Failed for project {pid}: {se}")
+
             logger.info(f"Finished variant {v_idx+1}/{num_to_gen} (Project: {pid})")
+
+        # Unload FLUX after we are done
+        del flux_pipe
+        if manager.device == "cuda":
+            torch.cuda.empty_cache()
+            gc.collect()
+            
+        return {"status": "success", "url": last_image_url, "project_id": last_project_id, "batch_count": num_to_gen}
 
         # Unload FLUX after we are done
         del flux_pipe
@@ -1174,6 +1196,7 @@ class SliceRequest(BaseModel):
     remover_type: Optional[str] = "ai" # "ai", "simple", or "none"
     alpha_matting: Optional[bool] = False
     force_reslice: Optional[bool] = False
+    target_slice_index: Optional[int] = None
     foreground_threshold: Optional[int] = 240
     background_threshold: Optional[int] = 10
 
@@ -1223,15 +1246,6 @@ async def list_projects():
                     
         saves.sort(key=lambda x: x["timestamp"], reverse=True)
         return {"status": "success", "saves": saves}
-    except Exception as e:
-        logger.error(f"Error listing saves: {e}")
-        return {"status": "error", "message": str(e)}
-
-@app.delete("/project/{project_id}")
-async def delete_project(project_id: str):
-    """Deletes a project folder and all its contents."""
-    try:
-        project_dir = os.path.join("Output_Saves", project_id)
         if os.path.exists(project_dir):
             logger.info(f"Deleting project directory: {project_dir}")
             shutil.rmtree(project_dir)
@@ -1240,6 +1254,41 @@ async def delete_project(project_id: str):
             raise HTTPException(status_code=404, detail="Project not found")
     except Exception as e:
         logger.error(f"Error deleting project {project_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/reset-project")
+async def reset_project(req: dict):
+    """Restores the project to the ORIGINAL sheet and clears AI corrections."""
+    try:
+        pid = req.get("project_id")
+        project_dir = os.path.join("Output_Saves", pid)
+        original_sheet = os.path.join(project_dir, f"{pid}_turnaround_ORIGINAL.png")
+        if not os.path.exists(original_sheet):
+             raise HTTPException(status_code=404, detail="Original sheet not found")
+        
+        # Keep original and metadata, delete everything else
+        for f in os.listdir(project_dir):
+            path = os.path.join(project_dir, f)
+            if f != "metadata.json" and f != f"{pid}_turnaround_ORIGINAL.png":
+                if os.path.isfile(path): os.remove(path)
+                elif os.path.isdir(path): shutil.rmtree(path)
+        
+        # Re-link original
+        shutil.copy2(original_sheet, os.path.join(project_dir, f"{pid}_turnaround.png"))
+        
+        # Reset metadata
+        meta_path = os.path.join(project_dir, "metadata.json")
+        with open(meta_path, "r") as f:
+            meta = json.load(f)
+        meta["image_url"] = f"/output_saves/{pid}/{pid}_turnaround.png"
+        meta.pop("all_slice_versions", None)
+        meta.pop("slice_segments", None)
+        with open(meta_path, "w") as f:
+            json.dump(meta, f)
+            
+        return {"status": "success"}
+    except Exception as e:
+        logger.error(f"Error resetting project {pid}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/save-project")
@@ -1323,6 +1372,13 @@ async def slice_turnaround(req: SliceRequest):
         if not os.path.exists(project_sheet_path):
             shutil.copy2(sheet_path, project_sheet_path)
             
+        # --- GOLDEN BACKUP ---
+        # Ensure a permanent backup exists that will never be pivoted or overwritten
+        backup_path = os.path.join(output_dir, f"{pid}_turnaround_ORIGINAL.png")
+        if not os.path.exists(backup_path):
+            shutil.copy2(project_sheet_path, backup_path)
+            logger.info(f"  Golden Backup created for manual/existing turnaround: {backup_path}")
+            
         # Ensure metadata exists
         meta_path = os.path.join(output_dir, "metadata.json")
         
@@ -1366,50 +1422,95 @@ async def slice_turnaround(req: SliceRequest):
                             else:
                                 return {"status": "success", "urls": sliced_urls[:num_poses], "project_id": pid}
             
-        # Dynamic Detection: Use horizontal projection to find gaps and isolate characters
-        num_poses = 5
-        
-        # 1. Prepare mask for detection (ignore background)
-        detection_img = image.convert("RGBA")
-        data = np.array(detection_img)
-        
-        # Avoid data.T which swaps axes confusingly for 3D arrays
-        r = data[:, :, 0]
-        g = data[:, :, 1]
-        b = data[:, :, 2]
-        
-        corners = [data[0,0], data[0,-1], data[-1,0], data[-1,-1]]
-        avg_corner = np.mean(corners, axis=0)
-        is_white_bg = np.mean(avg_corner[:3]) > 128
-        
-        # Use a slightly stricter threshold for DYNAMIC DETECTION to find gaps
-        # We want to ignore near-white/near-black noise in the gaps
-        if is_white_bg:
-            detect_thresh = min(210, (req.foreground_threshold or 240) - 30)
-            mask = (r < detect_thresh) | (g < detect_thresh) | (b < detect_thresh)
-        else:
-            detect_thresh = max(45, (req.foreground_threshold or 15) + 30)
-            mask = (r > detect_thresh) | (g > detect_thresh) | (b > detect_thresh)
-            
-        # 2. Horizontal Projection (sum along Y/Height axis to get X/Width vector)
-        projection = np.sum(mask, axis=0)
-        
-        # 3. Find segments (islands of pixels)
-        # Increase noise threshold to ignore shadows/artifacts in gaps
-        min_pixels_in_col = 30 
+        # 4. Character Isolation Strategy
         segments = []
-        in_segment = False
-        start_x = 0
+        is_fixed_grid = False
         
-        for x, val in enumerate(projection):
-            if val > min_pixels_in_col and not in_segment:
-                in_segment = True
-                start_x = x
-            elif val <= min_pixels_in_col and in_segment:
-                in_segment = False
-                segments.append((start_x, x))
-        if in_segment:
-            segments.append((start_x, len(projection)-1))
+        # DECISION LOGIC: 
+        # If this is a "Working Turnaround" (pivoted 5-slot sheet), we MUST use Fixed Grid.
+        # If this is an "Original" or "Master" (which might be 4-person), we MUST use Dynamic.
+        is_working_sheet = "_working" in sheet_path or "_turnaround.png" in sheet_path
+        # Wait, if it's A00014_turnaround.png, it could be the pivoted one OR the original.
+        # Let's check the metadata to see if we've pivoted yet.
+        has_pivoted = False
+        meta_path = os.path.join(output_dir, "metadata.json")
+        meta = {}
+        if os.path.exists(meta_path):
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+                # LOCK-IN: Use Fixed Grid if we have already pivoted (even if filename changed)
+                has_pivoted = meta.get("image_url", "").endswith("_working.png") or len(meta.get("slice_segments", [])) == 5
+        
+        if (w == 1536 or w == 2560) and has_pivoted:
+            logger.info(f"  Pivoted 5-slot sheet detected. Using Fixed Grid Slicing.")
+            is_fixed_grid = True
+            col_w = 307 if w == 1536 else 512
+            segments = [[i * col_w, (i + 1) * col_w] for i in range(5)]
+            
+        if not is_fixed_grid:
+            # Dynamic Detection: Use horizontal projection to find gaps and isolate characters
+            logger.info("  Original/Irregular sheet detected. Using Enhanced Dynamic Detection (Surgical Split)...")
+            
+            # 1. Prepare mask for detection (ignore background)
+            detection_img = image.convert("RGBA")
+            data = np.array(detection_img)
+            r, g, b = data[:, :, 0], data[:, :, 1], data[:, :, 2]
+            
+            corners = [data[0,0], data[0,-1], data[-1,0], data[-1,-1]]
+            avg_corner = np.mean(corners, axis=0)
+            is_white_bg = np.mean(avg_corner[:3]) > 128
+            
+            # Use a more sensitive threshold for gap detection
+            if is_white_bg:
+                detect_thresh = min(225, (req.foreground_threshold or 240) - 15)
+                mask = (r < detect_thresh) | (g < detect_thresh) | (b < detect_thresh)
+            else:
+                detect_thresh = max(30, (req.foreground_threshold or 15) + 15)
+                mask = (r > detect_thresh) | (g > detect_thresh) | (b > detect_thresh)
+                
+            # 2. Horizontal Projection
+            projection = np.sum(mask, axis=0)
+            
+            # 3. Find segments (islands of pixels)
+            min_pixels_in_col = 15 # More sensitive to thin characters
+            in_segment = False
+            start_x = 0
+            for x, val in enumerate(projection):
+                if val > min_pixels_in_col and not in_segment:
+                    start_x = x
+                    in_segment = True
+                elif val <= min_pixels_in_col and in_segment:
+                    # Potential end of segment. 
+                    segments.append([start_x, x])
+                    in_segment = False
+            if in_segment:
+                segments.append([start_x, w])
+
+            # 4. OVERSIZE SPLITTING: If a segment is too wide, it likely contains 2 people
+            # Use the "Thinnest Point" strategy: find the column with the least pixels to split.
+            refined_segments = []
+            for s in segments:
+                sw = s[1] - s[0]
+                if sw > 450:
+                    logger.info(f"  Detected oversize segment ({sw}px). Searching for thinnest split point...")
+                    # Search for the minimum value in the projection within this segment
+                    search_range = projection[s[0] + 50 : s[1] - 50]
+                    if len(search_range) > 0:
+                        min_val_idx = np.argmin(search_range)
+                        split_x = s[0] + 50 + min_val_idx
+                        logger.info(f"    Surgical split found at x={split_x} (Density: {projection[split_x]})")
+                        refined_segments.append([s[0], split_x])
+                        refined_segments.append([split_x, s[1]])
+                    else:
+                        # Fallback to middle if search range is invalid
+                        mid = s[0] + (sw // 2)
+                        refined_segments.append([s[0], mid])
+                        refined_segments.append([mid, s[1]])
+                else:
+                    refined_segments.append(s)
+            segments = refined_segments
+
+        logger.info(f"Dynamic Slicer: Found {len(segments)} potential character islands.")
             
         # 4. Refine segments (merge small gaps, filter noise)
         min_gap = 50 # Slightly wider gap requirement
@@ -1430,9 +1531,14 @@ async def slice_turnaround(req: SliceRequest):
             
         logger.info(f"Dynamic Slicer: Found {len(refined)} potential character islands.")
         
-        # --- BEST FIT MAPPING: Handle N characters into 5 slots by minimizing total distance ---
+        # --- BEST FIT MAPPING: Map detected islands to standard turnaround slots ---
         slot_to_island = {}
-        if 0 < len(refined) <= num_poses:
+        
+        if is_fixed_grid:
+            # LOCK-IN: For fixed grid, mapping is strictly 1-to-1. No guessing.
+            slot_to_island = {i: i for i in range(num_poses)}
+            refined = segments 
+        elif 0 < len(refined) <= num_poses:
             ideal_centers = [(i + 0.5) * (w / num_poses) for i in range(num_poses)]
             island_centers = [(s + e) / 2 for s, e in refined]
             
@@ -1468,18 +1574,29 @@ async def slice_turnaround(req: SliceRequest):
                 crop_w = int(char_w * 1.3) # Consistent 30% padding
                 pose_boxes.append((max(0, int(center_x - crop_w/2)), min(w, int(center_x + crop_w/2))))
             else:
-                # Use average island width for the missing slot
-                slice_width = w / num_poses
-                center_x = (i * slice_width) + (slice_width / 2)
+                # SMART GAP CENTERING: Find the gap between actual neighbors
+                # Find the nearest assigned island to the left
+                left_neighbor_x = 0
+                for prev_slot in range(i - 1, -1, -1):
+                    if prev_slot in slot_to_island:
+                        left_neighbor_x = refined[slot_to_island[prev_slot]][1] # Right edge of left neighbor
+                        break
+                
+                # Find the nearest assigned island to the right
+                right_neighbor_x = w
+                for next_slot in range(i + 1, num_poses):
+                    if next_slot in slot_to_island:
+                        right_neighbor_x = refined[slot_to_island[next_slot]][0] # Left edge of right neighbor
+                        break
+                # Center the bandit perfectly in the available gap
+                center_x = (left_neighbor_x + right_neighbor_x) / 2
+                logger.info(f"  Smart Gap for slot {i+1}: Centering between x={left_neighbor_x} and x={right_neighbor_x} (Center: {center_x})")
+                
                 crop_w = int(avg_island_width * 1.2) 
                 pose_boxes.append((max(0, int(center_x - crop_w/2)), min(w, int(center_x + crop_w/2))))
         
         logger.info(f"  Best Fit Mapping: Assigned {len(slot_to_island)} islands. (Avg Width: {avg_island_width:.1f}px)")
 
-        # Prepare a separate image for patching (the "Working" sheet) 
-        # This keeps the slicing image clean so neighbors don't see the "Bandit"
-        working_image = image.copy()
-        
         has_patched_image = False
         # Pass 1: Extraction and Auto-Isolation
         extracted_sprites = []
@@ -1487,6 +1604,8 @@ async def slice_turnaround(req: SliceRequest):
         
         for i in range(num_poses):
             x1, x2 = pose_boxes[i]
+            # Define crop here so it's available as a fallback for all branches
+            crop = image.crop((x1, 0, x2, h))
             
             logger.info(f"  Pass 1: Extracting slice {i+1}/{num_poses} (x={x1} to {x2})...")
             
@@ -1516,18 +1635,12 @@ async def slice_turnaround(req: SliceRequest):
                 paste_x = (no_bg.width - rw) // 2
                 no_bg.paste(ref_crop, (paste_x, 0), ref_crop)
                 
-                # Patch the WORKING image (NOT the slicing image) so Quick Fix sees the reference
-                bx1, bx2 = pose_boxes[i]
-                bw = bx2 - bx1
-                patch = Image.new("RGBA", (bw, h), (0, 0, 0, 0))
-                patch.paste(ref_crop, ((bw - rw) // 2, 0), ref_crop)
-                working_image.paste(patch, (bx1, 0), patch) 
-                has_patched_image = True
+                has_patched_image = True # Signal that we need to save a working turnaround
                 
-                logger.info(f"      Pasted transparent/isolated reference into working sheet for slot {i+1}.")
+                logger.info(f"      Created transparent/isolated reference for empty slot {i+1}.")
             else:
                 # IMPORTANT: We crop from 'image' (the clean sheet), NOT 'working_image'
-                crop = image.crop((x1, 0, x2, h))
+                # (crop is already defined above)
                 
                 if req.remover_type == "none":
                     # Do nothing, just use the raw crop
@@ -1652,57 +1765,117 @@ async def slice_turnaround(req: SliceRequest):
             # Track max height for global normalization
             max_sh = max(max_sh, character_sprite.height)
 
-        # Pass 2: Global Normalization and Saving
-        logger.info(f"  Pass 2: Global Normalization (Master Height: {max_sh}px)...")
-        # Global scale based on the tallest character on the sheet
+        # Pass 2: Global Normalization, Saving, and Stitching
+        # LOCK-IN: Preserve Global Scale to prevent jitter/resize of good sprites
+        if meta.get("global_max_height"):
+            logger.info(f"  Using PERSISTED Master Height: {meta['global_max_height']}px")
+            max_sh = meta["global_max_height"]
+        else:
+            logger.info(f"  Saving NEW Master Height to metadata: {max_sh}px")
+            meta["global_max_height"] = max_sh
+
+        logger.info(f"  Pass 2: Global Normalization, Saving, and Stitching (Master Height: {max_sh}px)...")
         global_scale = 480 / max_sh if max_sh > 480 else 1.0
+        
+        # 5b. Create the "Perfect Stitched Sheet" canvas
+        working_image = Image.new("RGBA", (512 * num_poses, 512), (255, 255, 255, 255))
         
         for i, character_sprite in enumerate(extracted_sprites):
             sw, sh = character_sprite.size
             new_w, new_h = int(sw * global_scale), int(sh * global_scale)
-            resized_sprite = character_sprite.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            resized = character_sprite.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            
+            # 1. Save the individual normalized pose for rigging/display
+            # SURGICAL VERSIONING: Only add a unique tag if this is the target slice
+            v_tag = ""
+            if req.force_reslice:
+                if req.target_slice_index is None or req.target_slice_index == i:
+                    v_tag = f"_{int(time.time()) % 100000}"
+            
+            out_name = f"{pid}_pose_{i}{v_tag}.png"
             
             canvas = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
-            paste_x = (512 - new_w) // 2
-            paste_y = 512 - new_h - 10 # Anchor to bottom
-            canvas.paste(resized_sprite, (paste_x, paste_y), resized_sprite)
+            cpaste_x = (512 - new_w) // 2
+            cpaste_y = 512 - new_h - 10
+            canvas.paste(resized, (cpaste_x, cpaste_y), resized)
             
-            out_name = f"{pid}_pose_{i}{version_suffix}.png"
-            url_prefix = f"/output_saves/{pid}/"
-            sliced_urls.append(f"{url_prefix}{out_name}")
-            
-            # Save the slice
             save_path = os.path.join(output_dir, out_name)
             canvas.save(save_path)
-            logger.info(f"    Saved slice {i+1} normalized to {save_path} (Scale: {global_scale:.3f})")
-
             
-        # 5b. Save patched working turnaround if we created one
-        if has_patched_image:
-            working_name = f"{pid}_turnaround_working.png"
-            working_path = os.path.join(output_dir, working_name)
-            working_image.save(working_path)
-            # Update metadata to use this working image as the base for Quick Fixes
-            if os.path.exists(meta_path):
-                with open(meta_path, "r") as f:
-                    meta = json.load(f)
-                meta["image_url"] = f"/output_saves/{pid}/{working_name}"
-                with open(meta_path, "w") as f:
-                    json.dump(meta, f)
-                logger.info(f"  Updated metadata image_url to patched working turnaround.")
+            url_prefix = f"/output_saves/{pid}/"
+            new_url = f"{url_prefix}{out_name}"
+            sliced_urls.append(new_url)
+            
+            # 2. Paste into the "Perfect Stitched Sheet" slots (512px each)
+            slot_x = i * 512
+            paste_x = slot_x + (512 - new_w) // 2
+            paste_y = 512 - new_h - 10 # Anchor to bottom
+            working_image.paste(resized, (paste_x, paste_y), resized)
+            
+            logger.info(f"    Processed slice {i+1} (Individual + Stitched).")
+        
+        working_name = f"{pid}_turnaround_working.png"
+        working_path = os.path.join(output_dir, working_name)
+        working_image.convert("RGB").save(working_path) # Save as RGB for FLUX
+        has_patched_image = True
+        
+        logger.info(f"  Created Perfect Stitched Sheet for Surgical Studio: {working_name}")
 
-        # 6. Save segments to metadata for 'Quick Fix' functionality
+        # 6. Finalize Metadata Updates
         if os.path.exists(meta_path):
             with open(meta_path, "r") as f:
                 meta = json.load(f)
-            # Always save the actual pose_boxes used for slicing (whether detected or fallback)
-            if 'pose_boxes' in locals():
-                meta["slice_segments"] = pose_boxes[:num_poses]
-                with open(meta_path, "w") as f:
-                    json.dump(meta, f)
-                logger.info(f"  Persisted {len(meta['slice_segments'])} slice segments to metadata.")
+            
+            # Identify if we should PIVOT (irregular count) or PRESERVE (5-person golden base)
+            orig_segment_count = len(segments)
+            if orig_segment_count == 5:
+                logger.info("  5-person sheet detected. Preserving ORIGINAL 'Golden Base' for quality.")
+                # We keep the original image_url, but we still update segments for hard-wall protection
+                meta["slice_segments"] = segments 
+            else:
+                logger.info(f"  Irregular sheet ({orig_segment_count} poses) detected. PIVOTING to 5-slot stitched sheet for stability.")
+                meta["image_url"] = f"/output_saves/{pid}/{working_name}"
+                # Save the new fixed boundaries
+                meta["slice_segments"] = [[i*512 + 100, i*512 + 412] for i in range(num_poses)]
+                # Also copy the working sheet to the base turnaround name for safety in future loads
+                shutil.copy2(working_path, os.path.join(output_dir, f"{pid}_turnaround.png"))
+            
+            # --- PERSISTENT VERSIONING ---
+            # Maintain a list of all versions of each slice
+            # SELF-HEALING: Ensure it's a list of the correct length
+            if "all_slice_versions" not in meta or not isinstance(meta["all_slice_versions"], list):
+                meta["all_slice_versions"] = [[] for _ in range(num_poses)]
+            while len(meta["all_slice_versions"]) < num_poses:
+                meta["all_slice_versions"].append([])
+            
+            # Append new versions to the history
+            for i, url in enumerate(sliced_urls):
+                if i < len(meta["all_slice_versions"]):
+                    if url not in meta["all_slice_versions"][i]:
+                        meta["all_slice_versions"][i].append(url)
+            
+            # Update current selected indices to point to these new versions
+            if req.target_slice_index is not None:
+                # SURGICAL INDEX UPDATE
+                if "selected_indices" not in meta: meta["selected_indices"] = [0] * num_poses
+                idx = req.target_slice_index
+                if idx < len(meta["all_slice_versions"]):
+                    meta["selected_indices"][idx] = len(meta["all_slice_versions"][idx]) - 1
+            else:
+                meta["selected_indices"] = [len(v_list)-1 if v_list else 0 for v_list in meta["all_slice_versions"]]
 
-        return {"status": "success", "urls": sliced_urls, "project_id": pid}
+            # --- CLEAR OLD STATE (Optional) ---
+            # We ONLY clear rigs/anims if this is a BRAND NEW slice (no force_reslice)
+            if not req.force_reslice:
+                meta["rigs"] = [] 
+                if "limb_packs" in meta: meta["limb_packs"] = {}
+                if "animations" in meta: meta["animations"] = {}
+                
+            with open(meta_path, "w") as f:
+                json.dump(meta, f)
+            logger.info(f"  Project metadata finalized with persistent versioning.")
+
+        return {"status": "success", "urls": sliced_urls, "project_id": pid, "all_slice_versions": meta.get("all_slice_versions", [])}
     except HTTPException:
         raise
     except Exception as e:
@@ -2283,9 +2456,10 @@ async def correct_pose(req: CorrectPoseRequest):
         clean_bg.paste(bg_fill, (0, 0), wipe_mask)
         
         # Now paste the isolated character from the corrected image
-        # We only want to paste where the character actually is in the corrected image
+        # SURGICAL PATCH: Use the wipe_mask to ensure ONLY the target area is updated
+        # This prevents the AI from making subtle changes to non-target slices.
         final_image = clean_bg.copy()
-        final_image.paste(image_no_bg, (0, 0), image_no_bg)
+        final_image.paste(image_no_bg, (0, 0), wipe_mask)
         
         # Save the result
         filename = f"corrected_{uuid.uuid4().hex[:8]}.png"

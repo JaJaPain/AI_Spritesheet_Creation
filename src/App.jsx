@@ -821,9 +821,17 @@ Continue?`;
         const freshUrls = data.urls.map(u => `${apiBase}${u}?t=${timestamp}`);
         setSlicedUrls(freshUrls);
         
-        // Initialize versioning
-        setAllSliceVersions(freshUrls.map(url => [url]));
-        setSelectedVersionIndices([0, 0, 0, 0, 0]);
+        // Initialize versioning from backend metadata
+        if (data.all_slice_versions) {
+          const absoluteVersions = data.all_slice_versions.map(group => 
+            group.map(url => url.startsWith('http') ? url : `${apiBase}${url}`)
+          );
+          setAllSliceVersions(absoluteVersions);
+          setSelectedVersionIndices(absoluteVersions.map(group => Math.max(0, group.length - 1)));
+        } else {
+          setAllSliceVersions(freshUrls.map(url => [url]));
+          setSelectedVersionIndices([0, 0, 0, 0, 0]);
+        }
 
         setIsTurnaroundModalOpen(false)
         setStage('slicing')
@@ -855,6 +863,25 @@ Continue?`;
     } catch (err) {
       console.error("Failed to list saves:", err);
       alert(`Critical Error: Could not reach the server. ${err.message}\n\nMake sure the backend is running on port 8000-8010.`);
+    }
+  }
+
+  const handleResetProject = async (project) => {
+    const msg = `FACTORY RESET: This will delete all AI corrections for ${project.id} and restore the ORIGINAL character sheet.\n\nThis cannot be undone. Continue?`;
+    if (!window.confirm(msg)) return;
+    
+    try {
+      const res = await fetch(`${apiBase}/reset-project`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project_id: project.id })
+      });
+      const data = await res.json();
+      if (data.status === 'success') {
+        handleLoadProjects();
+      }
+    } catch (err) {
+      console.error("Reset failed:", err);
     }
   }
 
@@ -1229,37 +1256,30 @@ Continue?`;
           body: JSON.stringify({ 
             image_url: data.url, 
             project_id: activeProjectId, 
-            force_reslice: true 
+            force_reslice: true,
+            target_slice_index: index
           })
         });
         const sliceData = await sliceRes.json();
         if (sliceData.status === 'success') {
+          // Use the version history directly from the backend metadata
           const freshUrls = sliceData.urls.map(u => `${apiBase}${u}?t=${Date.now()}`);
           
-          // Add the new version specifically for the corrected slice
-          setAllSliceVersions(prev => {
-            const next = [...prev];
-            const newUrl = freshUrls[index];
-            // Only add if it's actually different from the last version
-            if (!next[index].includes(newUrl)) {
-              next[index] = [...next[index], newUrl];
-            }
-            return next;
-          });
-          
-          // Update selected index to point to the latest version of this slice
-          setSelectedVersionIndices(prev => {
-            const next = [...prev];
-            next[index] = allSliceVersions[index].length; // The new item we just added
-            return next;
-          });
+          if (sliceData.all_slice_versions) {
+            const absoluteVersions = sliceData.all_slice_versions.map(group => 
+              group.map(url => url.startsWith('http') ? url : `${apiBase}${url}`)
+            );
+            setAllSliceVersions(absoluteVersions);
+            
+            // SURGICAL UPDATE: Only auto-select the latest for the slice we just fixed
+            setSelectedVersionIndices(prev => {
+              const newIndices = [...prev];
+              newIndices[index] = Math.max(0, absoluteVersions[index].length - 1);
+              return newIndices;
+            });
+          }
 
-          // Sync current display urls
-          setSlicedUrls(prev => {
-            const next = [...prev];
-            next[index] = freshUrls[index];
-            return next;
-          });
+          setSlicedUrls(freshUrls);
         }
       }
     } catch (e) { console.error(e); }
@@ -1422,6 +1442,17 @@ Continue?`;
     setExcludedFrames(new Set())
     setAutoPrompt('')
     setDescribing(false)
+    
+    // PROJECT STATE RESET
+    setActiveProjectId(null)
+    setTurnaroundUrl(null)
+    setOriginalTurnaroundUrl(null)
+    setSlicedUrls([])
+    setAllSliceVersions([[], [], [], [], []])
+    setSelectedVersionIndices([0, 0, 0, 0, 0])
+    setRigData([])
+    setPoseLabels({})
+    setDirectionalLimbPacks({})
   }
 
   // Global Keyboard Shortcuts
@@ -2017,12 +2048,24 @@ Continue?`;
                       </div>
                       <button 
                         className="btn-secondary" 
-                        style={{ padding: '6px 8px', fontSize: '0.65rem', color: 'var(--accent-primary)', borderColor: 'rgba(139, 92, 246, 0.3)', width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem' }}
+                        style={{ 
+                          padding: '6px 8px', 
+                          fontSize: '0.65rem', 
+                          color: loading ? '#666' : 'var(--accent-primary)', 
+                          borderColor: loading ? '#333' : 'rgba(139, 92, 246, 0.3)', 
+                          width: '100%', 
+                          display: 'flex', 
+                          alignItems: 'center', 
+                          justifyContent: 'center', 
+                          gap: '0.4rem',
+                          cursor: loading ? 'not-allowed' : 'pointer',
+                          background: loading ? 'rgba(255,255,255,0.02)' : undefined
+                        }}
                         onClick={() => handleQuickFix(i, sliceDirections[i])}
                         disabled={loading}
                       >
                         {loading ? <Loader2 size={12} className="animate-spin" /> : <Wand2 size={12} />}
-                        Quick Fix {i+1}
+                        {loading ? 'Processing...' : `Quick Fix ${i+1}`}
                       </button>
                     </div>
                   </div>
@@ -2891,9 +2934,22 @@ Continue?`;
                         }}
                       >
                         {isDeleteMode && (
-                          <div style={{ position: 'absolute', top: '1rem', right: '1rem', zIndex: 5, background: '#ef4444', borderRadius: '50%', padding: '0.3rem', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                        <div style={{ position: 'absolute', top: '1rem', right: '1rem', zIndex: 5, display: 'flex', gap: '0.5rem' }}>
+                          <div 
+                            style={{ background: 'var(--accent-primary)', borderRadius: '50%', padding: '0.35rem', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', boxShadow: '0 2px 10px rgba(0,0,0,0.5)' }}
+                            title="Factory Reset (Restore Original)"
+                            onClick={(e) => { e.stopPropagation(); handleResetProject(project); }}
+                          >
+                            <RefreshCw size={12} color="white" />
+                          </div>
+                          <div 
+                            style={{ background: '#ef4444', borderRadius: '50%', padding: '0.35rem', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', boxShadow: '0 2px 10px rgba(0,0,0,0.5)' }}
+                            title="Delete Project"
+                            onClick={(e) => { e.stopPropagation(); setProjectToDelete(project); }}
+                          >
                             <Trash2 size={12} color="white" />
                           </div>
+                        </div>
                         )}
                         <div style={{ 
                           width: '100%', aspectRatio: '16/9', background: '#000', borderRadius: '4px', overflow: 'hidden', marginBottom: '1rem',
