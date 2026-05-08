@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { Sparkles, Wand2, Play, Download, Settings, Image as ImageIcon, Loader2, ArrowLeft, RefreshCw, Save, Upload, X, Check, FolderOpen, HelpCircle } from 'lucide-react'
+import { Sparkles, Wand2, Play, Download, Settings, Image as ImageIcon, Loader2, ArrowLeft, RefreshCw, Save, Upload, X, Check, FolderOpen, HelpCircle, Trash2, ChevronLeft, ChevronRight } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 
 function LivePreview({ rig, params }) {
@@ -483,6 +483,7 @@ function App() {
   const [describing, setDescribing] = useState(false)
 
   const [turnaroundUrl, setTurnaroundUrl] = useState(null)
+  const [originalTurnaroundUrl, setOriginalTurnaroundUrl] = useState(null)
   const [generatingTurnaround, setGeneratingTurnaround] = useState(false)
   const [isTurnaroundModalOpen, setIsTurnaroundModalOpen] = useState(false)
   const [isWandActive, setIsWandActive] = useState(false)
@@ -497,11 +498,16 @@ function App() {
   const [saveClickCount, setSaveClickCount] = useState(0)
   const [isLoadModalOpen, setIsLoadModalOpen] = useState(false)
   const [savedProjects, setSavedProjects] = useState([])
+  const [isDeleteMode, setIsDeleteMode] = useState(false)
+  const [projectToDelete, setProjectToDelete] = useState(null)
+  const [numGenerations, setNumGenerations] = useState(1)
   const [zoomLevel, setZoomLevel] = useState(1)
   const turnaroundCanvasRef = useRef(null)
   
   // Slicing State
   const [slicedUrls, setSlicedUrls] = useState([])
+  const [allSliceVersions, setAllSliceVersions] = useState([[], [], [], [], []])
+  const [selectedVersionIndices, setSelectedVersionIndices] = useState([0, 0, 0, 0, 0])
   const [slicing, setSlicing] = useState(false)
   
   // Rigging State
@@ -512,6 +518,13 @@ function App() {
   // Surgery & Correction State
   const [isMasking, setIsMasking] = useState(false)
   const [activeManualLimb, setActiveManualLimb] = useState(null)
+  const [sliceDirections, setSliceDirections] = useState(['side', 'side', 'front-quarter', 'back-quarter', 'back']);
+  
+  const handleSetSliceDirection = (idx, val) => {
+    const newDirs = [...sliceDirections];
+    newDirs[idx] = val;
+    setSliceDirections(newDirs);
+  }
   const [targetRotation, setTargetRotation] = useState('front-quarter')
   const [regeneratingLimb, setRegeneratingLimb] = useState(null)
   const [poseLabels, setPoseLabels] = useState({}) // { index: 'front' }
@@ -691,6 +704,15 @@ function App() {
   }
 
   const handleGenerateTurnaround = async () => {
+    if (numGenerations > 1) {
+      const confirmMsg = `You are about to generate ${numGenerations} unique character designs. 
+      
+Only the LAST image will be displayed here, but all ${numGenerations} will be saved in your Project Library as separate folders.
+
+Continue?`;
+      if (!window.confirm(confirmMsg)) return;
+    }
+
     setGeneratingTurnaround(true)
     setIsTurnaroundModalOpen(true)
     try {
@@ -700,13 +722,17 @@ function App() {
         body: JSON.stringify({ 
           session_id: Date.now().toString(),
           prompt: prompt,
-          enforce_white: enforceWhite
+          enforce_white: enforceWhite,
+          num_variants: numGenerations
         })
       });
       const data = await response.json();
       if (data.status === 'success') {
         const imageUrl = data.url || data.image_url;
         setTurnaroundUrl(`${apiBase}${imageUrl}?t=${Date.now()}`)
+        if (data.project_id) {
+          setActiveProjectId(data.project_id);
+        }
       } else {
         alert(`Generation failed: ${data.message || 'Unknown error'}`);
       }
@@ -737,7 +763,9 @@ function App() {
           prompt: prompt,
           image_url: turnaroundUrl,
           project_id: activeProjectId,
-          force_overwrite: forceOverwrite
+          force_overwrite: forceOverwrite,
+          all_slice_versions: allSliceVersions,
+          selected_indices: selectedVersionIndices
         })
       });
       const data = await res.json();
@@ -782,9 +810,21 @@ function App() {
           setActiveProjectId(data.project_id);
           console.log("Project initialized:", data.project_id);
         }
+        
+        // Use the turnaround sheet for this project as our "Golden Base"
+        const sheetUrl = `${apiBase}/output_saves/${data.project_id}/${data.project_id}_turnaround.png`;
+        setOriginalTurnaroundUrl(sheetUrl);
+        setTurnaroundUrl(`${sheetUrl}?t=${Date.now()}`);
+        
         // Add a cache-busting timestamp so the browser actually reloads the fresh files
         const timestamp = Date.now();
-        setSlicedUrls(data.urls.map(u => `${apiBase}${u}?t=${timestamp}`))
+        const freshUrls = data.urls.map(u => `${apiBase}${u}?t=${timestamp}`);
+        setSlicedUrls(freshUrls);
+        
+        // Initialize versioning
+        setAllSliceVersions(freshUrls.map(url => [url]));
+        setSelectedVersionIndices([0, 0, 0, 0, 0]);
+
         setIsTurnaroundModalOpen(false)
         setStage('slicing')
       } else if (data.status === 'error') {
@@ -797,24 +837,76 @@ function App() {
     }
   }
 
-  const fetchSavedProjects = async () => {
+  const fetchSavedProjects = async (deleteMode = false) => {
     try {
+      console.log("Fetching project list...");
       const res = await fetch(`${apiBase}/list-projects`);
+      if (!res.ok) {
+        throw new Error(`Server returned ${res.status}: ${res.statusText}`);
+      }
       const data = await res.json();
       if (data.status === 'success') {
         setSavedProjects(data.saves);
+        setIsDeleteMode(deleteMode);
         setIsLoadModalOpen(true);
+      } else {
+        alert("Server failed to list projects: " + (data.message || "Unknown error"));
       }
     } catch (err) {
       console.error("Failed to list saves:", err);
+      alert(`Critical Error: Could not reach the server. ${err.message}\n\nMake sure the backend is running on port 8000-8010.`);
+    }
+  }
+
+  const handleDeleteProject = async (project) => {
+    try {
+      const res = await fetch(`${apiBase}/project/${project.id}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (data.status === 'success') {
+        // Refresh the list
+        const updatedRes = await fetch(`${apiBase}/list-projects`);
+        const updatedData = await updatedRes.json();
+        if (updatedData.status === 'success') {
+          setSavedProjects(updatedData.saves);
+        }
+        setProjectToDelete(null);
+      } else {
+        alert("Failed to delete project: " + (data.message || "Unknown error"));
+      }
+    } catch (err) {
+      console.error("Failed to delete project:", err);
+      alert(`Failed to delete project: ${err.message}`);
     }
   }
 
   const handleLoadProject = (project) => {
+    if (!project) return;
     setActiveProjectId(project.id);
-    setPrompt(project.prompt);
+    setPrompt(project.prompt || '');
+    
     // Add cache buster to ensure the image refreshes
-    setTurnaroundUrl(`${apiBase}${project.image_url}?t=${Date.now()}`);
+    const sheetUrl = project.image_url ? `${apiBase}${project.image_url}` : null;
+    setOriginalTurnaroundUrl(sheetUrl);
+    setTurnaroundUrl(sheetUrl ? `${sheetUrl}?t=${Date.now()}` : null);
+    
+    // Restore versioning history if present
+    if (project.all_slice_versions && project.all_slice_versions.length > 0) {
+      // Ensure we have absolute URLs for the UI
+      const restored = project.all_slice_versions.map(group => 
+        group.map(url => url.startsWith('http') ? url : `${apiBase}${url}`)
+      );
+      setAllSliceVersions(restored);
+      setSelectedVersionIndices(project.selected_indices || [0,0,0,0,0]);
+      
+      // Update the current display URLs to match the selected versions
+      const currentUrls = restored.map((group, idx) => {
+        const vIdx = (project.selected_indices || [0,0,0,0,0])[idx];
+        return group[vIdx] || group[0];
+      });
+      setSlicedUrls(currentUrls);
+      setStage('slicing');
+    }
+
     setIsLoadModalOpen(false);
     setIsTurnaroundModalOpen(true);
     setWandHistory([]);
@@ -1111,6 +1203,69 @@ function App() {
     }
   }
 
+  const handleQuickFix = async (index, specificDirection = null) => {
+    setLoading(true);
+    const dir = specificDirection || sliceDirections[index] || targetRotation;
+    try {
+      const res = await fetch(`${apiBase}/correct-pose`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          project_id: activeProjectId,
+          sheet_url: originalTurnaroundUrl || turnaroundUrl,
+          slice_index: index,
+          target_rotation: dir
+        })
+      });
+      const data = await res.json();
+      if (data.status === 'success') {
+        const newUrl = `${apiBase}${data.url}`;
+        setTurnaroundUrl(`${newUrl}?t=${Date.now()}`);
+        
+        // Re-slice automatically to update individual pose files
+        const sliceRes = await fetch(`${apiBase}/slice-turnaround`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            image_url: data.url, 
+            project_id: activeProjectId, 
+            force_reslice: true 
+          })
+        });
+        const sliceData = await sliceRes.json();
+        if (sliceData.status === 'success') {
+          const freshUrls = sliceData.urls.map(u => `${apiBase}${u}?t=${Date.now()}`);
+          
+          // Add the new version specifically for the corrected slice
+          setAllSliceVersions(prev => {
+            const next = [...prev];
+            const newUrl = freshUrls[index];
+            // Only add if it's actually different from the last version
+            if (!next[index].includes(newUrl)) {
+              next[index] = [...next[index], newUrl];
+            }
+            return next;
+          });
+          
+          // Update selected index to point to the latest version of this slice
+          setSelectedVersionIndices(prev => {
+            const next = [...prev];
+            next[index] = allSliceVersions[index].length; // The new item we just added
+            return next;
+          });
+
+          // Sync current display urls
+          setSlicedUrls(prev => {
+            const next = [...prev];
+            next[index] = freshUrls[index];
+            return next;
+          });
+        }
+      }
+    } catch (e) { console.error(e); }
+    finally { setLoading(false); }
+  }
+
   const handleFixPose = async (maskBase64) => {
     setIsMasking(false);
     
@@ -1133,7 +1288,7 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           project_id: activeProjectId,
-          sheet_url: turnaroundUrl,
+          sheet_url: originalTurnaroundUrl || turnaroundUrl,
           mask_image: maskBase64,
           target_rotation: targetRotation
         })
@@ -1162,7 +1317,29 @@ function App() {
         });
         const sliceData = await sliceRes.json();
         if (sliceData.status === 'success') {
-            setSlicedUrls(sliceData.urls.map(u => `${apiBase}${u}?t=${Date.now()}`));
+            const freshUrls = sliceData.urls.map(u => `${apiBase}${u}?t=${Date.now()}`);
+            
+            // For manual surgery, we might not know which slice changed, 
+            // so we'll check which images are actually different from current selection
+            setAllSliceVersions(prev => {
+              return prev.map((versions, idx) => {
+                const newUrl = freshUrls[idx];
+                if (!versions.includes(newUrl)) {
+                  return [...versions, newUrl];
+                }
+                return versions;
+              });
+            });
+
+            // Auto-select newest versions that were added
+            setSelectedVersionIndices(prev => {
+              return prev.map((vIdx, idx) => {
+                // If we added a new version, select it
+                return allSliceVersions[idx].length; 
+              });
+            });
+
+            setSlicedUrls(freshUrls);
             // Stay in current stage or return to slicing? 
             // Better to stay in rigging if possible, but we need to re-rig
             alert("Poses updated. Re-analyzing skeletons...");
@@ -1288,7 +1465,7 @@ function App() {
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -20 }}
               className="glass-card"
-              style={{ maxWidth: '800px', margin: '0 auto' }}
+              style={{ maxWidth: '800px', margin: '0 auto', position: 'relative' }}
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1.5rem' }}>
                 <Sparkles size={20} color="var(--accent-primary)" />
@@ -1302,49 +1479,91 @@ function App() {
                 style={{ height: '120px', resize: 'none', marginBottom: '2rem' }}
               />
 
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div style={{ display: 'flex', gap: '1rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingBottom: '10px' }}>
+                <div style={{ display: 'flex', gap: '0.8rem' }}>
                   <button 
                     className="btn-secondary" 
-                    style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }} 
+                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0.6rem', minWidth: '40px' }} 
                     onClick={() => setIsOptionsOpen(true)}
                     disabled={!apiReady}
+                    title="Pipeline Options"
                   >
-                    <Settings size={18} />
-                    Options
+                    <Settings size={16} />
                   </button>
                   <button 
                     className="btn-secondary" 
-                    style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}
-                    onClick={fetchSavedProjects}
+                    style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.6rem 1rem', fontSize: '0.85rem' }}
+                    onClick={() => fetchSavedProjects(false)}
                     disabled={!apiReady}
                   >
-                    <FolderOpen size={18} />
+                    <FolderOpen size={16} />
                     Load Saved Sprite
                   </button>
                   <button 
                     className="btn-secondary" 
-                    style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', opacity: 0.7 }}
-                    onClick={openOutputFolder}
+                    style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.6rem 1rem', fontSize: '0.85rem', borderColor: '#ef444466' }}
+                    onClick={() => fetchSavedProjects(true)}
                     disabled={!apiReady}
-                    title="Open Output_Saves folder in Explorer"
                   >
-                    <Download size={18} />
-                    Open Saves Folder
+                    <Trash2 size={16} color="#ef4444" />
+                    Delete Sprite
                   </button>
                 </div>
-                <div style={{ display: 'flex', gap: '1rem' }}>
+                <div style={{ display: 'flex', gap: '0.8rem', alignItems: 'center' }}>
+                  <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                    <select 
+                      value={numGenerations}
+                      onChange={(e) => setNumGenerations(parseInt(e.target.value))}
+                      style={{
+                        background: 'rgba(255,255,255,0.05)',
+                        border: '1px solid var(--glass-border)',
+                        color: 'white',
+                        padding: '0.6rem 2rem 0.6rem 0.8rem',
+                        borderRadius: '8px',
+                        fontSize: '0.85rem',
+                        cursor: 'pointer',
+                        appearance: 'none',
+                        textAlign: 'center',
+                        minWidth: '60px'
+                      }}
+                      title="Number of variants to generate"
+                    >
+                      {[1,2,3,4,5,6,7,8,9].map(n => (
+                        <option key={n} value={n} style={{ background: '#111' }}>{n}</option>
+                      ))}
+                    </select>
+                    <div style={{ position: 'absolute', right: '0.8rem', pointerEvents: 'none', fontSize: '0.7rem', opacity: 0.5 }}>▼</div>
+                  </div>
+
                   <button 
                     className="btn-primary" 
-                    style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem 2rem', background: 'linear-gradient(to right, #8b5cf6, #d946ef)' }}
+                    style={{ 
+                      display: 'flex', alignItems: 'center', gap: '0.4rem', 
+                      padding: '0.6rem 1.2rem', fontSize: '0.85rem',
+                      background: 'linear-gradient(to right, #8b5cf6, #d946ef)' 
+                    }}
                     onClick={handleGenerateTurnaround}
                     disabled={!prompt.trim() || generatingTurnaround || !apiReady}
                   >
-                    {generatingTurnaround ? <Loader2 size={18} className="animate-spin" /> : <Sparkles size={18} />}
+                    {generatingTurnaround ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
                     FLUX Turnaround (Exp)
                   </button>
                 </div>
               </div>
+
+              <button 
+                style={{ 
+                  position: 'absolute', bottom: '6px', right: '6px', 
+                  background: 'none', border: 'none', color: '#333', 
+                  cursor: 'pointer', padding: '4px', borderRadius: '4px'
+                }}
+                onClick={openOutputFolder}
+                title="Open project folder"
+                onMouseEnter={(e) => e.currentTarget.style.color = 'var(--accent-primary)'}
+                onMouseLeave={(e) => e.currentTarget.style.color = '#444'}
+              >
+                <FolderOpen size={16} />
+              </button>
             </motion.div>
           )}
 
@@ -1447,7 +1666,7 @@ function App() {
                     <Loader2 size={48} color="var(--accent-secondary)" />
                   </motion.div>
                   <p>Forging 12-frame walk cycle...</p>
-                  <p style={{ fontSize: '0.8rem', color: 'var(--text-dim)', marginTop: '0.5rem' }}>This takes ~4 minutes (12 frames × 20 sec each)</p>
+                  <p style={{ fontSize: '0.8rem', color: 'var(--text-dim)', marginTop: '0.5rem' }}>Full frame-by-frame walk cycle generation.</p>
                 </div>
               ) : (
                 <>
@@ -1704,19 +1923,153 @@ function App() {
                 gap: '1rem',
                 marginBottom: '3rem'
               }}>
-                {slicedUrls.map((url, i) => (
-                  <div key={i} className="glass-card" style={{ padding: '0', overflow: 'hidden', height: '250px', background: 'rgba(255,255,255,0.02)' }}>
-                    <div style={{ 
-                      height: '100%', 
-                      display: 'flex', 
-                      alignItems: 'center', 
-                      justifyContent: 'center',
-                      background: 'repeating-conic-gradient(#111 0% 25%, transparent 0% 50%) 50% / 20px 20px'
-                    }}>
-                      <img src={url} alt={`Pose ${i}`} style={{ maxHeight: '100%', maxWidth: '100%', objectFit: 'contain' }} />
+                {slicedUrls.map((url, i) => {
+                  const versions = allSliceVersions[i] || [];
+                  const currentVIdx = selectedVersionIndices[i] || 0;
+                  
+                  const handlePrevVersion = () => {
+                    const newIdx = Math.max(0, currentVIdx - 1);
+                    const newIndices = [...selectedVersionIndices];
+                    newIndices[i] = newIdx;
+                    setSelectedVersionIndices(newIndices);
+                    
+                    const newUrls = [...slicedUrls];
+                    newUrls[i] = versions[newIdx];
+                    setSlicedUrls(newUrls);
+                  };
+
+                  const handleNextVersion = () => {
+                    const newIdx = Math.min(versions.length - 1, currentVIdx + 1);
+                    const newIndices = [...selectedVersionIndices];
+                    newIndices[i] = newIdx;
+                    setSelectedVersionIndices(newIndices);
+                    
+                    const newUrls = [...slicedUrls];
+                    newUrls[i] = versions[newIdx];
+                    setSlicedUrls(newUrls);
+                  };
+
+                  return (
+                    <div key={i} style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                      <div className="glass-card" style={{ padding: '0', overflow: 'hidden', height: '250px', background: 'rgba(255,255,255,0.02)', position: 'relative' }}>
+                        
+                        {/* Version Navigation Arrows */}
+                        {versions.length > 1 && (
+                          <>
+                            <button 
+                              onClick={handlePrevVersion}
+                              disabled={currentVIdx === 0}
+                              style={{ 
+                                position: 'absolute', left: '5px', top: '50%', transform: 'translateY(-50%)',
+                                background: 'rgba(0,0,0,0.6)', border: '1px solid rgba(255,255,255,0.1)',
+                                color: currentVIdx === 0 ? '#444' : 'white', borderRadius: '50%', padding: '4px',
+                                zIndex: 10, cursor: currentVIdx === 0 ? 'default' : 'pointer'
+                              }}
+                            >
+                              <ChevronLeft size={16} />
+                            </button>
+                            <button 
+                              onClick={handleNextVersion}
+                              disabled={currentVIdx === versions.length - 1}
+                              style={{ 
+                                position: 'absolute', right: '5px', top: '50%', transform: 'translateY(-50%)',
+                                background: 'rgba(0,0,0,0.6)', border: '1px solid rgba(255,255,255,0.1)',
+                                color: currentVIdx === versions.length - 1 ? '#444' : 'white', borderRadius: '50%', padding: '4px',
+                                zIndex: 10, cursor: currentVIdx === versions.length - 1 ? 'default' : 'pointer'
+                              }}
+                            >
+                              <ChevronRight size={16} />
+                            </button>
+                            <div style={{ 
+                              position: 'absolute', bottom: '8px', left: '50%', transform: 'translateX(-50%)',
+                              fontSize: '0.6rem', color: 'var(--accent-secondary)', background: 'rgba(0,0,0,0.7)',
+                              padding: '2px 8px', borderRadius: '10px', zIndex: 5, border: '1px solid rgba(217, 70, 239, 0.2)'
+                            }}>
+                              V{currentVIdx + 1} / {versions.length}
+                            </div>
+                          </>
+                        )}
+
+                        <div style={{ 
+                          height: '100%', 
+                          display: 'flex', 
+                          alignItems: 'center', 
+                          justifyContent: 'center',
+                          background: 'repeating-conic-gradient(#111 0% 25%, transparent 0% 50%) 50% / 20px 20px'
+                        }}>
+                          <img src={url} alt={`Pose ${i}`} style={{ maxHeight: '100%', maxWidth: '100%', objectFit: 'contain' }} />
+                        </div>
+                      </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', marginTop: '0.5rem' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div style={{ fontSize: '0.6rem', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Slice {i+1}</div>
+                        <select 
+                           value={sliceDirections[i]} 
+                           onChange={(e) => handleSetSliceDirection(i, e.target.value)}
+                           style={{ fontSize: '0.6rem', background: '#222', color: 'white', border: '1px solid #444', borderRadius: '4px', padding: '2px 4px' }}
+                        >
+                           <option value="front">Front</option>
+                           <option value="side">Side</option>
+                           <option value="back">Back</option>
+                           <option value="front-quarter">3/4 Front</option>
+                           <option value="back-quarter">3/4 Back</option>
+                        </select>
+                      </div>
+                      <button 
+                        className="btn-secondary" 
+                        style={{ padding: '6px 8px', fontSize: '0.65rem', color: 'var(--accent-primary)', borderColor: 'rgba(139, 92, 246, 0.3)', width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem' }}
+                        onClick={() => handleQuickFix(i, sliceDirections[i])}
+                        disabled={loading}
+                      >
+                        {loading ? <Loader2 size={12} className="animate-spin" /> : <Wand2 size={12} />}
+                        Quick Fix {i+1}
+                      </button>
                     </div>
                   </div>
-                ))}
+                );
+              })}
+              </div>
+
+              {/* Pose Repair / Surgical Correction Area */}
+              <div style={{ 
+                background: 'rgba(0,0,0,0.3)', 
+                padding: '1.5rem', 
+                borderRadius: '12px', 
+                border: '1px solid var(--glass-border)',
+                marginBottom: '3rem',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: '1rem'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--accent-primary)' }}>
+                   <Sparkles size={18} />
+                   <span style={{ fontSize: '0.9rem', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '1px' }}>Surgical Pose Repair</span>
+                </div>
+                <p style={{ fontSize: '0.8rem', color: 'var(--text-dim)', maxWidth: '600px' }}>
+                  If a pose was generated incorrectly or is a duplicate, use the <b>Surgical Studio</b> to mask that specific slice and re-roll it with the correct direction.
+                </p>
+                <div style={{ display: 'flex', gap: '0.5rem', background: 'rgba(0,0,0,0.5)', padding: '6px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)' }}>
+                   <select 
+                     className="btn-secondary" 
+                     style={{ border: 'none', background: 'none', fontSize: '0.85rem' }}
+                     value={targetRotation}
+                     onChange={(e) => setTargetRotation(e.target.value)}
+                   >
+                     <option value="front-quarter">Fix to: 3/4 Front</option>
+                     <option value="back-quarter">Fix to: 3/4 Back</option>
+                     <option value="side">Fix to: Side View</option>
+                     <option value="front">Fix to: Front View</option>
+                     <option value="back">Fix to: Back View</option>
+                   </select>
+                   <button 
+                     className="btn-primary" 
+                     onClick={() => setIsMasking(true)} 
+                     style={{ padding: '0.5rem 1.5rem', fontSize: '0.85rem', background: 'var(--accent-primary)', border: 'none' }}
+                   >
+                     <Wand2 size={16} /> Open Surgical Studio
+                   </button>
+                </div>
               </div>
               
               <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}>
@@ -1820,23 +2173,6 @@ function App() {
                 <button className="btn-secondary" onClick={() => setStage('slicing')}>
                   <ArrowLeft size={18} /> Back to Slices
                 </button>
-                <div style={{ display: 'flex', gap: '0.5rem', background: 'rgba(0,0,0,0.3)', padding: '4px', borderRadius: '8px', border: '1px solid var(--glass-border)' }}>
-                   <select 
-                     className="btn-secondary" 
-                     style={{ border: 'none', background: 'none' }}
-                     value={targetRotation}
-                     onChange={(e) => setTargetRotation(e.target.value)}
-                   >
-                     <option value="front-quarter">Fix to: 3/4 Front</option>
-                     <option value="back-quarter">Fix to: 3/4 Back</option>
-                     <option value="side">Fix to: Side View</option>
-                     <option value="front">Fix to: Front View</option>
-                     <option value="back">Fix to: Back View</option>
-                   </select>
-                   <button className="btn-secondary" onClick={() => setIsMasking(true)} style={{ border: 'none', background: 'none', color: 'var(--accent-primary)' }}>
-                     <Wand2 size={16} /> Surgical Correction
-                   </button>
-                </div>
               </div>
             </motion.div>
           )}
@@ -2304,7 +2640,7 @@ function App() {
                   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '1rem' }}>
                     <Loader2 size={48} className="animate-spin" color="#d946ef" />
                     <p style={{ color: 'var(--text-dim)' }}>Loading FLUX.1 and generating turnaround sheet...</p>
-                    <p style={{ fontSize: '0.8rem', color: '#888' }}>This requires ~14GB VRAM and may take 30-60 seconds.</p>
+                    <p style={{ fontSize: '0.8rem', color: '#888' }}>This requires ~14GB VRAM. Generating high-fidelity assets...</p>
                   </div>
                 ) : turnaroundUrl ? (
                   <img 
@@ -2523,7 +2859,10 @@ function App() {
               onClick={(e) => e.stopPropagation()}
             >
               <div style={{ padding: '1.5rem', borderBottom: '1px solid var(--glass-border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <h2 style={{ fontSize: '1.5rem' }}>Project <span className="gradient-text">Library</span></h2>
+                <h2 style={{ fontSize: '1.5rem' }}>
+                  {isDeleteMode ? <span style={{ color: '#ef4444' }}>Delete</span> : 'Project'}{' '}
+                  <span className="gradient-text">Library</span>
+                </h2>
                 <button onClick={() => setIsLoadModalOpen(false)} style={{ background: 'none', border: 'none', color: '#888', cursor: 'pointer' }}>
                   <X size={24} />
                 </button>
@@ -2537,14 +2876,25 @@ function App() {
                   </div>
                 ) : (
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))', gap: '1.5rem' }}>
-                    {savedProjects.map(project => (
+                    {savedProjects.filter(p => p && p.id).map(project => (
                       <motion.div 
                         key={project.id}
-                        whileHover={{ y: -5, borderColor: 'var(--accent-primary)' }}
+                        whileHover={{ y: -5, borderColor: isDeleteMode ? '#ef4444' : 'var(--accent-primary)' }}
                         className="glass-card"
-                        style={{ padding: '1rem', cursor: 'pointer', transition: 'border-color 0.2s' }}
-                        onClick={() => handleLoadProject(project)}
+                        style={{ padding: '1rem', cursor: 'pointer', transition: 'border-color 0.2s', borderColor: isDeleteMode ? '#ef444433' : undefined }}
+                        onClick={() => {
+                          if (isDeleteMode) {
+                            setProjectToDelete(project);
+                          } else {
+                            handleLoadProject(project);
+                          }
+                        }}
                       >
+                        {isDeleteMode && (
+                          <div style={{ position: 'absolute', top: '1rem', right: '1rem', zIndex: 5, background: '#ef4444', borderRadius: '50%', padding: '0.3rem', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                            <Trash2 size={12} color="white" />
+                          </div>
+                        )}
                         <div style={{ 
                           width: '100%', aspectRatio: '16/9', background: '#000', borderRadius: '4px', overflow: 'hidden', marginBottom: '1rem',
                           border: '1px solid var(--glass-border)'
@@ -2562,6 +2912,50 @@ function App() {
                     ))}
                   </div>
                 )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Delete Confirmation Modal */}
+      <AnimatePresence>
+        {projectToDelete && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            style={{
+              position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+              background: 'rgba(0,0,0,0.9)', backdropFilter: 'blur(10px)',
+              zIndex: 300, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '2rem'
+            }}
+            onClick={() => setProjectToDelete(null)}
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className="glass-card"
+              style={{ width: '100%', maxWidth: '450px', padding: '2rem', textAlign: 'center', borderColor: '#ef4444' }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <Trash2 size={48} color="#ef4444" style={{ marginBottom: '1.5rem', marginLeft: 'auto', marginRight: 'auto' }} />
+              <h2 style={{ marginBottom: '1rem' }}>Delete <span style={{ color: '#ef4444' }}>{projectToDelete.id}</span>?</h2>
+              <p style={{ color: 'var(--text-dim)', marginBottom: '2rem', lineHeight: '1.5' }}>
+                Are you sure you want to delete this sprite and all its parts? <br />
+                <span style={{ fontSize: '0.8rem', opacity: 0.7 }}>This action cannot be undone.</span>
+              </p>
+              
+              <div style={{ display: 'flex', gap: '1rem' }}>
+                <button className="btn-secondary" style={{ flex: 1 }} onClick={() => setProjectToDelete(null)}>Cancel</button>
+                <button 
+                  className="btn-primary" 
+                  style={{ flex: 1, background: '#ef4444', borderColor: '#ef4444' }}
+                  onClick={() => handleDeleteProject(projectToDelete)}
+                >
+                  Yes, Delete All
+                </button>
               </div>
             </motion.div>
           </motion.div>

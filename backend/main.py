@@ -10,7 +10,7 @@ import time
 import shutil
 import base64
 import io
-from typing import Optional
+from typing import Optional, List
 from fastapi import FastAPI, Body, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -46,6 +46,9 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Change to script directory to ensure relative paths work correctly
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 app = FastAPI()
 
@@ -1013,6 +1016,7 @@ class TurnaroundRequest(BaseModel):
     session_id: str
     prompt: str
     enforce_white: bool = True
+    num_variants: int = 1
 
 @app.post("/generate-turnaround")
 async def generate_turnaround(req: TurnaroundRequest):
@@ -1070,53 +1074,79 @@ async def generate_turnaround(req: TurnaroundRequest):
         
         logger.info(f"Starting FLUX generation (in threadpool)...")
         print(">>> [AI] Running FLUX.1-dev Inference...")
-        def do_flux():
-            return flux_pipe(
-                prompt=prompt_text,
-                num_inference_steps=30,
-                guidance_scale=3.5,
-                width=1536,
-                height=768,
-                joint_attention_kwargs={"scale": 1.0}
-            ).images[0]
-            
-        # --- AUTO-RETRY LOOP ---
-        max_attempts = 2 if req.enforce_white else 1
         last_image_url = None
+        last_project_id = None
         
-        for attempt in range(max_attempts):
-            logger.info(f"Generation Attempt {attempt+1}/{max_attempts}...")
-            image = await run_in_threadpool(do_flux)
+        # Determine number of variants to generate
+        num_to_gen = max(1, min(req.num_variants, 10))
+        logger.info(f"Generating {num_to_gen} variants...")
+
+        for v_idx in range(num_to_gen):
+            # --- AUTO-RETRY LOOP (per variant) ---
+            max_attempts = 2 if req.enforce_white else 1
             
-            # Save the result
-            filename = f"turnaround_{uuid.uuid4().hex[:8]}.png"
-            filepath = os.path.join("output", filename)
-            image.save(filepath)
-            last_image_url = f"/output/{filename}"
+            # Pre-assign project ID for this variant
+            pid = get_next_project_id()
+            project_dir = os.path.join("Output_Saves", pid)
+            os.makedirs(project_dir, exist_ok=True)
             
-            if not req.enforce_white:
-                break
+            variant_success = False
+            for attempt in range(max_attempts):
+                # Use explicit random seed for each generation/retry to ensure variety
+                seed = random.randint(0, 2**32 - 1)
+                logger.info(f"Variant {v_idx+1}/{num_to_gen} | Attempt {attempt+1}/{max_attempts} | Seed: {seed}")
                 
-            # Check corners for white background
-            data = np.array(image)
-            corners = [data[0,0], data[0,-1], data[-1,0], data[-1,-1]]
-            avg_corner = np.mean(corners, axis=0)
-            is_white = np.mean(avg_corner[:3]) > 180 # Threshold for "mostly white"
+                def do_flux_seeded():
+                    return flux_pipe(
+                        prompt=prompt_text,
+                        num_inference_steps=30,
+                        guidance_scale=3.5,
+                        width=1536,
+                        height=768,
+                        generator=torch.Generator(device="cpu").manual_seed(seed),
+                        joint_attention_kwargs={"scale": 1.0}
+                    ).images[0]
+
+                image = await run_in_threadpool(do_flux_seeded)
+                
+                # Save directly to the project folder
+                filename = f"{pid}_turnaround.png"
+                filepath = os.path.join(project_dir, filename)
+                image.save(filepath)
+                
+                # Save initial metadata
+                with open(os.path.join(project_dir, "metadata.json"), "w") as f:
+                    json.dump({"prompt": req.prompt, "id": pid, "seed": seed, "created_at": time.time(), "updated_at": time.time()}, f)
+                    
+                last_image_url = f"/output_saves/{pid}/{filename}"
+                last_project_id = pid
+                
+                if not req.enforce_white:
+                    variant_success = True
+                    break
+                    
+                # Check corners for white background
+                data = np.array(image)
+                corners = [data[0,0], data[0,-1], data[-1,0], data[-1,-1]]
+                avg_corner = np.mean(corners, axis=0)
+                is_white = np.mean(avg_corner[:3]) > 180 
+                
+                if is_white:
+                    logger.info(f"  Variant {v_idx+1} Validation Success.")
+                    variant_success = True
+                    break
+                else:
+                    logger.warning(f"  Variant {v_idx+1} Validation Failed. Retrying with new seed...")
             
-            if is_white:
-                logger.info("  Validation Success: Found white background.")
-                break
-            else:
-                logger.warning(f"  Validation Failed: Background is too dark (Avg: {np.mean(avg_corner[:3])}). Retrying...")
-                # We continue the loop and overwrite last_image_url
-        
+            logger.info(f"Finished variant {v_idx+1}/{num_to_gen} (Project: {pid})")
+
         # Unload FLUX after we are done
         del flux_pipe
         if manager.device == "cuda":
             torch.cuda.empty_cache()
             gc.collect()
             
-        return {"status": "success", "url": last_image_url}
+        return {"status": "success", "url": last_image_url, "project_id": last_project_id, "batch_count": num_to_gen}
         
     except HTTPException:
         raise
@@ -1134,6 +1164,8 @@ class SaveProjectRequest(BaseModel):
     image_url: str
     project_id: Optional[str] = None
     force_overwrite: Optional[bool] = False
+    all_slice_versions: Optional[List[List[str]]] = None
+    selected_indices: Optional[List[int]] = None
 
 class SliceRequest(BaseModel):
     image_url: str
@@ -1170,22 +1202,45 @@ async def list_projects():
             if not os.path.isdir(folder_path):
                 continue
                 
-            meta_path = os.path.join(folder_path, "metadata.json")
-            if os.path.exists(meta_path):
-                with open(meta_path, "r") as f:
-                    meta = json.load(f)
-                    saves.append({
-                        "id": d,
-                        "prompt": meta.get("prompt", ""),
-                        "image_url": f"/output_saves/{d}/{d}_turnaround.png",
-                        "timestamp": os.path.getmtime(meta_path)
-                    })
+            try:
+                meta_path = os.path.join(folder_path, "metadata.json")
+                if os.path.exists(meta_path):
+                    with open(meta_path, "r") as f:
+                        try:
+                            meta = json.load(f)
+                            saves.append({
+                                "id": d,
+                                "prompt": meta.get("prompt", ""),
+                                "image_url": meta.get("image_url", f"/output_saves/{d}/{d}_turnaround.png"),
+                                "timestamp": os.path.getmtime(meta_path),
+                                "all_slice_versions": meta.get("all_slice_versions", []),
+                                "selected_indices": meta.get("selected_indices", [0, 0, 0, 0, 0])
+                            })
+                        except json.JSONDecodeError:
+                            logger.warning(f"  Skipping corrupted project folder {d}: Empty or invalid metadata.json")
+            except Exception as fe:
+                logger.warning(f"  Skipping corrupted project folder {d}: {fe}")
                     
         saves.sort(key=lambda x: x["timestamp"], reverse=True)
         return {"status": "success", "saves": saves}
     except Exception as e:
         logger.error(f"Error listing saves: {e}")
         return {"status": "error", "message": str(e)}
+
+@app.delete("/project/{project_id}")
+async def delete_project(project_id: str):
+    """Deletes a project folder and all its contents."""
+    try:
+        project_dir = os.path.join("Output_Saves", project_id)
+        if os.path.exists(project_dir):
+            logger.info(f"Deleting project directory: {project_dir}")
+            shutil.rmtree(project_dir)
+            return {"status": "success", "message": f"Project {project_id} deleted"}
+        else:
+            raise HTTPException(status_code=404, detail="Project not found")
+    except Exception as e:
+        logger.error(f"Error deleting project {project_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/save-project")
 async def save_project(req: SaveProjectRequest):
@@ -1206,8 +1261,18 @@ async def save_project(req: SaveProjectRequest):
         else:
             logger.warning(f"Could not resolve source image for saving: {req.image_url}")
                 
+        # Create metadata with version history
+        metadata = {
+            "prompt": req.prompt, 
+            "id": pid, 
+            "updated_at": time.time(),
+            "image_url": f"/output_saves/{pid}/{target_filename}",
+            "all_slice_versions": req.all_slice_versions or [],
+            "selected_indices": req.selected_indices or [0, 0, 0, 0, 0]
+        }
+        
         with open(os.path.join(project_dir, "metadata.json"), "w") as f:
-            json.dump({"prompt": req.prompt, "id": pid, "updated_at": time.time()}, f)
+            json.dump(metadata, f, indent=2)
             
         return {"status": "success", "project_id": pid, "image_url": f"/output_saves/{pid}/{target_filename}"}
     except Exception as e:
@@ -1231,9 +1296,17 @@ async def slice_turnaround(req: SliceRequest):
             
         # Robust URL handling using helper
         sheet_path = resolve_image_path(req.image_url)
-        
         if not os.path.exists(sheet_path):
             raise HTTPException(status_code=404, detail=f"Sheet not found at {sheet_path}")
+            
+        # Determine if this is a corrected sheet to add a version suffix to slices
+        source_name = os.path.basename(sheet_path)
+        source_stem = os.path.splitext(source_name)[0]
+        version_suffix = ""
+        if "corrected_" in source_stem:
+            # Extract the unique hash from 'corrected_hash'
+            version_suffix = "_" + source_stem.split("corrected_")[-1]
+            logger.info(f"  Detected corrected sheet, using version suffix: {version_suffix}")
             
         image = Image.open(sheet_path).convert("RGB")
         w, h = image.size
@@ -1252,9 +1325,23 @@ async def slice_turnaround(req: SliceRequest):
             
         # Ensure metadata exists
         meta_path = os.path.join(output_dir, "metadata.json")
+        
+        # Determine the relative URL for the sheet being sliced
+        # If it's already a relative /output_saves/ URL, use it. Otherwise, use the project sheet name.
+        sheet_rel_url = req.image_url
+        if not sheet_rel_url.startswith("/output_saves/"):
+            sheet_rel_url = f"/output_saves/{pid}/{project_sheet_name}"
+
         if not os.path.exists(meta_path):
             with open(meta_path, "w") as f:
-                json.dump({"id": pid, "created_at": time.time(), "image_url": f"/output_saves/{pid}/{project_sheet_name}"}, f)
+                json.dump({"id": pid, "created_at": time.time(), "image_url": sheet_rel_url}, f)
+        else:
+            # Load existing meta to preserve other fields
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+            meta["image_url"] = sheet_rel_url
+            with open(meta_path, "w") as f:
+                json.dump(meta, f)
             
         # Smart Cache: Only reuse if files exist AND sheet hasn't changed AND we aren't forcing
         if not is_new_project and not getattr(req, 'force_reslice', False):
@@ -1266,7 +1353,18 @@ async def slice_turnaround(req: SliceRequest):
                     if sheet_mtime < newest_slice:
                         logger.info(f"Reusing existing slices for project {pid}")
                         sliced_urls = [f"/output_saves/{pid}/{os.path.basename(f)}" for f in sorted(pose_files)]
-                        return {"status": "success", "urls": sliced_urls[:num_poses], "project_id": pid}
+                        
+                        # Ensure segments are in metadata even on cache hits
+                        if os.path.exists(meta_path):
+                            with open(meta_path, "r") as f:
+                                meta = json.load(f)
+                            if "slice_segments" not in meta:
+                                # We have to re-detect once to get segments for Quick Fix
+                                logger.info("  Cache hit but missing segments. Re-detecting segments...")
+                                # ... (we'll just let it fall through to detection if segments missing)
+                                pass 
+                            else:
+                                return {"status": "success", "urls": sliced_urls[:num_poses], "project_id": pid}
             
         # Dynamic Detection: Use horizontal projection to find gaps and isolate characters
         num_poses = 5
@@ -1274,7 +1372,11 @@ async def slice_turnaround(req: SliceRequest):
         # 1. Prepare mask for detection (ignore background)
         detection_img = image.convert("RGBA")
         data = np.array(detection_img)
-        r, g, b, a = data.T
+        
+        # Avoid data.T which swaps axes confusingly for 3D arrays
+        r = data[:, :, 0]
+        g = data[:, :, 1]
+        b = data[:, :, 2]
         
         corners = [data[0,0], data[0,-1], data[-1,0], data[-1,-1]]
         avg_corner = np.mean(corners, axis=0)
@@ -1283,18 +1385,18 @@ async def slice_turnaround(req: SliceRequest):
         # Use a slightly stricter threshold for DYNAMIC DETECTION to find gaps
         # We want to ignore near-white/near-black noise in the gaps
         if is_white_bg:
-            detect_thresh = min(220, (req.foreground_threshold or 240) - 20)
+            detect_thresh = min(210, (req.foreground_threshold or 240) - 30)
             mask = (r < detect_thresh) | (g < detect_thresh) | (b < detect_thresh)
         else:
-            detect_thresh = max(35, (req.foreground_threshold or 15) + 20)
+            detect_thresh = max(45, (req.foreground_threshold or 15) + 30)
             mask = (r > detect_thresh) | (g > detect_thresh) | (b > detect_thresh)
             
-        # 2. Horizontal Projection (sum along Y axis)
+        # 2. Horizontal Projection (sum along Y/Height axis to get X/Width vector)
         projection = np.sum(mask, axis=0)
         
         # 3. Find segments (islands of pixels)
-        # Use a higher threshold to ignore tiny noise specks in gaps
-        min_pixels_in_col = 15 
+        # Increase noise threshold to ignore shadows/artifacts in gaps
+        min_pixels_in_col = 30 
         segments = []
         in_segment = False
         start_x = 0
@@ -1328,130 +1430,157 @@ async def slice_turnaround(req: SliceRequest):
             
         logger.info(f"Dynamic Slicer: Found {len(refined)} potential character islands.")
         
-        # If we didn't find exactly 5, or detection failed, fallback to equal slices
-        if len(refined) != num_poses:
-            logger.warning(f"Dynamic detection found {len(refined)} segments instead of {num_poses}. Falling back to equal segments.")
-            slice_width = w / num_poses
-            pose_boxes = []
-            for i in range(num_poses):
+        # --- SMART SLICING: Handle < 5 characters by mapping islands to slots ---
+        slot_to_island = {} # slot_idx -> refined_idx
+        if len(refined) > 0 and len(refined) <= num_poses:
+            ideal_centers = [(i + 0.5) * (w / num_poses) for i in range(num_poses)]
+            island_centers = [(s + e) / 2 for s, e in refined]
+            
+            # Simple greedy matching: assign each island to its closest available slot
+            for island_idx, ic in enumerate(island_centers):
+                best_slot = -1
+                min_dist = float('inf')
+                for slot_idx in range(num_poses):
+                    if slot_idx in slot_to_island: continue
+                    dist = abs(ic - ideal_centers[slot_idx])
+                    if dist < min_dist:
+                        min_dist = dist
+                        best_slot = slot_idx
+                if best_slot != -1:
+                    slot_to_island[best_slot] = island_idx
+
+        # Construct pose boxes based on mapping
+        pose_boxes = []
+        for i in range(num_poses):
+            if i in slot_to_island:
+                # Use detected island bounds
+                s, e = refined[slot_to_island[i]]
+                pad = int((e - s) * 0.2) # 20% padding
+                pose_boxes.append((max(0, s - pad), min(w, e + pad)))
+            else:
+                # Fallback to equal segment bounds for empty/missing slots
+                slice_width = w / num_poses
                 center_x = (i * slice_width) + (slice_width / 2)
                 crop_w = int(slice_width * 1.5)
                 pose_boxes.append((max(0, int(center_x - crop_w/2)), min(w, int(center_x + crop_w/2))))
-        else:
-            # Use detected segments with some padding
-            pose_boxes = []
-            for s, e in refined:
-                pad = int((e - s) * 0.2) # 20% padding
-                pose_boxes.append((max(0, s - pad), min(w, e + pad)))
+        
+        logger.info(f"  Smart Mapping: Assigned {len(slot_to_island)} islands to {num_poses} slots.")
 
         for i in range(num_poses):
             x1, x2 = pose_boxes[i]
             
             logger.info(f"  Processing slice {i+1}/{num_poses} (x={x1} to {x2})...")
-            crop = image.crop((x1, 0, x2, h))
             
-            if req.remover_type == "none":
-                # Do nothing, just use the raw crop
-                no_bg = crop.convert("RGBA")
-            elif req.remover_type == "simple":
-                # Enhanced color-keying for white backgrounds
-                no_bg = crop.convert("RGBA")
-                data = np.array(no_bg)
-                r, g, b, a = data.T
-                # Use the provided sensitivity threshold
-                thresh = req.foreground_threshold or 235
-                white_mask = (r > thresh) & (g > thresh) & (b > thresh)
-                data[..., 3][white_mask.T] = 0
-                no_bg = Image.fromarray(data)
+            # If this is an empty slot, create a blank base
+            if len(refined) > 0 and i not in slot_to_island:
+                logger.info(f"    Slot {i+1} is empty, creating placeholder.")
+                # Create a 512x768 (standard aspect) white base
+                no_bg = Image.new("RGBA", (int(w/num_poses), h), (255, 255, 255, 255))
             else:
-                # Use AI remover (rembg)
-                no_bg = await run_in_threadpool(
-                    remove, 
-                    crop, 
-                    session=rembg_session,
-                    alpha_matting=req.alpha_matting,
-                    alpha_matting_foreground_threshold=req.foreground_threshold,
-                    alpha_matting_background_threshold=req.background_threshold
-                )
-
-            # --- AUTO-ISOLATION: Mask out neighbor character artifacts ---
-            try:
-                # 1. Create a mask of the character vs background
-                iso_data = np.array(no_bg)
-                r, g, b, a = iso_data.T
+                crop = image.crop((x1, 0, x2, h))
                 
-                # Check if we already have transparency
-                has_alpha = np.max(a) > 0 and np.min(a) < 255
-                
-                if has_alpha:
-                    # Use existing alpha channel
-                    binary_mask = (a.T > 10).astype(np.uint8)
+                if req.remover_type == "none":
+                    # Do nothing, just use the raw crop
+                    no_bg = crop.convert("RGBA")
+                elif req.remover_type == "simple":
+                    # Enhanced color-keying for white backgrounds
+                    no_bg = crop.convert("RGBA")
+                    data = np.array(no_bg)
+                    r, g, b, a = data.T
+                    # Use the provided sensitivity threshold
+                    thresh = req.foreground_threshold or 235
+                    white_mask = (r > thresh) & (g > thresh) & (b > thresh)
+                    data[..., 3][white_mask.T] = 0
+                    no_bg = Image.fromarray(data)
                 else:
-                    # No alpha? Detect background color from corners
-                    corners = [iso_data[0,0], iso_data[0,-1], iso_data[-1,0], iso_data[-1,-1]]
-                    avg_corner = np.mean(corners, axis=0)
-                    is_white_bg = np.mean(avg_corner[:3]) > 128
+                    # Use AI remover (rembg)
+                    no_bg = await run_in_threadpool(
+                        remove, 
+                        crop, 
+                        session=rembg_session,
+                        alpha_matting=req.alpha_matting,
+                        alpha_matting_foreground_threshold=req.foreground_threshold,
+                        alpha_matting_background_threshold=req.background_threshold
+                    )
+
+                # --- AUTO-ISOLATION: Mask out neighbor character artifacts ---
+                try:
+                    # 1. Create a mask of the character vs background
+                    iso_data = np.array(no_bg)
+                    r, g, b, a = iso_data.T
                     
-                    # Use user threshold if available
-                    thresh = req.foreground_threshold or (240 if is_white_bg else 15)
+                    # Check if we already have transparency
+                    has_alpha = np.max(a) > 0 and np.min(a) < 255
                     
-                    if is_white_bg:
-                        # Character is not background (be sensitive)
-                        binary_mask = ((r.T < thresh) | (g.T < thresh) | (b.T < thresh)).astype(np.uint8)
+                    if has_alpha:
+                        # Use existing alpha channel
+                        binary_mask = (a.T > 10).astype(np.uint8)
                     else:
-                        # Character is not background (be VERY sensitive for dark outfits)
-                        binary_mask = ((r.T > (thresh//2)) | (g.T > (thresh//2)) | (b.T > (thresh//2))).astype(np.uint8)
-                
-                # 2. Find all connected components (islands)
-                num_labels, labels = cv2.connectedComponents(binary_mask)
-                
-                if num_labels > 1: # 0 is background, 1+ are islands
-                    # 3. Find the best island to keep
-                    center_x = no_bg.width // 2
-                    
-                    # Check which labels are present in the central 40% of the slice (wider scan)
-                    start_scan = center_x - (no_bg.width // 5)
-                    end_scan = center_x + (no_bg.width // 5)
-                    center_region = labels[:, int(max(0, start_scan)):int(min(no_bg.width, end_scan))]
-                    
-                    # Get unique labels and their counts in the center
-                    unique, counts = np.unique(center_region[center_region > 0], return_counts=True)
-                    
-                    target_labels = []
-                    if len(unique) > 0:
-                        # Find the dominant label (the one with most pixels in center)
-                        dominant_idx = np.argmax(counts)
-                        dominant_label = unique[dominant_idx]
-                        dominant_count = counts[dominant_idx]
+                        # No alpha? Detect background color from corners
+                        corners = [iso_data[0,0], iso_data[0,-1], iso_data[-1,0], iso_data[-1,-1]]
+                        avg_corner = np.mean(corners, axis=0)
+                        is_white_bg = np.mean(avg_corner[:3]) > 128
                         
-                        # Keep any label that has at least 15% of the dominant label's presence in the center
-                        # This catches detached limbs/accessories while still excluding neighbor bleed-in
-                        threshold = dominant_count * 0.15
-                        for label, count in zip(unique, counts):
-                            if count >= threshold:
-                                target_labels.append(label)
-                    else:
-                        # CENTER SCAN FAILED: Fallback to largest island
-                        labels_list, island_counts = np.unique(labels[labels > 0], return_counts=True)
-                        if len(labels_list) > 0:
-                            target_labels = [labels_list[np.argmax(island_counts)]]
-                            logger.info(f"    Center scan failed for slice {i+1}, falling back to largest island")                    
+                        # Use user threshold if available
+                        thresh = req.foreground_threshold or (240 if is_white_bg else 15)
+                        
+                        if is_white_bg:
+                            # Character is not background (be sensitive)
+                            binary_mask = ((r.T < thresh) | (g.T < thresh) | (b.T < thresh)).astype(np.uint8)
+                        else:
+                            # Character is not background (be VERY sensitive for dark outfits)
+                            binary_mask = ((r.T > (thresh//2)) | (g.T > (thresh//2)) | (b.T > (thresh//2))).astype(np.uint8)
                     
-                    if target_labels:
-                        # Prepare final output data
-                        if no_bg.mode != 'RGBA':
-                            no_bg = no_bg.convert('RGBA')
-                            iso_data = np.array(no_bg)
+                    # 2. Find all connected components (islands)
+                    num_labels, labels = cv2.connectedComponents(binary_mask)
+                    
+                    if num_labels > 1: # 0 is background, 1+ are islands
+                        # 3. Find the best island to keep
+                        center_x_val = no_bg.width // 2
+                        
+                        # Check which labels are present in the central 40% of the slice (wider scan)
+                        start_scan = center_x_val - (no_bg.width // 5)
+                        end_scan = center_x_val + (no_bg.width // 5)
+                        center_region = labels[:, int(max(0, start_scan)):int(min(no_bg.width, end_scan))]
+                        
+                        # Get unique labels and their counts in the center
+                        unique, counts = np.unique(center_region[center_region > 0], return_counts=True)
+                        
+                        target_labels = []
+                        if len(unique) > 0:
+                            # Find the dominant label (the one with most pixels in center)
+                            dominant_idx = np.argmax(counts)
+                            dominant_label = unique[dominant_idx]
+                            dominant_count = counts[dominant_idx]
                             
-                        # Create a mask of all allowed labels
-                        final_mask = np.isin(labels, target_labels)
+                            # Keep any label that has at least 15% of the dominant label's presence in the center
+                            # This catches detached limbs/accessories while still excluding neighbor bleed-in
+                            threshold = dominant_count * 0.15
+                            for label, count in zip(unique, counts):
+                                if count >= threshold:
+                                    target_labels.append(label)
+                        else:
+                            # CENTER SCAN FAILED: Fallback to largest island
+                            labels_list, island_counts = np.unique(labels[labels > 0], return_counts=True)
+                            if len(labels_list) > 0:
+                                target_labels = [labels_list[np.argmax(island_counts)]]
+                                logger.info(f"    Center scan failed for slice {i+1}, falling back to largest island")                    
                         
-                        # Set alpha to 0 for all pixels NOT in our target list
-                        iso_data[..., 3][~final_mask] = 0
-                        no_bg = Image.fromarray(iso_data)
-                        logger.info(f"    Isolated character parts in slice {i+1} (Labels: {target_labels})")
-            except Exception as iso_err:
-                logger.warning(f"    Auto-isolation failed for slice {i+1}: {iso_err}")
+                        if target_labels:
+                            # Prepare final output data
+                            if no_bg.mode != 'RGBA':
+                                no_bg = no_bg.convert('RGBA')
+                                iso_data = np.array(no_bg)
+                                
+                            # Create a mask of all allowed labels
+                            final_mask = np.isin(labels, target_labels)
+                            
+                            # Set alpha to 0 for all pixels NOT in our target list
+                            iso_data[..., 3][~final_mask.T] = 0
+                            no_bg = Image.fromarray(iso_data)
+                            logger.info(f"    Isolated character parts in slice {i+1} (Labels: {target_labels})")
+                except Exception as iso_err:
+                    logger.warning(f"    Auto-isolation failed for slice {i+1}: {iso_err}")
             
             bbox = no_bg.getbbox()
             # If nothing detected, or the image is too transparent
@@ -1482,7 +1611,7 @@ async def slice_turnaround(req: SliceRequest):
             paste_y = 512 - new_h - 10
             canvas.paste(resized_sprite, (paste_x, paste_y), resized_sprite)
             
-            out_name = f"{pid}_pose_{i}.png"
+            out_name = f"{pid}_pose_{i}{version_suffix}.png"
             url_prefix = f"/output_saves/{pid}/"
             sliced_urls.append(f"{url_prefix}{out_name}")
             
@@ -1493,7 +1622,20 @@ async def slice_turnaround(req: SliceRequest):
             
         if not sliced_urls:
             raise HTTPException(status_code=400, detail="Could not isolate any characters.")
-            
+
+        # 6. Save segments to metadata for 'Quick Fix' functionality
+        meta_path = os.path.join(output_dir, "metadata.json")
+        if os.path.exists(meta_path):
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+            # 'segments' is calculated during Dynamic Detection
+            # Always save the actual pose_boxes used for slicing (whether detected or fallback)
+            if 'pose_boxes' in locals():
+                meta["slice_segments"] = pose_boxes[:num_poses]
+                with open(meta_path, "w") as f:
+                    json.dump(meta, f)
+                logger.info(f"  Persisted {len(meta['slice_segments'])} slice segments to metadata.")
+
         return {"status": "success", "urls": sliced_urls, "project_id": pid}
     except HTTPException:
         raise
@@ -1589,17 +1731,57 @@ async def rig_poses(req: RigPosesRequest):
                     "method": "fallback"
                 })
                 
-        # PERSIST RIGS TO METADATA
+        # PERSIST RIGS TO METADATA AND CREATE STITCHED TURNAROUND
         if req.project_id:
             project_dir = os.path.join("Output_Saves", req.project_id)
             meta_path = os.path.join(project_dir, "metadata.json")
-            if os.path.exists(meta_path):
-                with open(meta_path, "r") as f:
-                    meta = json.load(f)
-                meta["rigs"] = rig_data
-                with open(meta_path, "w") as f:
-                    json.dump(meta, f)
-                logger.info(f"  Saved {len(rig_data)} rigs to project {req.project_id} metadata.")
+            
+            # 1. Stitch current 5 frames into a "final" turnaround sheet
+            try:
+                frames = []
+                max_w = 0
+                max_h = 0
+                for url in req.frame_urls:
+                    img_path = resolve_image_path(url)
+                    if os.path.exists(img_path):
+                        img = Image.open(img_path).convert("RGBA")
+                        frames.append(img)
+                        max_w = max(max_w, img.width)
+                        max_h = max(max_h, img.height)
+                
+                if frames:
+                    # Stitch them side-by-side
+                    sheet = Image.new("RGBA", (max_w * len(frames), max_h), (0, 0, 0, 0))
+                    for i, f in enumerate(frames):
+                        x = i * max_w + (max_w - f.width) // 2
+                        y = (max_h - f.height) // 2
+                        sheet.paste(f, (x, y), f)
+                    
+                    # Save as the "latest" turnaround for this project
+                    # We'll use a specific name to indicate it's the rigged/final version
+                    filename = f"{req.project_id}_turnaround_rigged.png"
+                    filepath = os.path.join(project_dir, filename)
+                    sheet.save(filepath)
+                    logger.info(f"  Stitched final turnaround sheet created: {filename}")
+                    
+                    # 2. Update metadata with rigs AND the new image_url
+                    if os.path.exists(meta_path):
+                        with open(meta_path, "r") as f:
+                            meta = json.load(f)
+                        meta["rigs"] = rig_data
+                        meta["image_url"] = f"/output_saves/{req.project_id}/{filename}"
+                        with open(meta_path, "w") as f:
+                            json.dump(meta, f)
+                        logger.info(f"  Saved {len(rig_data)} rigs and updated image_url in project {req.project_id} metadata.")
+            except Exception as stitch_err:
+                logger.error(f"  Failed to stitch turnaround sheet in rig_poses: {stitch_err}")
+                # Still try to save rigs if stitching fails
+                if os.path.exists(meta_path):
+                    with open(meta_path, "r") as f:
+                        meta = json.load(f)
+                    meta["rigs"] = rig_data
+                    with open(meta_path, "w") as f:
+                        json.dump(meta, f)
                 
         return {"status": "success", "rigs": rig_data}
         
@@ -1896,7 +2078,8 @@ async def stitch_frames(req: StitchFramesRequest):
 class CorrectPoseRequest(BaseModel):
     project_id: str
     sheet_url: str
-    mask_image: str # Base64 mask
+    mask_image: Optional[str] = None # Base64 mask (optional if slice_index provided)
+    slice_index: Optional[int] = None # New: Quick fix by slice index
     target_rotation: str # e.g. "front-quarter"
     prompt_override: Optional[str] = None
 
@@ -1913,11 +2096,69 @@ async def correct_pose(req: CorrectPoseRequest):
             
         sheet_img = Image.open(sheet_path).convert("RGB")
         
-        # Decode mask
-        import base64
-        import io
-        mask_data = base64.b64decode(req.mask_image.split(",")[-1])
-        mask_img = Image.open(io.BytesIO(mask_data)).convert("L")
+        # Resolve mask
+        mask_img = None
+        project_dir = os.path.join("Output_Saves", req.project_id)
+        meta_path = os.path.join(project_dir, "metadata.json")
+
+        if req.slice_index is not None:
+            try:
+                segments = []
+                if os.path.exists(meta_path):
+                    with open(meta_path, "r") as f:
+                        meta = json.load(f)
+                    segments = meta.get("slice_segments", [])
+                
+                # FALLBACK: If segments missing or out of range, calculate equal slices
+                if req.slice_index >= len(segments) or not segments:
+                    logger.warning(f"  Slice index {req.slice_index} out of range or no segments available. Calculating equal fallback.")
+                    w, h = sheet_img.size
+                    col_width = w / 5
+                    start_x = int(req.slice_index * col_width)
+                    end_x = int((req.slice_index + 1) * col_width)
+                else:
+                    # SMART HARD WALLS: Use midpoints between character islands
+                    w, h = sheet_img.size
+                    s_curr, e_curr = segments[req.slice_index]
+                    
+                    # Left boundary: midpoint with previous character or 0
+                    if req.slice_index > 0:
+                        e_prev = segments[req.slice_index - 1][1]
+                        start_x = (e_prev + s_curr) // 2
+                    else:
+                        start_x = 0
+                        
+                    # Right boundary: midpoint with next character or edge
+                    if req.slice_index < len(segments) - 1:
+                        s_next = segments[req.slice_index + 1][0]
+                        end_x = (e_curr + s_next) // 2
+                    else:
+                        end_x = w
+                    
+                    logger.info(f"  Hard Walls calculated for slice {req.slice_index}: x={start_x}-{end_x} (Island: {s_curr}-{e_curr})")
+
+                # Create rectangular mask for this vertical slice strip
+                mask_img = Image.new("L", sheet_img.size, 0)
+                from PIL import ImageDraw
+                draw = ImageDraw.Draw(mask_img)
+                # Fill the entire vertical strip between the walls
+                draw.rectangle([start_x, 0, end_x, sheet_img.height], fill=255)
+                
+                # Debug save mask
+                debug_dir = os.path.join(project_dir)
+                os.makedirs(debug_dir, exist_ok=True)
+                mask_img.save(os.path.join(debug_dir, f"debug_mask_{int(time.time()) % 10000}.png"))
+                
+            except Exception as me:
+                logger.error(f"  Failed to generate surgical mask: {me}")
+                logger.error(traceback.format_exc())
+        
+        if mask_img is None:
+            # Decode manual mask (Studio mode)
+            if not req.mask_image:
+                raise HTTPException(status_code=400, detail="Either mask_image or slice_index must be provided")
+            mask_data = base64.b64decode(req.mask_image.split(",")[-1])
+            mask_img = Image.open(io.BytesIO(mask_data)).convert("L")
         
         # 2. Get Metadata for style consistency
         project_dir = os.path.join("Output_Saves", req.project_id)
@@ -1996,6 +2237,9 @@ async def correct_pose(req: CorrectPoseRequest):
             logger.info(f"  Updated project metadata with corrected sheet: {filename}")
             
         return {"status": "success", "url": f"/output_saves/{req.project_id}/{filename}"}
+    except HTTPException:
+        # Re-raise HTTP exceptions so FastAPI handles them correctly (e.g. 400 Bad Request)
+        raise
     except Exception as e:
         logger.error(f"Error correcting pose: {e}")
         logger.error(traceback.format_exc())
