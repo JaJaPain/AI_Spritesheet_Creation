@@ -1442,14 +1442,30 @@ async def slice_turnaround(req: SliceRequest):
                 has_pivoted = meta.get("image_url", "").endswith("_working.png") or len(meta.get("slice_segments", [])) == 5
         
         if (w == 1536 or w == 2560) and has_pivoted:
-            logger.info(f"  Pivoted 5-slot sheet detected. Using Fixed Grid Slicing.")
+            logger.info(f"  Surgical Mode: Pivoted 5-slot sheet detected. Using Fixed Grid Slicing.")
             is_fixed_grid = True
             col_w = 307 if w == 1536 else 512
             segments = [[i * col_w, (i + 1) * col_w] for i in range(5)]
             
-        if not is_fixed_grid:
-            # Dynamic Detection: Use horizontal projection to find gaps and isolate characters
-            logger.info("  Original/Irregular sheet detected. Using Enhanced Dynamic Detection (Surgical Split)...")
+        # 5. EXECUTION BRANCHES
+        num_poses = req.num_poses or 5
+        pose_boxes = []
+        slot_to_island = {}
+        refined = []
+        avg_island_width = 512
+        
+        if is_fixed_grid:
+            # BRANCH A: SURGICAL PATH (Stable 5-Person)
+            # ZERO GUESSING. Exactly the 512px chunks. No padding, no mapping.
+            logger.info(f"  BRANCH A (Surgical): Using ZERO-GUESSING fixed grid (col_w={col_w}).")
+            pose_boxes = segments
+            slot_to_island = {i: i for i in range(num_poses)}
+            refined = segments
+            avg_island_width = col_w
+        else:
+            # BRANCH B: DYNAMIC PATH (4-Person to 5-Person)
+            # SMART MAPPING & PADDING.
+            logger.info("  BRANCH B (Dynamic): Irregular sheet detected. Using Smart Mapping.")
             
             # 1. Prepare mask for detection (ignore background)
             detection_img = image.convert("RGBA")
@@ -1475,21 +1491,20 @@ async def slice_turnaround(req: SliceRequest):
             min_pixels_in_col = 15 # More sensitive to thin characters
             in_segment = False
             start_x = 0
+            temp_segments = []
             for x, val in enumerate(projection):
                 if val > min_pixels_in_col and not in_segment:
                     start_x = x
                     in_segment = True
                 elif val <= min_pixels_in_col and in_segment:
-                    # Potential end of segment. 
-                    segments.append([start_x, x])
+                    temp_segments.append([start_x, x])
                     in_segment = False
             if in_segment:
-                segments.append([start_x, w])
+                temp_segments.append([start_x, w])
 
             # 4. OVERSIZE SPLITTING: If a segment is too wide, it likely contains 2 people
             # Use the "Thinnest Point" strategy: find the column with the least pixels to split.
-            refined_segments = []
-            for s in segments:
+            for s in temp_segments:
                 sw = s[1] - s[0]
                 if sw > 450:
                     logger.info(f"  Detected oversize segment ({sw}px). Searching for thinnest split point...")
@@ -1499,103 +1514,90 @@ async def slice_turnaround(req: SliceRequest):
                         min_val_idx = np.argmin(search_range)
                         split_x = s[0] + 50 + min_val_idx
                         logger.info(f"    Surgical split found at x={split_x} (Density: {projection[split_x]})")
-                        refined_segments.append([s[0], split_x])
-                        refined_segments.append([split_x, s[1]])
+                        segments.append([s[0], split_x])
+                        segments.append([split_x, s[1]])
                     else:
                         # Fallback to middle if search range is invalid
                         mid = s[0] + (sw // 2)
-                        refined_segments.append([s[0], mid])
-                        refined_segments.append([mid, s[1]])
+                        segments.append([s[0], mid])
+                        segments.append([mid, s[1]])
                 else:
-                    refined_segments.append(s)
-            segments = refined_segments
+                    segments.append(s)
 
-        logger.info(f"Dynamic Slicer: Found {len(segments)} potential character islands.")
+            # 5. Refine segments (merge small gaps, filter noise)
+            min_gap = 50 # Slightly wider gap requirement
+            if segments:
+                curr_s, curr_e = segments[0]
+                for next_s, next_e in segments[1:]:
+                    # Merge if gap is tiny OR if segments are tiny (likely noise)
+                    if next_s - curr_e < min_gap:
+                        curr_e = next_e
+                    else:
+                        refined.append((curr_s, curr_e))
+                        curr_s, curr_e = next_s, next_e
+                refined.append((curr_s, curr_e))
+                
+            # Filter out very narrow segments (likely noise)
+            refined = [s for s in refined if (s[1] - s[0]) > 40]
+                
+            logger.info(f"    Dynamic Slicer: Found {len(refined)} potential character islands.")
             
-        # 4. Refine segments (merge small gaps, filter noise)
-        min_gap = 50 # Slightly wider gap requirement
-        refined = []
-        if segments:
-            curr_s, curr_e = segments[0]
-            for next_s, next_e in segments[1:]:
-                # Merge if gap is tiny OR if segments are tiny (likely noise)
-                if next_s - curr_e < min_gap:
-                    curr_e = next_e
-                else:
-                    refined.append((curr_s, curr_e))
-                    curr_s, curr_e = next_s, next_e
-            refined.append((curr_s, curr_e))
-            
-        # Filter out very narrow segments (likely noise)
-        refined = [s for s in refined if (s[1] - s[0]) > 40]
-            
-        logger.info(f"Dynamic Slicer: Found {len(refined)} potential character islands.")
-        
-        # --- BEST FIT MAPPING: Map detected islands to standard turnaround slots ---
-        slot_to_island = {}
-        
-        if is_fixed_grid:
-            # LOCK-IN: For fixed grid, mapping is strictly 1-to-1. No guessing.
-            slot_to_island = {i: i for i in range(num_poses)}
-            refined = segments 
-        elif 0 < len(refined) <= num_poses:
-            ideal_centers = [(i + 0.5) * (w / num_poses) for i in range(num_poses)]
-            island_centers = [(s + e) / 2 for s, e in refined]
-            
-            # Find the best combination of slot indices for the detected islands (maintaining order)
-            from itertools import combinations
-            best_slots = None
-            min_total_dist = float('inf')
-            
-            for combo in combinations(range(num_poses), len(refined)):
-                total_dist = sum(abs(island_centers[j] - ideal_centers[combo[j]]) for j in range(len(refined)))
-                if total_dist < min_total_dist:
-                    min_total_dist = total_dist
-                    best_slots = combo
-            
-            for j, slot_idx in enumerate(best_slots):
-                slot_to_island[slot_idx] = j
+            # 6. BEST FIT MAPPING: Handle N characters into 5 slots by minimizing total distance
+            if 0 < len(refined) <= num_poses:
+                ideal_centers = [(i + 0.5) * (w / num_poses) for i in range(num_poses)]
+                island_centers = [(s + e) / 2 for s, e in refined]
+                
+                # Find the best combination of slot indices for the detected islands (maintaining order)
+                from itertools import combinations
+                best_slots = None
+                min_total_dist = float('inf')
+                
+                for combo in combinations(range(num_poses), len(refined)):
+                    total_dist = sum(abs(island_centers[j] - ideal_centers[combo[j]]) for j in range(len(refined)))
+                    if total_dist < min_total_dist:
+                        min_total_dist = total_dist
+                        best_slots = combo
+                
+                for j, slot_idx in enumerate(best_slots):
+                    slot_to_island[slot_idx] = j
 
-        # Calculate average island width to use for empty slots
-        if len(refined) > 0:
-            avg_island_width = np.mean([e - s for s, e in refined])
-        else:
-            avg_island_width = w / num_poses
-
-        # Construct pose boxes based on mapping
-        pose_boxes = []
-        for i in range(num_poses):
-            if i in slot_to_island:
-                # Use detected island bounds with padding
-                s, e = refined[slot_to_island[i]]
-                # Use a fixed width based on the island itself to avoid bleed-in
-                char_w = e - s
-                center_x = (s + e) / 2
-                crop_w = int(char_w * 1.3) # Consistent 30% padding
-                pose_boxes.append((max(0, int(center_x - crop_w/2)), min(w, int(center_x + crop_w/2))))
+            # Calculate average island width to use for empty slots
+            if len(refined) > 0:
+                avg_island_width = np.mean([e - s for s, e in refined])
             else:
-                # SMART GAP CENTERING: Find the gap between actual neighbors
-                # Find the nearest assigned island to the left
-                left_neighbor_x = 0
-                for prev_slot in range(i - 1, -1, -1):
-                    if prev_slot in slot_to_island:
-                        left_neighbor_x = refined[slot_to_island[prev_slot]][1] # Right edge of left neighbor
-                        break
-                
-                # Find the nearest assigned island to the right
-                right_neighbor_x = w
-                for next_slot in range(i + 1, num_poses):
-                    if next_slot in slot_to_island:
-                        right_neighbor_x = refined[slot_to_island[next_slot]][0] # Left edge of right neighbor
-                        break
-                # Center the bandit perfectly in the available gap
-                center_x = (left_neighbor_x + right_neighbor_x) / 2
-                logger.info(f"  Smart Gap for slot {i+1}: Centering between x={left_neighbor_x} and x={right_neighbor_x} (Center: {center_x})")
-                
-                crop_w = int(avg_island_width * 1.2) 
-                pose_boxes.append((max(0, int(center_x - crop_w/2)), min(w, int(center_x + crop_w/2))))
-        
-        logger.info(f"  Best Fit Mapping: Assigned {len(slot_to_island)} islands. (Avg Width: {avg_island_width:.1f}px)")
+                avg_island_width = w / num_poses
+
+            # 7. Construct pose boxes based on mapping
+            for i in range(num_poses):
+                if i in slot_to_island:
+                    # Use detected island bounds with padding
+                    s, e = refined[slot_to_island[i]]
+                    # Use a fixed width based on the island itself to avoid bleed-in
+                    char_w = e - s
+                    center_x = (s + e) / 2
+                    crop_w = int(char_w * 1.3) # Consistent 30% padding
+                    pose_boxes.append((max(0, int(center_x - crop_w/2)), min(w, int(center_x + crop_w/2))))
+                else:
+                    # SMART GAP CENTERING: Find the gap between actual neighbors
+                    left_neighbor_x = 0
+                    for prev_slot in range(i - 1, -1, -1):
+                        if prev_slot in slot_to_island:
+                            left_neighbor_x = refined[slot_to_island[prev_slot]][1]
+                            break
+                    
+                    right_neighbor_x = w
+                    for next_slot in range(i + 1, num_poses):
+                        if next_slot in slot_to_island:
+                            right_neighbor_x = refined[slot_to_island[next_slot]][0]
+                            break
+                    # Center perfectly in the available gap
+                    center_x = (left_neighbor_x + right_neighbor_x) / 2
+                    logger.info(f"    Smart Gap for slot {i+1}: Centering between x={left_neighbor_x} and x={right_neighbor_x} (Center: {center_x})")
+                    
+                    crop_w = int(avg_island_width * 1.2) 
+                    pose_boxes.append((max(0, int(center_x - crop_w/2)), min(w, int(center_x + crop_w/2))))
+            
+            logger.info(f"    Best Fit Mapping: Assigned {len(slot_to_island)} islands. (Avg Width: {avg_island_width:.1f}px)")
 
         has_patched_image = False
         # Pass 1: Extraction and Auto-Isolation
