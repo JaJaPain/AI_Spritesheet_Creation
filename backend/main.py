@@ -1430,53 +1430,103 @@ async def slice_turnaround(req: SliceRequest):
             
         logger.info(f"Dynamic Slicer: Found {len(refined)} potential character islands.")
         
-        # --- SMART SLICING: Handle < 5 characters by mapping islands to slots ---
-        slot_to_island = {} # slot_idx -> refined_idx
-        if len(refined) > 0 and len(refined) <= num_poses:
+        # --- BEST FIT MAPPING: Handle N characters into 5 slots by minimizing total distance ---
+        slot_to_island = {}
+        if 0 < len(refined) <= num_poses:
             ideal_centers = [(i + 0.5) * (w / num_poses) for i in range(num_poses)]
             island_centers = [(s + e) / 2 for s, e in refined]
             
-            # Simple greedy matching: assign each island to its closest available slot
-            for island_idx, ic in enumerate(island_centers):
-                best_slot = -1
-                min_dist = float('inf')
-                for slot_idx in range(num_poses):
-                    if slot_idx in slot_to_island: continue
-                    dist = abs(ic - ideal_centers[slot_idx])
-                    if dist < min_dist:
-                        min_dist = dist
-                        best_slot = slot_idx
-                if best_slot != -1:
-                    slot_to_island[best_slot] = island_idx
+            # Find the best combination of slot indices for the detected islands (maintaining order)
+            from itertools import combinations
+            best_slots = None
+            min_total_dist = float('inf')
+            
+            for combo in combinations(range(num_poses), len(refined)):
+                total_dist = sum(abs(island_centers[j] - ideal_centers[combo[j]]) for j in range(len(refined)))
+                if total_dist < min_total_dist:
+                    min_total_dist = total_dist
+                    best_slots = combo
+            
+            for j, slot_idx in enumerate(best_slots):
+                slot_to_island[slot_idx] = j
+
+        # Calculate average island width to use for empty slots
+        if len(refined) > 0:
+            avg_island_width = np.mean([e - s for s, e in refined])
+        else:
+            avg_island_width = w / num_poses
 
         # Construct pose boxes based on mapping
         pose_boxes = []
         for i in range(num_poses):
             if i in slot_to_island:
-                # Use detected island bounds
+                # Use detected island bounds with padding
                 s, e = refined[slot_to_island[i]]
-                pad = int((e - s) * 0.2) # 20% padding
-                pose_boxes.append((max(0, s - pad), min(w, e + pad)))
+                # Use a fixed width based on the island itself to avoid bleed-in
+                char_w = e - s
+                center_x = (s + e) / 2
+                crop_w = int(char_w * 1.3) # Consistent 30% padding
+                pose_boxes.append((max(0, int(center_x - crop_w/2)), min(w, int(center_x + crop_w/2))))
             else:
-                # Fallback to equal segment bounds for empty/missing slots
+                # Use average island width for the missing slot
                 slice_width = w / num_poses
                 center_x = (i * slice_width) + (slice_width / 2)
-                crop_w = int(slice_width * 1.5)
+                crop_w = int(avg_island_width * 1.2) 
                 pose_boxes.append((max(0, int(center_x - crop_w/2)), min(w, int(center_x + crop_w/2))))
         
-        logger.info(f"  Smart Mapping: Assigned {len(slot_to_island)} islands to {num_poses} slots.")
+        logger.info(f"  Best Fit Mapping: Assigned {len(slot_to_island)} islands. (Avg Width: {avg_island_width:.1f}px)")
 
+        # Prepare a separate image for patching (the "Working" sheet) 
+        # This keeps the slicing image clean so neighbors don't see the "Bandit"
+        working_image = image.copy()
+        
+        has_patched_image = False
+        # Pass 1: Extraction and Auto-Isolation
+        extracted_sprites = []
+        max_sh = 0
+        
         for i in range(num_poses):
             x1, x2 = pose_boxes[i]
             
-            logger.info(f"  Processing slice {i+1}/{num_poses} (x={x1} to {x2})...")
+            logger.info(f"  Pass 1: Extracting slice {i+1}/{num_poses} (x={x1} to {x2})...")
             
-            # If this is an empty slot, create a blank base
+            # If this is an empty slot, create a placeholder
             if len(refined) > 0 and i not in slot_to_island:
-                logger.info(f"    Slot {i+1} is empty, creating placeholder.")
-                # Create a 512x768 (standard aspect) white base
-                no_bg = Image.new("RGBA", (int(w/num_poses), h), (255, 255, 255, 255))
+                logger.info(f"    Slot {i+1} is empty, using reference from other slices.")
+                # Find the largest island to use as a reference
+                island_widths = [e - s for s, e in refined]
+                best_idx = np.argmax(island_widths)
+                s_ref, e_ref = refined[best_idx]
+                
+                # Crop the reference character from the original image
+                ref_crop_raw = image.crop((s_ref, 0, e_ref, h))
+                
+                # IMPORTANT: Remove background from the reference too, otherwise it brings its white box with it!
+                ref_crop = await run_in_threadpool(
+                    remove, 
+                    ref_crop_raw, 
+                    session=rembg_session
+                )
+                
+                # Create a canvas for the empty slot (TRANSPARENT background)
+                no_bg = Image.new("RGBA", (int(w/num_poses), h), (0, 0, 0, 0))
+                
+                # Paste the reference into the center
+                rw, rh = ref_crop.size
+                paste_x = (no_bg.width - rw) // 2
+                no_bg.paste(ref_crop, (paste_x, 0), ref_crop)
+                
+                # Patch the WORKING image (NOT the slicing image) so Quick Fix sees the reference
+                bx1, bx2 = pose_boxes[i]
+                bw = bx2 - bx1
+                patch = Image.new("RGBA", (bw, h), (0, 0, 0, 0))
+                patch.paste(ref_crop, ((bw - rw) // 2, 0), ref_crop)
+                working_image.paste(patch, (bx1, 0), patch) 
+                has_patched_image = True
+                
+                logger.info(f"      Pasted transparent/isolated reference into working sheet for slot {i+1}.")
             else:
+                # IMPORTANT: We crop from 'image' (the clean sheet), NOT 'working_image'
                 crop = image.crop((x1, 0, x2, h))
                 
                 if req.remover_type == "none":
@@ -1538,9 +1588,9 @@ async def slice_turnaround(req: SliceRequest):
                         # 3. Find the best island to keep
                         center_x_val = no_bg.width // 2
                         
-                        # Check which labels are present in the central 40% of the slice (wider scan)
-                        start_scan = center_x_val - (no_bg.width // 5)
-                        end_scan = center_x_val + (no_bg.width // 5)
+                        # Check which labels are present in the central 30% of the slice (tighter scan)
+                        start_scan = center_x_val - (no_bg.width // 6)
+                        end_scan = center_x_val + (no_bg.width // 6)
                         center_region = labels[:, int(max(0, start_scan)):int(min(no_bg.width, end_scan))]
                         
                         # Get unique labels and their counts in the center
@@ -1597,18 +1647,24 @@ async def slice_turnaround(req: SliceRequest):
                 bbox = (0, 0, no_bg.width, no_bg.height)
                 
             character_sprite = no_bg.crop(bbox)
-            canvas = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+            extracted_sprites.append(character_sprite)
             
+            # Track max height for global normalization
+            max_sh = max(max_sh, character_sprite.height)
+
+        # Pass 2: Global Normalization and Saving
+        logger.info(f"  Pass 2: Global Normalization (Master Height: {max_sh}px)...")
+        # Global scale based on the tallest character on the sheet
+        global_scale = 480 / max_sh if max_sh > 480 else 1.0
+        
+        for i, character_sprite in enumerate(extracted_sprites):
             sw, sh = character_sprite.size
-            scale = 1.0
-            if sh > 480: scale = 480 / sh
-            if (sw * scale) > 480: scale = 480 / sw
-                
-            new_w, new_h = int(sw * scale), int(sh * scale)
+            new_w, new_h = int(sw * global_scale), int(sh * global_scale)
             resized_sprite = character_sprite.resize((new_w, new_h), Image.Resampling.LANCZOS)
             
+            canvas = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
             paste_x = (512 - new_w) // 2
-            paste_y = 512 - new_h - 10
+            paste_y = 512 - new_h - 10 # Anchor to bottom
             canvas.paste(resized_sprite, (paste_x, paste_y), resized_sprite)
             
             out_name = f"{pid}_pose_{i}{version_suffix}.png"
@@ -1618,17 +1674,27 @@ async def slice_turnaround(req: SliceRequest):
             # Save the slice
             save_path = os.path.join(output_dir, out_name)
             canvas.save(save_path)
-            logger.info(f"    Saved slice {i+1} to {save_path}")
+            logger.info(f"    Saved slice {i+1} normalized to {save_path} (Scale: {global_scale:.3f})")
+
             
-        if not sliced_urls:
-            raise HTTPException(status_code=400, detail="Could not isolate any characters.")
+        # 5b. Save patched working turnaround if we created one
+        if has_patched_image:
+            working_name = f"{pid}_turnaround_working.png"
+            working_path = os.path.join(output_dir, working_name)
+            working_image.save(working_path)
+            # Update metadata to use this working image as the base for Quick Fixes
+            if os.path.exists(meta_path):
+                with open(meta_path, "r") as f:
+                    meta = json.load(f)
+                meta["image_url"] = f"/output_saves/{pid}/{working_name}"
+                with open(meta_path, "w") as f:
+                    json.dump(meta, f)
+                logger.info(f"  Updated metadata image_url to patched working turnaround.")
 
         # 6. Save segments to metadata for 'Quick Fix' functionality
-        meta_path = os.path.join(output_dir, "metadata.json")
         if os.path.exists(meta_path):
             with open(meta_path, "r") as f:
                 meta = json.load(f)
-            # 'segments' is calculated during Dynamic Detection
             # Always save the actual pose_boxes used for slicing (whether detected or fallback)
             if 'pose_boxes' in locals():
                 meta["slice_segments"] = pose_boxes[:num_poses]
