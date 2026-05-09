@@ -45,3 +45,27 @@ checkpoint/
 backend/Output_Saves/
 backend/saves/
 legacy_archive/
+
+# Video Processing & Envs
+VideoCreation/
+venv/
+**/venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+
+# VideoCreation specific ignores
+VideoCreation/venv*/
+VideoCreation/models/
+VideoCreation/**/*.pth
+VideoCreation/**/*.gguf
+VideoCreation/**/*.bin
+VideoCreation/**/*.ckpt
+VideoCreation/**/*.safetensors
+VideoCreation/**/*.onnx
+VideoCreation/outputs/
+VideoCreation/ComfyUI_Backend/user/
+VideoCreation/ComfyUI_Backend/input/
+VideoCreation/ComfyUI_Backend/output/
+VideoCreation/ComfyUI_Backend/temp/
+VideoCreation/ComfyUI_Backend/models/

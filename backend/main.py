@@ -1423,181 +1423,151 @@ async def slice_turnaround(req: SliceRequest):
                                 return {"status": "success", "urls": sliced_urls[:num_poses], "project_id": pid}
             
         # 4. Character Isolation Strategy
-        segments = []
-        is_fixed_grid = False
+        num_poses = req.num_poses or 5
         
-        # DECISION LOGIC: 
-        # If this is a "Working Turnaround" (pivoted 5-slot sheet), we MUST use Fixed Grid.
-        # If this is an "Original" or "Master" (which might be 4-person), we MUST use Dynamic.
-        is_working_sheet = "_working" in sheet_path or "_turnaround.png" in sheet_path
-        # Wait, if it's A00014_turnaround.png, it could be the pivoted one OR the original.
-        # Let's check the metadata to see if we've pivoted yet.
+        # 4.1. Prepare mask for detection (ignore background)
+        detection_img = image.convert("RGBA")
+        data = np.array(detection_img)
+        r, g, b = data[:, :, 0], data[:, :, 1], data[:, :, 2]
+        
+        corners = [data[0,0], data[0,-1], data[-1,0], data[-1,-1]]
+        avg_corner = np.mean(corners, axis=0)
+        is_white_bg = np.mean(avg_corner[:3]) > 128
+        
+        # Use a more sensitive threshold for gap detection
+        if is_white_bg:
+            detect_thresh = min(225, (req.foreground_threshold or 240) - 15)
+            mask = (r < detect_thresh) | (g < detect_thresh) | (b < detect_thresh)
+        else:
+            detect_thresh = max(30, (req.foreground_threshold or 15) + 15)
+            mask = (r > detect_thresh) | (g > detect_thresh) | (b > detect_thresh)
+            
+        # 4.2. Horizontal Projection
+        projection = np.sum(mask, axis=0)
+        
+        # 4.3. Find segments (islands of pixels)
+        min_pixels_in_col = 15 
+        in_segment = False
+        start_x = 0
+        temp_segments = []
+        for x, val in enumerate(projection):
+            if val > min_pixels_in_col and not in_segment:
+                start_x = x
+                in_segment = True
+            elif val <= min_pixels_in_col and in_segment:
+                temp_segments.append([start_x, x])
+                in_segment = False
+        if in_segment:
+            temp_segments.append([start_x, w])
+
+        # 4.4. OVERSIZE SPLITTING: If a segment is too wide, it likely contains 2 people
+        segments = []
+        for s in temp_segments:
+            sw = s[1] - s[0]
+            if sw > (w / num_poses) * 1.5: # Generic oversize check
+                logger.info(f"  Detected oversize segment ({sw}px). Searching for thinnest split point...")
+                search_range = projection[s[0] + 50 : s[1] - 50]
+                if len(search_range) > 0:
+                    min_val_idx = np.argmin(search_range)
+                    split_x = s[0] + 50 + min_val_idx
+                    logger.info(f"    Surgical split found at x={split_x} (Density: {projection[split_x]})")
+                    segments.append([s[0], split_x])
+                    segments.append([split_x, s[1]])
+                else:
+                    mid = s[0] + (sw // 2)
+                    segments.append([s[0], mid])
+                    segments.append([mid, s[1]])
+            else:
+                segments.append(s)
+
+        # 4.5. Refine segments (merge small gaps)
+        refined = []
+        min_gap = 50 
+        if segments:
+            curr_s, curr_e = segments[0]
+            for next_s, next_e in segments[1:]:
+                if next_s - curr_e < min_gap:
+                    curr_e = next_e
+                else:
+                    refined.append((curr_s, curr_e))
+                    curr_s, curr_e = next_s, next_e
+            refined.append((curr_s, curr_e))
+            
+        refined = [s for s in refined if (s[1] - s[0]) > 40]
+        num_detected_islands = len(refined)
+
+        # 5. DECISION LOGIC: 
+        # If this is a standard size AND we see 5 people OR it's already pivoted, use Fixed Grid.
+        is_fixed_grid = False
+        is_standard_width = (w == 1536 or w == 2560)
+        
+        # Meta check for pivot status
         has_pivoted = False
         meta_path = os.path.join(output_dir, "metadata.json")
-        meta = {}
         if os.path.exists(meta_path):
             with open(meta_path, "r") as f:
                 meta = json.load(f)
-                # LOCK-IN: Use Fixed Grid if we have already pivoted (even if filename changed)
                 has_pivoted = meta.get("image_url", "").endswith("_working.png") or len(meta.get("slice_segments", [])) == 5
         
-        if (w == 1536 or w == 2560) and has_pivoted:
-            logger.info(f"  Surgical Mode: Pivoted 5-slot sheet detected. Using Fixed Grid Slicing.")
-            is_fixed_grid = True
-            col_w = 307 if w == 1536 else 512
-            segments = [[i * col_w, (i + 1) * col_w] for i in range(5)]
-            
-        # 5. EXECUTION BRANCHES
-        num_poses = req.num_poses or 5
         pose_boxes = []
         slot_to_island = {}
-        refined = []
         avg_island_width = 512
-        
-        if is_fixed_grid:
-            # BRANCH A: SURGICAL PATH (Stable 5-Person)
-            # ZERO GUESSING. Exactly the 512px chunks. No padding, no mapping.
-            logger.info(f"  BRANCH A (Surgical): Using ZERO-GUESSING fixed grid (col_w={col_w}).")
+
+        if is_standard_width and (has_pivoted or num_detected_islands == 5):
+            logger.info(f"  BRANCH A (Surgical): Standard layout detected ({num_detected_islands} islands). Using Fixed Grid.")
+            is_fixed_grid = True
+            col_w = 307 if w == 1536 else 512
+            # Override segments with perfectly aligned grid
+            segments = [[i * col_w, (i + 1) * col_w] for i in range(num_poses)]
             pose_boxes = segments
             slot_to_island = {i: i for i in range(num_poses)}
             refined = segments
             avg_island_width = col_w
         else:
-            # BRANCH B: DYNAMIC PATH (4-Person to 5-Person)
-            # SMART MAPPING & PADDING.
-            logger.info("  BRANCH B (Dynamic): Irregular sheet detected. Using Smart Mapping.")
+            # BRANCH B: DYNAMIC PATH
+            logger.info(f"  BRANCH B (Dynamic): Irregular sheet detected ({num_detected_islands} islands). Using Smart Mapping.")
             
-            # 1. Prepare mask for detection (ignore background)
-            detection_img = image.convert("RGBA")
-            data = np.array(detection_img)
-            r, g, b = data[:, :, 0], data[:, :, 1], data[:, :, 2]
-            
-            corners = [data[0,0], data[0,-1], data[-1,0], data[-1,-1]]
-            avg_corner = np.mean(corners, axis=0)
-            is_white_bg = np.mean(avg_corner[:3]) > 128
-            
-            # Use a more sensitive threshold for gap detection
-            if is_white_bg:
-                detect_thresh = min(225, (req.foreground_threshold or 240) - 15)
-                mask = (r < detect_thresh) | (g < detect_thresh) | (b < detect_thresh)
-            else:
-                detect_thresh = max(30, (req.foreground_threshold or 15) + 15)
-                mask = (r > detect_thresh) | (g > detect_thresh) | (b > detect_thresh)
-                
-            # 2. Horizontal Projection
-            projection = np.sum(mask, axis=0)
-            
-            # 3. Find segments (islands of pixels)
-            min_pixels_in_col = 15 # More sensitive to thin characters
-            in_segment = False
-            start_x = 0
-            temp_segments = []
-            for x, val in enumerate(projection):
-                if val > min_pixels_in_col and not in_segment:
-                    start_x = x
-                    in_segment = True
-                elif val <= min_pixels_in_col and in_segment:
-                    temp_segments.append([start_x, x])
-                    in_segment = False
-            if in_segment:
-                temp_segments.append([start_x, w])
-
-            # 4. OVERSIZE SPLITTING: If a segment is too wide, it likely contains 2 people
-            # Use the "Thinnest Point" strategy: find the column with the least pixels to split.
-            for s in temp_segments:
-                sw = s[1] - s[0]
-                if sw > 450:
-                    logger.info(f"  Detected oversize segment ({sw}px). Searching for thinnest split point...")
-                    # Search for the minimum value in the projection within this segment
-                    search_range = projection[s[0] + 50 : s[1] - 50]
-                    if len(search_range) > 0:
-                        min_val_idx = np.argmin(search_range)
-                        split_x = s[0] + 50 + min_val_idx
-                        logger.info(f"    Surgical split found at x={split_x} (Density: {projection[split_x]})")
-                        segments.append([s[0], split_x])
-                        segments.append([split_x, s[1]])
-                    else:
-                        # Fallback to middle if search range is invalid
-                        mid = s[0] + (sw // 2)
-                        segments.append([s[0], mid])
-                        segments.append([mid, s[1]])
-                else:
-                    segments.append(s)
-
-            # 5. Refine segments (merge small gaps, filter noise)
-            min_gap = 50 # Slightly wider gap requirement
-            if segments:
-                curr_s, curr_e = segments[0]
-                for next_s, next_e in segments[1:]:
-                    # Merge if gap is tiny OR if segments are tiny (likely noise)
-                    if next_s - curr_e < min_gap:
-                        curr_e = next_e
-                    else:
-                        refined.append((curr_s, curr_e))
-                        curr_s, curr_e = next_s, next_e
-                refined.append((curr_s, curr_e))
-                
-            # Filter out very narrow segments (likely noise)
-            refined = [s for s in refined if (s[1] - s[0]) > 40]
-                
-            logger.info(f"    Dynamic Slicer: Found {len(refined)} potential character islands.")
-            
-            # 6. BEST FIT MAPPING: Handle N characters into 5 slots by minimizing total distance
-            if 0 < len(refined) <= num_poses:
+            # BEST FIT MAPPING
+            if 0 < num_detected_islands <= num_poses:
                 ideal_centers = [(i + 0.5) * (w / num_poses) for i in range(num_poses)]
                 island_centers = [(s + e) / 2 for s, e in refined]
-                
-                # Find the best combination of slot indices for the detected islands (maintaining order)
                 from itertools import combinations
                 best_slots = None
                 min_total_dist = float('inf')
-                
-                for combo in combinations(range(num_poses), len(refined)):
-                    total_dist = sum(abs(island_centers[j] - ideal_centers[combo[j]]) for j in range(len(refined)))
+                for combo in combinations(range(num_poses), num_detected_islands):
+                    total_dist = sum(abs(island_centers[j] - ideal_centers[combo[j]]) for j in range(num_detected_islands))
                     if total_dist < min_total_dist:
                         min_total_dist = total_dist
                         best_slots = combo
-                
                 for j, slot_idx in enumerate(best_slots):
                     slot_to_island[slot_idx] = j
 
-            # Calculate average island width to use for empty slots
-            if len(refined) > 0:
-                avg_island_width = np.mean([e - s for s, e in refined])
-            else:
-                avg_island_width = w / num_poses
+            avg_island_width = np.mean([e - s for s, e in refined]) if refined else (w / num_poses)
 
-            # 7. Construct pose boxes based on mapping
+            # Construct pose boxes based on mapping
             for i in range(num_poses):
                 if i in slot_to_island:
-                    # Use detected island bounds with padding
                     s, e = refined[slot_to_island[i]]
-                    # Use a fixed width based on the island itself to avoid bleed-in
                     char_w = e - s
                     center_x = (s + e) / 2
-                    crop_w = int(char_w * 1.3) # Consistent 30% padding
+                    crop_w = int(char_w * 1.3)
                     pose_boxes.append((max(0, int(center_x - crop_w/2)), min(w, int(center_x + crop_w/2))))
                 else:
-                    # SMART GAP CENTERING: Find the gap between actual neighbors
                     left_neighbor_x = 0
                     for prev_slot in range(i - 1, -1, -1):
                         if prev_slot in slot_to_island:
                             left_neighbor_x = refined[slot_to_island[prev_slot]][1]
                             break
-                    
                     right_neighbor_x = w
                     for next_slot in range(i + 1, num_poses):
                         if next_slot in slot_to_island:
                             right_neighbor_x = refined[slot_to_island[next_slot]][0]
                             break
-                    # Center perfectly in the available gap
                     center_x = (left_neighbor_x + right_neighbor_x) / 2
-                    logger.info(f"    Smart Gap for slot {i+1}: Centering between x={left_neighbor_x} and x={right_neighbor_x} (Center: {center_x})")
-                    
                     crop_w = int(avg_island_width * 1.2) 
                     pose_boxes.append((max(0, int(center_x - crop_w/2)), min(w, int(center_x + crop_w/2))))
             
-            logger.info(f"    Best Fit Mapping: Assigned {len(slot_to_island)} islands. (Avg Width: {avg_island_width:.1f}px)")
+            logger.info(f"    Mapping complete: Assigned {len(slot_to_island)} islands. (Avg Width: {avg_island_width:.1f}px)")
 
         has_patched_image = False
         # Pass 1: Extraction and Auto-Isolation
@@ -1832,13 +1802,23 @@ async def slice_turnaround(req: SliceRequest):
             orig_segment_count = len(segments)
             if orig_segment_count == 5:
                 logger.info("  5-person sheet detected. Preserving ORIGINAL 'Golden Base' for quality.")
+                meta["is_pivoted"] = False
                 # We keep the original image_url, but we still update segments for hard-wall protection
                 meta["slice_segments"] = segments 
             else:
                 logger.info(f"  Irregular sheet ({orig_segment_count} poses) detected. PIVOTING to 5-slot stitched sheet for stability.")
+                meta["is_pivoted"] = True
                 meta["image_url"] = f"/output_saves/{pid}/{working_name}"
                 # Save the new fixed boundaries
                 meta["slice_segments"] = [[i*512 + 100, i*512 + 412] for i in range(num_poses)]
+                
+                # --- PIVOTED GOLDEN BASE ---
+                # Save a pristine copy of the white 5-slot sheet we just created
+                pivoted_backup = os.path.join(output_dir, f"{pid}_turnaround_PIVOTED.png")
+                if not os.path.exists(pivoted_backup):
+                    shutil.copy2(working_path, pivoted_backup)
+                    logger.info(f"  Pivoted Golden Base created for Branch 2: {pivoted_backup}")
+                
                 # Also copy the working sheet to the base turnaround name for safety in future loads
                 shutil.copy2(working_path, os.path.join(output_dir, f"{pid}_turnaround.png"))
             
@@ -2330,16 +2310,50 @@ async def correct_pose(req: CorrectPoseRequest):
     try:
         logger.info(f"Correcting pose on sheet {req.sheet_url} for project {req.project_id}")
         
-        # 1. Resolve images
-        sheet_path = resolve_image_path(req.sheet_url)
-        if not os.path.exists(sheet_path):
-            raise HTTPException(status_code=404, detail="Sheet not found")
+        # Resolve images
+        current_sheet_path = resolve_image_path(req.sheet_url)
+        if not os.path.exists(current_sheet_path):
+            raise HTTPException(status_code=404, detail="Current sheet not found")
             
-        sheet_img = Image.open(sheet_path).convert("RGB")
+        def open_safe_rgb(path):
+            img = Image.open(path)
+            if img.mode in ("RGBA", "P"):
+                # Paste onto white background to handle transparency
+                bg = Image.new("RGB", img.size, (255, 255, 255))
+                if img.mode == "P": img = img.convert("RGBA")
+                bg.paste(img, (0, 0), img)
+                return bg
+            return img.convert("RGB")
+
+        # GOLDEN BASE: Use original for standard sheets, current for pivoted ones
+        project_dir = os.path.join("Output_Saves", req.project_id)
+        meta_path = os.path.join(project_dir, "metadata.json")
+        is_pivoted = False
+        if os.path.exists(meta_path):
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+                is_pivoted = meta.get("is_pivoted", False)
+                
+        original_sheet_path = os.path.join(project_dir, f"{req.project_id}_turnaround_ORIGINAL.png")
+        current_sheet_img = open_safe_rgb(current_sheet_path)
+        
+        # Determine which "Golden Base" to use
+        target_base = None
+        if not is_pivoted and os.path.exists(original_sheet_path):
+            target_base = original_sheet_path
+            logger.info(f"  Branch 1 (Preserved) detected. Using ORIGINAL sheet as reference.")
+        elif is_pivoted and os.path.exists(pivoted_sheet_path):
+            target_base = pivoted_sheet_path
+            logger.info(f"  Branch 2 (Pivoted) detected. Using PIVOTED Golden Base as reference.")
+            
+        if target_base:
+            sheet_img = open_safe_rgb(target_base)
+        else:
+            logger.info(f"  No Golden Base found for this branch. Using current sheet as reference.")
+            sheet_img = current_sheet_img.copy()
         
         # Resolve mask
         mask_img = None
-        project_dir = os.path.join("Output_Saves", req.project_id)
         meta_path = os.path.join(project_dir, "metadata.json")
 
         if req.slice_index is not None:
@@ -2382,17 +2396,10 @@ async def correct_pose(req: CorrectPoseRequest):
                 mask_img = Image.new("L", sheet_img.size, 0)
                 from PIL import ImageDraw
                 draw = ImageDraw.Draw(mask_img)
-                # Fill the entire vertical strip between the walls
                 draw.rectangle([start_x, 0, end_x, sheet_img.height], fill=255)
-                
-                # Debug save mask
-                debug_dir = os.path.join(project_dir)
-                os.makedirs(debug_dir, exist_ok=True)
-                mask_img.save(os.path.join(debug_dir, f"debug_mask_{int(time.time()) % 10000}.png"))
                 
             except Exception as me:
                 logger.error(f"  Failed to generate surgical mask: {me}")
-                logger.error(traceback.format_exc())
         
         if mask_img is None:
             # Decode manual mask (Studio mode)
@@ -2402,8 +2409,6 @@ async def correct_pose(req: CorrectPoseRequest):
             mask_img = Image.open(io.BytesIO(mask_data)).convert("L")
         
         # 2. Get Metadata for style consistency
-        project_dir = os.path.join("Output_Saves", req.project_id)
-        meta_path = os.path.join(project_dir, "metadata.json")
         anchor_prompt = ""
         if os.path.exists(meta_path):
             with open(meta_path, "r") as f:
@@ -2417,18 +2422,13 @@ async def correct_pose(req: CorrectPoseRequest):
         # 4. Load FLUX Fill
         pipe = manager.load_flux_fill()
         
-        # DEBUG: Save mask
-        debug_mask_path = os.path.join(project_dir, f"debug_mask_{uuid.uuid4().hex[:4]}.png")
-        mask_img.save(debug_mask_path)
-        logger.info(f"  Debug mask saved: {debug_mask_path}")
-        
         def do_fill():
             return pipe(
                 prompt=full_prompt,
                 image=sheet_img,
                 mask_image=mask_img,
-                num_inference_steps=50, # Higher steps for better structural change
-                guidance_scale=4.5, # Stronger guidance for rotation changes
+                num_inference_steps=50, 
+                guidance_scale=4.5,
                 width=sheet_img.width,
                 height=sheet_img.height,
             ).images[0]
@@ -2436,7 +2436,6 @@ async def correct_pose(req: CorrectPoseRequest):
         image = await run_in_threadpool(do_fill)
         
         # 5. Clean up the corrected area to prevent background artifacts
-        # We run rembg on the corrected image to isolate the character
         logger.info("  Cleaning background of corrected pose...")
         image_no_bg = await run_in_threadpool(
             remove, 
@@ -2444,24 +2443,46 @@ async def correct_pose(req: CorrectPoseRequest):
             session=rembg_session
         )
         
-        # 6. Composite the clean character back onto the original sheet
-        # First, prepare a "clean" original sheet by wiping the masked area to the background color
-        # Detect background color from corners of original sheet
-        sheet_arr = np.array(sheet_img)
-        corners = [sheet_arr[0,0], sheet_arr[0,-1], sheet_arr[-1,0], sheet_arr[-1,-1]]
-        avg_bg = tuple(np.mean(corners, axis=0).astype(int))
+        # 6. Composite the clean character back onto the CURRENT sheet (preserving other fixes)
+        # First, prepare a "clean" background by wiping the masked area to the background color
+        # Multi-point background detection: Sample corners and mid-edges (10px inset to avoid borders)
+        from collections import Counter
+        current_arr = np.array(current_sheet_img)
+        h_arr, w_arr = current_arr.shape[0], current_arr.shape[1]
+        inset = 10
+        sample_points = [
+            current_arr[inset, inset], current_arr[inset, w_arr-1-inset], 
+            current_arr[h_arr-1-inset, inset], current_arr[h_arr-1-inset, w_arr-1-inset],
+            current_arr[inset, w_arr//2], current_arr[h_arr-1-inset, w_arr//2],
+            current_arr[h_arr//2, inset], current_arr[h_arr//2, w_arr-1-inset]
+        ]
+        point_tuples = [tuple(p) for p in sample_points]
+        avg_bg = Counter(point_tuples).most_common(1)[0][0]
         
-        # Create a "clean" background by filling the masked area with avg_bg
-        clean_bg = sheet_img.copy()
+        # SAFETY: If the detected background is very dark OR not sufficiently light, fallback to white.
+        if sum(avg_bg) < 300: 
+            logger.info(f"  Background check returned {avg_bg}. Too dark for turnaround. Falling back to white.")
+            avg_bg = (255, 255, 255)
+            
+        # 6.1. Create a "clean" background by filling the masked area with avg_bg
+        clean_bg = current_sheet_img.copy()
         wipe_mask = mask_img.point(lambda p: 255 if p > 128 else 0)
-        bg_fill = Image.new("RGB", sheet_img.size, avg_bg)
+        bg_fill = Image.new("RGB", current_sheet_img.size, avg_bg)
         clean_bg.paste(bg_fill, (0, 0), wipe_mask)
         
-        # Now paste the isolated character from the corrected image
-        # SURGICAL PATCH: Use the wipe_mask to ensure ONLY the target area is updated
-        # This prevents the AI from making subtle changes to non-target slices.
+        # 6.2. Composite the isolated character
+        # We must use the character's alpha channel AND the surgical slot mask
+        # to ensure ONLY the character is updated and ONLY in the target slot.
+        if image_no_bg.mode != 'RGBA':
+            image_no_bg = image_no_bg.convert('RGBA')
+            
+        char_alpha = image_no_bg.getchannel('A')
+        combined_mask = Image.new("L", current_sheet_img.size, 0)
+        # Only use alpha where the surgical mask is active
+        combined_mask.paste(char_alpha, (0, 0), wipe_mask)
+        
         final_image = clean_bg.copy()
-        final_image.paste(image_no_bg, (0, 0), wipe_mask)
+        final_image.paste(image_no_bg, (0, 0), combined_mask)
         
         # Save the result
         filename = f"corrected_{uuid.uuid4().hex[:8]}.png"
@@ -2469,7 +2490,6 @@ async def correct_pose(req: CorrectPoseRequest):
         final_image.save(filepath)
         
         # PERSIST NEW SHEET TO METADATA
-        meta_path = os.path.join(project_dir, "metadata.json")
         if os.path.exists(meta_path):
             with open(meta_path, "r") as f:
                 meta = json.load(f)
