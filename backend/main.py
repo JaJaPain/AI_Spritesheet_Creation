@@ -11,7 +11,7 @@ import shutil
 import base64
 import io
 from typing import Optional, List
-from fastapi import FastAPI, Body, HTTPException, Request
+from fastapi import FastAPI, Body, HTTPException, Request, File, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.concurrency import run_in_threadpool
@@ -148,6 +148,40 @@ def resolve_image_path(url: str) -> str:
                 return fallback
                 
     return path
+
+@app.post("/upload-turnaround")
+async def upload_turnaround(file: UploadFile = File(...)):
+    """Accepts a user-uploaded turnaround sheet and initializes a project."""
+    try:
+        pid = get_next_project_id()
+        project_dir = os.path.join("Output_Saves", pid)
+        os.makedirs(project_dir, exist_ok=True)
+        
+        file_path = os.path.join(project_dir, f"{pid}_turnaround.png")
+        with open(file_path, "wb") as f:
+            content = await file.read()
+            f.write(content)
+            
+        # Also save as ORIGINAL
+        shutil.copy2(file_path, os.path.join(project_dir, f"{pid}_turnaround_ORIGINAL.png"))
+        
+        # Create metadata
+        metadata = {
+            "id": pid,
+            "prompt": "Uploaded Turnaround",
+            "created_at": time.time(),
+            "updated_at": time.time(),
+            "image_url": f"/output_saves/{pid}/{pid}_turnaround.png",
+            "all_slice_versions": [],
+            "selected_indices": [0, 0, 0, 0, 0]
+        }
+        with open(os.path.join(project_dir, "metadata.json"), "w") as f:
+            json.dump(metadata, f, indent=2)
+            
+        return {"status": "success", "project_id": pid, "image_url": metadata["image_url"]}
+    except Exception as e:
+        logger.error(f"Error uploading turnaround: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 class ModelManager:
     def __init__(self):
@@ -1246,6 +1280,14 @@ async def list_projects():
                     
         saves.sort(key=lambda x: x["timestamp"], reverse=True)
         return {"status": "success", "saves": saves}
+    except Exception as e:
+        logger.error(f"Error listing projects: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/project/{project_id}")
+async def delete_project(project_id: str):
+    try:
+        project_dir = os.path.join("Output_Saves", project_id)
         if os.path.exists(project_dir):
             logger.info(f"Deleting project directory: {project_dir}")
             shutil.rmtree(project_dir)

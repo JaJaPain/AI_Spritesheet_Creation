@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { Sparkles, Wand2, Play, Download, Settings, Image as ImageIcon, Loader2, ArrowLeft, RefreshCw, Save, Upload, X, Check, FolderOpen, HelpCircle, Trash2, ChevronLeft, ChevronRight } from 'lucide-react'
+import { Sparkles, Wand2, Play, Download, Settings, Image as ImageIcon, Loader2, ArrowLeft, RefreshCw, Save, Upload, X, Check, FolderOpen, HelpCircle, Trash2, ChevronLeft, ChevronRight, Video } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 
 function LivePreview({ rig, params }) {
@@ -503,6 +503,7 @@ function App() {
   const [numGenerations, setNumGenerations] = useState(1)
   const [zoomLevel, setZoomLevel] = useState(1)
   const turnaroundCanvasRef = useRef(null)
+  const fileInputRef = useRef(null)
   
   // Slicing State
   const [slicedUrls, setSlicedUrls] = useState([])
@@ -878,7 +879,7 @@ Continue?`;
       });
       const data = await res.json();
       if (data.status === 'success') {
-        handleLoadProjects();
+        fetchSavedProjects();
       }
     } catch (err) {
       console.error("Reset failed:", err);
@@ -938,6 +939,36 @@ Continue?`;
     setIsTurnaroundModalOpen(true);
     setWandHistory([]);
   }
+
+  const handleImageUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    
+    const formData = new FormData();
+    formData.append('file', file);
+    
+    try {
+      const res = await fetch(`${apiBase}/upload-turnaround`, {
+        method: 'POST',
+        body: formData
+      });
+      const data = await res.json();
+      if (data.status === 'success') {
+        const newProject = {
+          id: data.project_id,
+          image_url: data.image_url,
+          prompt: "Uploaded Turnaround"
+        };
+        setProjectId(data.project_id);
+        setMainImage(data.image_url);
+        setSavedProjects(prev => [newProject, ...prev]);
+        handleLoadProject(newProject);
+      }
+    } catch (err) {
+      console.error("Upload failed:", err);
+      alert("Upload failed. See console for details.");
+    }
+  };
 
   const handleWandClick = (e) => {
     if (!isWandActive || !turnaroundUrl) return;
@@ -1524,6 +1555,22 @@ Continue?`;
                   <button 
                     className="btn-secondary" 
                     style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.6rem 1rem', fontSize: '0.85rem' }}
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={!apiReady}
+                  >
+                    <Upload size={16} />
+                    Upload Sheet
+                  </button>
+                  <input 
+                    type="file" 
+                    ref={fileInputRef} 
+                    style={{ display: 'none' }} 
+                    onChange={handleImageUpload}
+                    accept="image/*"
+                  />
+                  <button 
+                    className="btn-secondary" 
+                    style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.6rem 1rem', fontSize: '0.85rem' }}
                     onClick={() => fetchSavedProjects(false)}
                     disabled={!apiReady}
                   >
@@ -2066,6 +2113,28 @@ Continue?`;
                       >
                         {loading ? <Loader2 size={12} className="animate-spin" /> : <Wand2 size={12} />}
                         {loading ? 'Processing...' : `Quick Fix ${i+1}`}
+                      </button>
+                      <button 
+                        className="btn-secondary" 
+                        style={{ 
+                          marginTop: '0.4rem',
+                          fontSize: '0.65rem', 
+                          color: '#38bdf8', 
+                          borderColor: 'rgba(56, 189, 248, 0.3)', 
+                          width: '100%', 
+                          display: 'flex', 
+                          alignItems: 'center', 
+                          justifyContent: 'center', 
+                          gap: '0.4rem'
+                        }}
+                        onClick={() => {
+                          const url = slicedUrls[i];
+                          const videoForgeUrl = `http://localhost:8001/?imageUrl=${encodeURIComponent(url)}`;
+                          window.open(videoForgeUrl, '_blank');
+                        }}
+                      >
+                        <Video size={12} />
+                        Push to Video Forge
                       </button>
                     </div>
                   </div>
