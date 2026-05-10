@@ -1883,8 +1883,8 @@ Continue?`;
                           const templatePrompt = `Image 1 role: identity anchor. Preserve the exact approved anchor sprite identity.
 Subject: Side view sprite walking form left to right. Character stays in one place as if on a treadmill.
 Primary request: create 8-frame walking sequence.
-Look and rendering: High-resolution pixelated sprite art. Crisp chunky sprite edges. Preserve visible pixel structure. No painterly rendering, no airbrushing, no soft gradients.
-Background: Opaque exact flat chroma green background #00FF00.`;
+Look and rendering: High-resolution character art, clean cinematic lighting, sharp details. No blur, no distortions.
+Background: Opaque flat digital green background #00B140.`;
                           setVideoPrompt(templatePrompt);
                           setStage('video-forge');
                           // Trigger auto-start/warmup on the main backend
@@ -2019,7 +2019,7 @@ Background: Opaque exact flat chroma green background #00FF00.`;
                     padding: '0', 
                     overflow: 'hidden', 
                     height: '300px', 
-                    background: '#00FF00' /* VISIBLE GREEN SCREEN */,
+                    background: '#00B140' /* MUTED DIGITAL GREEN SCREEN */,
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center'
