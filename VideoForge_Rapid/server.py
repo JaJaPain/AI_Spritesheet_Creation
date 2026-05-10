@@ -4,6 +4,7 @@ import uuid
 import json
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from PIL import Image
 import shutil
 
@@ -16,6 +17,9 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 app = FastAPI()
+
+# Serve generated videos as static files
+app.mount("/outputs", StaticFiles(directory=OUTPUT_DIR), name="outputs")
 
 app.add_middleware(
     CORSMiddleware,
@@ -64,9 +68,19 @@ async def forge_video(
             with open(temp_path, "wb") as buffer:
                 shutil.copyfileobj(image.file, buffer)
         elif image_url:
-            # For now, we assume local path or full URL
-            # In a real setup, we'd download it
-            pass
+            import requests as req
+            # Resolve local paths to full URLs on the main backend
+            actual_url = image_url
+            if image_url.startswith("/"):
+                main_port = os.getenv("MAIN_PORT", "8000")
+                actual_url = f"http://localhost:{main_port}{image_url}"
+            
+            print(f"Downloading sprite from: {actual_url}")
+            resp = req.get(actual_url, timeout=15)
+            if resp.status_code != 200:
+                raise HTTPException(status_code=400, detail=f"Failed to download image from {actual_url} (status {resp.status_code})")
+            with open(temp_path, "wb") as buffer:
+                buffer.write(resp.content)
         else:
             raise HTTPException(status_code=400, detail="No image provided")
 
@@ -86,14 +100,40 @@ async def forge_video(
         canvas.alpha_composite(img_resized, (paste_x, paste_y))
         canvas.convert("RGB").save(temp_path, "PNG")
         
-        # 2. Trigger Workflow (Mocking the wrapper call for now)
-        progress_state["status"] = "Forging (4-step Rapid Cycle)..."
-        progress_state["progress"] = 20
+        # 2. Call ComfyUI via our wrapper
+        from comfy_wrapper import ComfyWrapper
+        wrapper = ComfyWrapper(COMFY_ADDR)
         
-        # Logic to call ComfyUI with wan2.2_rapid_workflow.json would go here
-        # For now, we are setting up the structure
+        # Load the rapid workflow
+        workflow_path = os.path.join(os.path.dirname(__file__), "workflow_api.json")
+        with open(workflow_path, 'r') as f:
+            workflow = json.load(f)
+            
+        # Update workflow with our specific run data
+        workflow["58"]["inputs"]["image"] = temp_path # Load Image Node
+        workflow["35"]["inputs"]["seed"] = seed # Sampler Node
+        workflow["35"]["inputs"]["steps"] = 4 # Force Rapid steps
+        workflow["35"]["inputs"]["cfg"] = 1.0 # Force Rapid CFG
+        workflow["63"]["inputs"]["num_frames"] = num_frames # Encode Node
         
-        return {"status": "success", "message": "Rapid generation started (Simulated)"}
+        # Override the text prompt
+        workflow["16"]["inputs"]["positive_prompt"] = prompt
+        
+        print(f"Requesting RAPID generation for: {prompt} (Seed: {seed})")
+        video_path = wrapper.run_workflow(workflow)
+        
+        if video_path:
+            # Move to our outputs
+            final_filename = f"rapid_out_{int(time.time())}.mp4"
+            final_path = os.path.join(OUTPUT_DIR, final_filename)
+            shutil.copy(video_path, final_path)
+            
+            progress_state["status"] = "Success"
+            progress_state["progress"] = 100
+            progress_state["latest_video"] = final_filename
+            return {"status": "success", "video_url": f"/outputs/{final_filename}"}
+        else:
+            raise Exception("ComfyUI failed to generate video")
 
     except Exception as e:
         progress_state["status"] = f"Error: {str(e)}"

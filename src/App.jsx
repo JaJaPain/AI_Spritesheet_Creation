@@ -322,52 +322,33 @@ function App() {
       let mainFound = false;
       let videoFound = false;
 
-      // Check existing bases first
-      try {
-        if (apiBase) {
-          const res = await fetch(`${apiBase}/`, { method: 'GET' });
-          const data = await res.json();
-          if (data.status === 'active') mainFound = true;
-        }
-      } catch (e) { /* ignore */ }
+      // Always scan ports to discover services
+      // (We can't rely on state variables in this closure since deps=[])
+      for (let p = 8000; p <= 8020; p++) {
+        const url = `http://localhost:${p}`;
 
-      try {
-        if (videoApiBase) {
-          const res = await fetch(`${videoApiBase}/status`, { method: 'GET' });
-          const data = await res.json();
-          if (data.identity === 'video-forge') videoFound = true;
-        }
-      } catch (e) { /* ignore */ }
-
-      // Scan ports 8000-8020 if anything is missing
-      if (!mainFound || !videoFound) {
-        for (let p = 8000; p <= 8020; p++) {
-          const url = `http://localhost:${p}`;
-          if (url === apiBase && mainFound) continue;
-          if (url === videoApiBase && videoFound) continue;
-
-          try {
-            const res = await fetch(`${url}/status`, { method: 'GET' });
-            if (res.ok) {
-              const data = await res.json();
-              if (data.identity === 'video-forge' && !videoFound) {
-                console.log(`Video Forge (Classic) discovered on port ${p}`);
-                setVideoApiBase(url);
-                setVideoEngineReady(true);
-                videoFound = true;
-              } else if (data.identity === 'video-forge-rapid') {
-                console.log(`Video Forge (Rapid) discovered on port ${p}`);
-                setRapidApiBase(url);
-                setRapidEngineReady(true);
-              } else if (data.identity === 'main-backend' && !mainFound) {
-                setApiBase(url);
-                setApiReady(true);
-                mainFound = true;
-              }
+        try {
+          const res = await fetch(`${url}/status`, { method: 'GET' });
+          if (res.ok) {
+            const data = await res.json();
+            if (data.identity === 'video-forge' && !videoFound) {
+              console.log(`Video Forge (Classic) discovered on port ${p}`);
+              setVideoApiBase(url);
+              setVideoEngineReady(true);
+              videoFound = true;
+            } else if (data.identity === 'video-forge-rapid' && !videoFound) {
+              console.log(`Video Forge (Rapid) discovered on port ${p}`);
+              setRapidApiBase(url);
+              setRapidEngineReady(true);
+              videoFound = true;
+            } else if (data.identity === 'main-backend' && !mainFound) {
+              setApiBase(url);
+              setApiReady(true);
+              mainFound = true;
             }
-          } catch (e) { /* silent */ }
-          if (mainFound && videoFound) break;
-        }
+          }
+        } catch (e) { /* silent - port not in use */ }
+        if (mainFound && videoFound) break;
       }
       
       setApiReady(mainFound);
@@ -460,28 +441,31 @@ function App() {
   useEffect(() => {
     let timeout = null;
     const pollHeartbeat = async () => {
-      if (!videoApiBase || !videoEngineReady) {
-        timeout = setTimeout(pollHeartbeat, 2000);
+      const activeBase = rapidEngineReady ? rapidApiBase : videoApiBase;
+      const isReady = rapidEngineReady || videoEngineReady;
+      
+      if (!activeBase || !isReady) {
+        timeout = setTimeout(pollHeartbeat, 5000);
         return;
       }
+      
       try {
-        const res = await fetch(`${videoApiBase}/status`);
-        const data = await res.json();
-        if (data.identity === 'video-forge') {
+        const res = await fetch(`${activeBase}/status`);
+        if (res.ok) {
+           const data = await res.json();
            setVideoHeartbeat(data);
            setIsWarmingUp(false);
         } else {
-           setVideoEngineReady(false);
+           // Engine might be transiently down
         }
       } catch (e) {
-        setVideoEngineReady(false);
         setVideoHeartbeat({ status: 'Offline', progress: 0 });
       }
       timeout = setTimeout(pollHeartbeat, 3000);
     };
     pollHeartbeat();
     return () => clearTimeout(timeout);
-  }, [videoApiBase, videoEngineReady]);
+  }, [videoApiBase, videoEngineReady, rapidApiBase, rapidEngineReady]);
 
   const handleForgeVideo = async () => {
     if (!selectedVideoSlice || !videoPrompt) return;
@@ -492,17 +476,42 @@ function App() {
       const formData = new FormData();
       // Ensure we strip cache busters if present
       const cleanUrl = selectedVideoSlice.split('?')[0];
-      formData.append('image_url', cleanUrl);
+      
+      // Select the active engine
+      const activeApi = rapidEngineReady ? rapidApiBase : videoApiBase;
+      const endpoint = rapidEngineReady ? '/forge' : '/generate';
+      
+      // For both engines, fetch the actual image blob and send as file upload
+      // This is more reliable than URL resolution across servers
+      const imgSrc = cleanUrl.startsWith('http') ? cleanUrl : `${apiBase}${cleanUrl}`;
+      try {
+        const imgResp = await fetch(imgSrc);
+        const imgBlob = await imgResp.blob();
+        formData.append('image', imgBlob, 'sprite_slice.png');
+      } catch (fetchErr) {
+        console.warn("Failed to fetch image blob, falling back to URL:", fetchErr);
+        formData.append('image_url', cleanUrl);
+      }
+      
       formData.append('prompt', videoPrompt);
       
-      const response = await fetch(`${videoApiBase}/generate`, {
+      const response = await fetch(`${activeApi}${endpoint}`, {
         method: 'POST',
         body: formData
       });
       
       if (response.ok) {
-        const blob = await response.blob();
-        setVideoUrl(URL.createObjectURL(blob));
+        // The rapid forge returns a JSON with a video_url, classic returns a blob
+        if (rapidEngineReady) {
+          const data = await response.json();
+          // We need to fetch the blob from the rapid server's output
+          const videoRes = await fetch(`${activeApi}${data.video_url}`);
+          const blob = await videoRes.blob();
+          setVideoUrl(URL.createObjectURL(blob));
+        } else {
+          const blob = await response.blob();
+          setVideoUrl(URL.createObjectURL(blob));
+        }
         setVideoStage('done');
       } else {
         try {
@@ -1910,7 +1919,7 @@ Flat opaque green background #2E8B57.`;
                         }}
                       >
                         <Video size={12} />
-                        Push to Video Forge
+                        {rapidEngineReady ? 'Push to RAPID Forge' : 'Push to Video Forge'}
                       </button>
                     </div>
                   </div>

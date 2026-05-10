@@ -1,3 +1,31 @@
+# Node
+node_modules/
+.npm/
+
+# Build
+dist/
+build/
+.next/
+
+# AI Models & Assets
+*.safetensors
+*.pth
+*.gguf
+*.ckpt
+VideoCreation/ComfyUI_Backend/models/
+VideoForge_Rapid/temp_uploads/
+VideoForge_Rapid/outputs/
+VideoCreation/temp_uploads/
+VideoCreation/outputs/
+VideoCreation/scratch/
+
+# Local Environment
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
 # Logs
 logs
 *.log
@@ -7,16 +35,9 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-node_modules
-dist
-dist-ssr
-*.local
-
-# Editor directories and files
-.vscode/*
-!.vscode/extensions.json
-.idea
-.DS_Store
+# Editor
+.vscode/
+.idea/
 *.suo
 *.ntvs*
 *.njsproj
@@ -24,48 +45,12 @@ dist-ssr
 *.sw?
 
 # Python
-backend/venv/
-backend/__pycache__/
-backend/output/
-backend/templates/*.png
-!backend/templates/default.png
-.env
-
-# AI Models (if stored locally)
-models/
-checkpoint/
-*.ckpt
-*.safetensors
-**/.u2net/
-**/.cache/
-**/.huggingface/
-**/.local/
-
-# Data and Outputs
-backend/Output_Saves/
-backend/saves/
-legacy_archive/
-
-# Video Processing & Envs
-VideoCreation/
-venv/
-**/venv/
 __pycache__/
-**/__pycache__/
 *.pyc
+backend/venv/
+backend/output/
+backend/Output_Saves/
 
-# VideoCreation specific ignores
-VideoCreation/venv*/
-VideoCreation/models/
-VideoCreation/**/*.pth
-VideoCreation/**/*.gguf
-VideoCreation/**/*.bin
-VideoCreation/**/*.ckpt
-VideoCreation/**/*.safetensors
-VideoCreation/**/*.onnx
-VideoCreation/outputs/
-VideoCreation/ComfyUI_Backend/user/
-VideoCreation/ComfyUI_Backend/input/
-VideoCreation/ComfyUI_Backend/output/
-VideoCreation/ComfyUI_Backend/temp/
-VideoCreation/ComfyUI_Backend/models/
+# ComfyUI / VideoCreation (large, local-only)
+VideoCreation/
+legacy_archive/

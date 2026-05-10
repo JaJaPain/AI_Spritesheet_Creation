@@ -642,12 +642,15 @@ class VideoForgeOrchestrator:
 
     def discover(self):
         """Check if any Video Forge is already running in our range."""
+        valid_identities = {"video-forge", "video-forge-rapid"}
         for p in range(self.search_range[0], self.search_range[1] + 1):
             url = f"http://localhost:{p}"
             try:
                 resp = requests.get(f"{url}/status", timeout=0.5)
-                if resp.json().get("identity") == "video-forge":
+                identity = resp.json().get("identity", "")
+                if identity in valid_identities:
                     self.active_url = url
+                    logger.info(f"Discovered Video Forge (identity: {identity}) at {url}")
                     return True
             except:
                 continue
@@ -684,16 +687,29 @@ class VideoForgeOrchestrator:
             
             logger.info(f"Launching Video Forge: {bat_path} on port {port} (Main App on {main_port})")
             
-            self.process = subprocess.Popen(
-                ["cmd", "/c", "run_everything.bat", str(port), main_port],
-                cwd=creation_dir,
-                creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0
-            )
+            # PRIORITY: Launch RAPID Forge if available
+            rapid_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "VideoForge_Rapid"))
+            if os.path.exists(rapid_dir):
+                logger.info(f"Launching RAPID Forge from {rapid_dir}...")
+                self.process = subprocess.Popen(
+                    ["cmd", "/c", "start", "/min", "start_rapid.bat"],
+                    cwd=rapid_dir,
+                    creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0
+                )
+                self.active_url = f"http://localhost:8002"
+                logger.info(f"Background Process Spawned. Waiting for discovery at {self.active_url}...")
+            else:
+                # FALLBACK: Launch CLASSIC Forge
+                logger.info("Rapid Forge folder not found. Falling back to Classic Forge...")
+                self.process = subprocess.Popen(
+                    ["cmd", "/c", "start", "/min", "run_everything.bat", str(port), main_port],
+                    cwd=creation_dir,
+                    creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0
+                )
+                self.active_url = f"http://localhost:{port}"
+                logger.info(f"Background Process Spawned. Waiting for discovery at {self.active_url}...")
             
             # Polling wait for readiness
-            self.active_url = f"http://localhost:{port}"
-            logger.info(f"Background Process Spawned (PID: {self.process.pid}). Waiting for discovery at {self.active_url}...")
-            
             for i in range(60): # Wait up to 60 seconds
                 time.sleep(1)
                 if self.discover():
@@ -719,8 +735,18 @@ async def warmup_video_forge(background_tasks: BackgroundTasks):
     """Tells the main backend to prepare and launch the Video Forge engine."""
     logger.info("Warmup request received from frontend. Offloading to background task.")
     manager.vram_handoff() # Free GPU memory
+    
+    # Check if already discovered before launching background task
+    if orchestrator.active_url:
+        return {"status": "success", "message": "Engine already active.", "url": orchestrator.active_url}
+    
+    # Quick check if it's already running but we haven't noticed
+    if orchestrator.discover():
+        return {"status": "success", "message": "Engine discovered.", "url": orchestrator.active_url}
+    
     background_tasks.add_task(orchestrator.start)
-    return {"status": "success", "message": "Warmup sequence initiated in background."}
+    # Return the expected URL so the frontend can start polling it
+    return {"status": "success", "message": "Warmup sequence initiated in background.", "url": "http://localhost:8002"}
 
 
 @app.get("/")
