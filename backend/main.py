@@ -152,6 +152,39 @@ def resolve_image_path(url: str) -> str:
                 
     return path
 
+def save_metadata_safe(meta_path, data, retries=5, delay=0.5):
+    """
+    Saves metadata to a JSON file safely using a temporary file and retries.
+    Prevents [WinError 32] and data corruption on Windows.
+    """
+    temp_path = meta_path + ".tmp"
+    for i in range(retries):
+        try:
+            # 1. Write to temporary file
+            with open(temp_path, "w") as f:
+                json.dump(data, f, indent=2)
+            
+            # 2. Move temp to target
+            if os.path.exists(meta_path):
+                try:
+                    os.remove(meta_path)
+                except:
+                    pass # May be locked, let rename try anyway
+            
+            os.rename(temp_path, meta_path)
+            return True
+        except Exception as e:
+            if i < retries - 1:
+                logger.warning(f"  Metadata save attempt {i+1} failed: {e}. Retrying in {delay}s...")
+                time.sleep(delay)
+            else:
+                logger.error(f"  CRITICAL: Failed to save metadata after {retries} attempts: {e}")
+                if os.path.exists(temp_path):
+                    try: os.remove(temp_path)
+                    except: pass
+                return False
+    return False
+
 @app.post("/upload-turnaround")
 async def upload_turnaround(file: UploadFile = File(...)):
     """Accepts a user-uploaded turnaround sheet and initializes a project."""
@@ -1490,8 +1523,9 @@ async def save_project(req: SaveProjectRequest):
             "selected_indices": req.selected_indices or [0, 0, 0, 0, 0]
         }
         
-        with open(os.path.join(project_dir, "metadata.json"), "w") as f:
-            json.dump(metadata, f, indent=2)
+        # Robust Save
+        meta_path = os.path.join(project_dir, "metadata.json")
+        save_metadata_safe(meta_path, metadata)
             
         return {"status": "success", "project_id": pid, "image_url": f"/output_saves/{pid}/{target_filename}"}
     except Exception as e:
@@ -1566,8 +1600,7 @@ async def slice_turnaround(req: SliceRequest):
         if "id" not in meta: meta["id"] = pid
         if "created_at" not in meta: meta["created_at"] = time.time()
         
-        with open(meta_path, "w") as f:
-            json.dump(meta, f)
+        save_metadata_safe(meta_path, meta)
 
             
         # Smart Cache: Only reuse if files exist AND sheet hasn't changed AND we aren't forcing
@@ -1591,7 +1624,13 @@ async def slice_turnaround(req: SliceRequest):
                                 # ... (we'll just let it fall through to detection if segments missing)
                                 pass 
                             else:
-                                return {"status": "success", "urls": sliced_urls[:num_poses], "project_id": pid}
+                                return {
+                                    "status": "success", 
+                                    "urls": sliced_urls[:num_poses], 
+                                    "project_id": pid,
+                                    "all_slice_versions": meta.get("all_slice_versions", []),
+                                    "selected_indices": meta.get("selected_indices", [0,0,0,0,0])
+                                }
             
         # 4. Character Isolation Strategy
         num_poses = req.num_poses or 5
@@ -1938,7 +1977,17 @@ async def slice_turnaround(req: SliceRequest):
         
         for i, character_sprite in enumerate(extracted_sprites):
             sw, sh = character_sprite.size
-            new_w, new_h = int(sw * global_scale), int(sh * global_scale)
+            
+            # GOLDEN SCALE ENFORCEMENT: Ensure individual slices don't jitter relative to master height
+            local_scale = global_scale
+            is_target = (req.target_slice_index is None or req.target_slice_index == i)
+            
+            # If the AI generated a taller sprite during a Quick Fix, scale it down to match the master height
+            if is_target and req.target_slice_index is not None and sh > max_sh:
+                logger.info(f"    Target slice {i+1} is taller than Master ({sh}px vs {max_sh}px). Enforcing scale consistency.")
+                local_scale = global_scale * (max_sh / sh)
+
+            new_w, new_h = int(sw * local_scale), int(sh * local_scale)
             resized = character_sprite.resize((new_w, new_h), Image.Resampling.LANCZOS)
             
             # 1. Save the individual normalized pose for rigging/display
@@ -1992,8 +2041,14 @@ async def slice_turnaround(req: SliceRequest):
 
         # 6. Finalize Metadata Updates
         if os.path.exists(meta_path):
-            with open(meta_path, "r") as f:
-                meta = json.load(f)
+            try:
+                with open(meta_path, "r") as f:
+                    meta_disk = json.load(f)
+                # Merge: Preserve the global_max_height we set earlier in memory
+                meta_disk["global_max_height"] = max_sh
+                meta = meta_disk
+            except Exception as e:
+                logger.warning(f"  Metadata merge failed: {e}")
             
             # Identify if we should PIVOT (irregular count) or PRESERVE (5-person golden base)
             orig_segment_count = len(segments)
@@ -2055,8 +2110,7 @@ async def slice_turnaround(req: SliceRequest):
                 if "limb_packs" in meta: meta["limb_packs"] = {}
                 if "animations" in meta: meta["animations"] = {}
                 
-            with open(meta_path, "w") as f:
-                json.dump(meta, f)
+            save_metadata_safe(meta_path, meta)
             logger.info(f"  Project metadata finalized with persistent versioning.")
 
         return {"status": "success", "urls": sliced_urls, "project_id": pid, "all_slice_versions": meta.get("all_slice_versions", [])}
@@ -2537,6 +2591,7 @@ async def correct_pose(req: CorrectPoseRequest):
                 is_pivoted = meta.get("is_pivoted", False)
                 
         original_sheet_path = os.path.join(project_dir, f"{req.project_id}_turnaround_ORIGINAL.png")
+        pivoted_sheet_path = os.path.join(project_dir, f"{req.project_id}_turnaround_PIVOTED.png")
         current_sheet_img = open_safe_rgb(current_sheet_path)
         
         # Determine which "Golden Base" to use
@@ -2693,12 +2748,15 @@ async def correct_pose(req: CorrectPoseRequest):
         
         # PERSIST NEW SHEET TO METADATA
         if os.path.exists(meta_path):
-            with open(meta_path, "r") as f:
-                meta = json.load(f)
-            meta["image_url"] = f"/output_saves/{req.project_id}/{filename}"
-            with open(meta_path, "w") as f:
-                json.dump(meta, f)
-            logger.info(f"  Updated project metadata with corrected sheet: {filename}")
+            try:
+                with open(meta_path, "r") as f:
+                    meta = json.load(f)
+                meta["image_url"] = f"/output_saves/{req.project_id}/{filename}"
+                meta["updated_at"] = time.time()
+                save_metadata_safe(meta_path, meta)
+                logger.info(f"  Updated project metadata with corrected sheet: {filename}")
+            except Exception as e:
+                logger.error(f"  Failed to update metadata in correct_pose: {e}")
             
         return {"status": "success", "url": f"/output_saves/{req.project_id}/{filename}"}
     except HTTPException:
