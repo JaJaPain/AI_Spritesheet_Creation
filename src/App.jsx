@@ -313,6 +313,8 @@ function App() {
   const [stage, setStage] = useState('prompt') // prompt, selecting-anchor, animating, editing, preview
   const [apiReady, setApiReady] = useState(false)
   const [videoApiBase, setVideoApiBase] = useState(null)
+  const [rapidApiBase, setRapidApiBase] = useState(null)
+  const [rapidEngineReady, setRapidEngineReady] = useState(false)
 
   useEffect(() => {
     let timeout = null;
@@ -349,9 +351,14 @@ function App() {
             if (res.ok) {
               const data = await res.json();
               if (data.identity === 'video-forge' && !videoFound) {
+                console.log(`Video Forge (Classic) discovered on port ${p}`);
                 setVideoApiBase(url);
                 setVideoEngineReady(true);
                 videoFound = true;
+              } else if (data.identity === 'video-forge-rapid') {
+                console.log(`Video Forge (Rapid) discovered on port ${p}`);
+                setRapidApiBase(url);
+                setRapidEngineReady(true);
               } else if (data.identity === 'main-backend' && !mainFound) {
                 setApiBase(url);
                 setApiReady(true);
@@ -1880,11 +1887,12 @@ Continue?`;
                         }}
                         onClick={async () => {
                           setSelectedVideoSlice(slicedUrls[i]);
-                          const templatePrompt = `Image 1 role: identity anchor. Preserve the exact approved anchor sprite identity.
-Subject: Side view sprite walking form left to right. Character stays in one place as if on a treadmill.
-Primary request: create 8-frame walking sequence.
-Look and rendering: High-resolution character art, clean cinematic lighting, sharp details. No blur, no distortions.
-Background: Opaque flat digital green background #00B140.`;
+                          const templatePrompt = `Image 1 role: identity anchor. Preserve exact character colors and materials.
+Side-view game sprite walk cycle. Character facing right. Character remains centered in frame as if walking on treadmill.
+Generate clean animation frames only. Maintain original color palette. 
+No color grading. No cinematic lighting. No bloom. No purple tint. No stylization. No blur.
+Primary request: create 24-frame fluid walking sequence.
+Flat opaque green background #2E8B57.`;
                           setVideoPrompt(templatePrompt);
                           setStage('video-forge');
                           // Trigger auto-start/warmup on the main backend
@@ -2019,7 +2027,7 @@ Background: Opaque flat digital green background #00B140.`;
                     padding: '0', 
                     overflow: 'hidden', 
                     height: '300px', 
-                    background: '#00B140' /* MUTED DIGITAL GREEN SCREEN */,
+                    background: '#2E8B57' /* SEA GREEN SCREEN */,
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center'
