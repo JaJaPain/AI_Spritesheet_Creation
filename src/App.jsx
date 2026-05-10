@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { Sparkles, Wand2, Play, Download, Settings, Image as ImageIcon, Loader2, ArrowLeft, RefreshCw, Save, Upload, X, Check, FolderOpen, HelpCircle, Trash2, ChevronLeft, ChevronRight, Video } from 'lucide-react'
+import { Sparkles, Wand2, Play, Download, Settings, Image as ImageIcon, Loader2, ArrowLeft, RefreshCw, Save, Upload, X, Check, FolderOpen, HelpCircle, Trash2, ChevronLeft, ChevronRight, Video, Zap } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 
 
@@ -321,33 +321,26 @@ function App() {
       let videoFound = false;
 
       // Check existing bases first
-      if (apiBase) {
-        try {
+      try {
+        if (apiBase) {
           const res = await fetch(`${apiBase}/`, { method: 'GET' });
           const data = await res.json();
-          if (data.status === 'active') {
-            setApiReady(true);
-            mainFound = true;
-          }
-        } catch (e) { setApiReady(false); }
-      }
+          if (data.status === 'active') mainFound = true;
+        }
+      } catch (e) { /* ignore */ }
 
-      if (videoApiBase) {
-        try {
+      try {
+        if (videoApiBase) {
           const res = await fetch(`${videoApiBase}/status`, { method: 'GET' });
           const data = await res.json();
-          if (data.identity === 'video-forge') {
-            setVideoEngineReady(true);
-            videoFound = true;
-          }
-        } catch (e) { setVideoEngineReady(false); }
-      }
+          if (data.identity === 'video-forge') videoFound = true;
+        }
+      } catch (e) { /* ignore */ }
 
-      // If either is missing, scan ports 8000-8020
+      // Scan ports 8000-8020 if anything is missing
       if (!mainFound || !videoFound) {
         for (let p = 8000; p <= 8020; p++) {
           const url = `http://localhost:${p}`;
-          // Skip if we already checked these as active bases
           if (url === apiBase && mainFound) continue;
           if (url === videoApiBase && videoFound) continue;
 
@@ -355,22 +348,17 @@ function App() {
             const res = await fetch(`${url}/status`, { method: 'GET' });
             if (res.ok) {
               const data = await res.json();
-              
               if (data.identity === 'video-forge' && !videoFound) {
-                console.log(`Video Forge discovered on port ${p}`);
                 setVideoApiBase(url);
                 setVideoEngineReady(true);
                 videoFound = true;
               } else if (data.identity === 'main-backend' && !mainFound) {
-                console.log(`Main Backend discovered on port ${p}`);
                 setApiBase(url);
                 setApiReady(true);
                 mainFound = true;
               }
             }
-          } catch (e) {
-            // Silence noise for port scanning
-          }
+          } catch (e) { /* silent */ }
           if (mainFound && videoFound) break;
         }
       }
@@ -379,9 +367,10 @@ function App() {
       setVideoEngineReady(videoFound);
       timeout = setTimeout(discover, (mainFound && videoFound) ? 10000 : 3000);
     }
+    
     discover();
     return () => clearTimeout(timeout);
-  }, [apiBase, videoApiBase])
+  }, []); // Run once on mount, recursion handled by setTimeout
   const [prompt, setPrompt] = useState('')
   const [variants, setVariants] = useState([])
   const [loading, setLoading] = useState(false)
