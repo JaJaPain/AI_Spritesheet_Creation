@@ -436,6 +436,102 @@ function App() {
   const [isWarmingUp, setIsWarmingUp] = useState(false)
   const [activeSurgicalIndex, setActiveSurgicalIndex] = useState(null)
 
+  // Batch Animation State
+  const [batchMode, setBatchMode] = useState(false)
+  const [presetList, setPresetList] = useState([])
+  const [selectedPresetId, setSelectedPresetId] = useState('side_view')
+  const [currentPreset, setCurrentPreset] = useState(null)
+  const [batchChecked, setBatchChecked] = useState({})
+  const [batchStatus, setBatchStatus] = useState({ running: false, total: 0, completed: 0, current_name: '', results: [] })
+  const [editingAnim, setEditingAnim] = useState(null)
+
+  // Load preset list
+  const loadPresetList = async () => {
+    try {
+      const r = await fetch(`${apiBase}/api/presets`);
+      const data = await r.json();
+      setPresetList(data.presets || []);
+    } catch(e) { console.error('Failed to load presets:', e); }
+  };
+
+  // Load a specific preset
+  const loadPreset = async (viewId) => {
+    try {
+      const r = await fetch(`${apiBase}/api/presets/${viewId}`);
+      const data = await r.json();
+      setCurrentPreset(data);
+      const checks = {};
+      (data.animations || []).forEach(a => { checks[a.id] = true; });
+      setBatchChecked(checks);
+    } catch(e) { console.error('Failed to load preset:', e); }
+  };
+
+  // Save current preset
+  const savePreset = async () => {
+    if (!currentPreset) return;
+    try {
+      await fetch(`${apiBase}/api/presets/${selectedPresetId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(currentPreset)
+      });
+      loadPresetList();
+    } catch(e) { console.error('Failed to save preset:', e); }
+  };
+
+  // Start batch
+  const handleStartBatch = async () => {
+    if (!currentPreset || !selectedVideoSlice) return;
+    const selected = (currentPreset.animations || []).filter(a => batchChecked[a.id]);
+    if (selected.length === 0) return alert('Select at least one animation');
+    
+    const activeApi = rapidEngineReady ? rapidApiBase : videoApiBase;
+    const formData = new FormData();
+    
+    try {
+      const imgSrc = selectedVideoSlice.startsWith('http') ? selectedVideoSlice : `${apiBase}${selectedVideoSlice}`;
+      const imgResp = await fetch(imgSrc);
+      const imgBlob = await imgResp.blob();
+      formData.append('image', imgBlob, 'sprite_slice.png');
+    } catch(e) {
+      formData.append('image_url', selectedVideoSlice);
+    }
+    
+    formData.append('animations_json', JSON.stringify(selected));
+    formData.append('character_id', activeProjectId || 'unknown');
+    formData.append('view_id', selectedPresetId);
+    
+    const r = await fetch(`${activeApi}/batch`, { method: 'POST', body: formData });
+    if (r.ok) {
+      setBatchStatus({ running: true, total: selected.length, completed: 0, current_name: '', results: [] });
+    } else {
+      const err = await r.json();
+      alert(`Batch failed: ${err.detail}`);
+    }
+  };
+
+  // Poll batch status
+  useEffect(() => {
+    if (!batchStatus.running) return;
+    const activeApi = rapidEngineReady ? rapidApiBase : videoApiBase;
+    const interval = setInterval(async () => {
+      try {
+        const r = await fetch(`${activeApi}/batch/status`);
+        const data = await r.json();
+        setBatchStatus(data);
+        if (!data.running) clearInterval(interval);
+      } catch(e) {}
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [batchStatus.running, rapidApiBase, videoApiBase, rapidEngineReady]);
+
+  // Load presets when entering batch mode
+  useEffect(() => {
+    if (batchMode) {
+      loadPresetList();
+      loadPreset(selectedPresetId);
+    }
+  }, [batchMode]);
 
   // Video Engine Heartbeat Poller
   useEffect(() => {
@@ -2030,25 +2126,31 @@ Flat opaque green background #2E8B57.`;
                 </div>
               )}
 
+              {/* Mode Toggle */}
+              <div style={{ display: 'flex', gap: '0', marginBottom: '1.5rem', background: 'rgba(255,255,255,0.03)', borderRadius: '10px', padding: '4px', border: '1px solid rgba(255,255,255,0.06)' }}>
+                <button onClick={() => setBatchMode(false)} style={{ flex: 1, padding: '0.5rem', borderRadius: '8px', border: 'none', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.8rem', background: !batchMode ? 'linear-gradient(to right, #3b82f6, #8b5cf6)' : 'transparent', color: !batchMode ? '#fff' : '#666', transition: 'all 0.2s' }}>
+                  <Video size={14} style={{ marginRight: '0.4rem', verticalAlign: 'middle' }} />Single
+                </button>
+                <button onClick={() => setBatchMode(true)} style={{ flex: 1, padding: '0.5rem', borderRadius: '8px', border: 'none', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.8rem', background: batchMode ? 'linear-gradient(to right, #f59e0b, #ef4444)' : 'transparent', color: batchMode ? '#fff' : '#666', transition: 'all 0.2s' }}>
+                  <Play size={14} style={{ marginRight: '0.4rem', verticalAlign: 'middle' }} />Batch Mode
+                </button>
+              </div>
+
+              {!batchMode ? (
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2rem' }}>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
                   <div className="glass-card" style={{ 
                     padding: '0', 
                     overflow: 'hidden', 
                     height: '300px', 
-                    background: '#2E8B57' /* SEA GREEN SCREEN */,
+                    background: '#2E8B57',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center'
                   }}>
                     <img 
                       src={selectedVideoSlice?.startsWith('http') ? selectedVideoSlice : `${apiBase}${selectedVideoSlice}`} 
-                      style={{ 
-                        maxWidth: '100%', 
-                        maxHeight: '100%', 
-                        objectFit: 'contain',
-                        filter: 'drop-shadow(0 0 10px rgba(0,0,0,0.3))'
-                      }} 
+                      style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', filter: 'drop-shadow(0 0 10px rgba(0,0,0,0.3))' }} 
                       alt="Target Slice" 
                     />
                   </div>
@@ -2056,7 +2158,7 @@ Flat opaque green background #2E8B57.`;
                   <div style={{ textAlign: 'left' }}>
                     <label style={{ fontSize: '0.8rem', color: 'var(--accent-primary)', fontWeight: 'bold', textTransform: 'uppercase', marginBottom: '0.5rem', display: 'block' }}>Motion Prompt</label>
                     <textarea 
-                      placeholder="Describe the cinematic motion (e.g., 'Character walking towards camera, high fidelity, smooth transition')"
+                      placeholder="Describe the cinematic motion..."
                       value={videoPrompt}
                       onChange={(e) => setVideoPrompt(e.target.value)}
                       style={{ height: '100px', resize: 'none' }}
@@ -2092,47 +2194,174 @@ Flat opaque green background #2E8B57.`;
                     <div style={{ width: '100%', padding: '2rem' }}>
                       <Loader2 size={48} className="animate-spin" color="var(--accent-primary)" style={{ marginBottom: '1.5rem' }} />
                       <h3 style={{ marginBottom: '1rem' }}>{videoHeartbeat.status}</h3>
-                      
                       <div style={{ width: '100%', height: '8px', background: 'rgba(255,255,255,0.05)', borderRadius: '10px', overflow: 'hidden', marginBottom: '0.5rem' }}>
-                        <motion.div 
-                          initial={{ width: 0 }}
-                          animate={{ width: `${videoHeartbeat.progress}%` }}
-                          style={{ height: '100%', background: 'linear-gradient(to right, #3b82f6, #8b5cf6)' }}
-                        />
+                        <motion.div initial={{ width: 0 }} animate={{ width: `${videoHeartbeat.progress}%` }} style={{ height: '100%', background: 'linear-gradient(to right, #3b82f6, #8b5cf6)' }} />
                       </div>
                       <p style={{ fontSize: '0.8rem', color: 'var(--text-dim)' }}>Progress: {videoHeartbeat.progress}%</p>
-                      
                       <div style={{ marginTop: '2rem', padding: '1rem', background: 'rgba(255,255,255,0.02)', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.05)' }}>
-                         <p style={{ fontSize: '0.7rem', color: '#666' }}>
-                           Note: Initial generation takes ~9 minutes to load WanVideo GGUF models. 
-                           Subsequent generations will be significantly faster.
-                         </p>
+                         <p style={{ fontSize: '0.7rem', color: '#666' }}>Note: Initial generation takes ~9 minutes to load WanVideo GGUF models. Subsequent generations will be significantly faster.</p>
                       </div>
                     </div>
                   )}
 
                   {videoStage === 'done' && videoUrl && (
                     <div style={{ width: '100%', height: '100%', position: 'relative' }}>
-                      <video 
-                        src={videoUrl} 
-                        controls 
-                        autoPlay 
-                        loop 
-                        style={{ width: '100%', height: '100%', borderRadius: '8px', objectFit: 'contain' }}
-                      />
-                      <button 
-                        className="btn-secondary"
-                        style={{ position: 'absolute', top: '10px', right: '10px', padding: '0.4rem 0.8rem', fontSize: '0.7rem' }}
-                        onClick={() => window.open(videoUrl)}
-                      >
+                      <video src={videoUrl} controls autoPlay loop style={{ width: '100%', height: '100%', borderRadius: '8px', objectFit: 'contain' }} />
+                      <button className="btn-secondary" style={{ position: 'absolute', top: '10px', right: '10px', padding: '0.4rem 0.8rem', fontSize: '0.7rem' }} onClick={() => window.open(videoUrl)}>
                         <Download size={14} /> Download MP4
                       </button>
                     </div>
                   )}
                 </div>
               </div>
+              ) : (
+              /* ─── BATCH MODE ─── */
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2rem' }}>
+                {/* Left: Preset Editor */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                  {/* Preset Selector */}
+                  <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                    <select value={selectedPresetId} onChange={e => { setSelectedPresetId(e.target.value); loadPreset(e.target.value); }} style={{ flex: 1, padding: '0.5rem', borderRadius: '8px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', fontSize: '0.85rem' }}>
+                      {presetList.map(p => <option key={p.id} value={p.id}>{p.view_name} ({p.animation_count})</option>)}
+                    </select>
+                    <button className="btn-secondary" style={{ padding: '0.5rem 0.8rem', fontSize: '0.75rem' }} onClick={() => {
+                      const name = prompt('New view name (e.g., "Three Quarter")');
+                      if (!name) return;
+                      const id = name.toLowerCase().replace(/\s+/g, '_');
+                      const newPreset = { view_name: name, animations: [] };
+                      fetch(`${apiBase}/api/presets/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(newPreset) })
+                        .then(() => { loadPresetList(); setSelectedPresetId(id); loadPreset(id); });
+                    }}>+ View</button>
+                  </div>
+
+                  {/* Animation List */}
+                  <div style={{ maxHeight: '400px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                    {(currentPreset?.animations || []).map((anim, idx) => (
+                      <div key={anim.id} style={{ background: batchChecked[anim.id] ? 'rgba(74, 222, 128, 0.05)' : 'rgba(255,255,255,0.02)', border: `1px solid ${batchChecked[anim.id] ? 'rgba(74, 222, 128, 0.2)' : 'rgba(255,255,255,0.06)'}`, borderRadius: '8px', padding: '0.6rem 0.8rem' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                          <input type="checkbox" checked={batchChecked[anim.id] || false} onChange={e => setBatchChecked(prev => ({ ...prev, [anim.id]: e.target.checked }))} />
+                          
+                          {editingAnim === anim.id ? (
+                            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
+                              <input value={anim.display_name} onChange={e => {
+                                const updated = { ...currentPreset };
+                                updated.animations[idx].display_name = e.target.value;
+                                setCurrentPreset(updated);
+                              }} style={{ padding: '0.3rem', borderRadius: '4px', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.15)', color: '#fff', fontSize: '0.8rem' }} />
+                              <textarea value={anim.prompt} onChange={e => {
+                                const updated = { ...currentPreset };
+                                updated.animations[idx].prompt = e.target.value;
+                                setCurrentPreset(updated);
+                              }} style={{ padding: '0.3rem', borderRadius: '4px', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.15)', color: '#fff', fontSize: '0.75rem', height: '60px', resize: 'none' }} />
+                              <div style={{ display: 'flex', gap: '0.3rem' }}>
+                                <span style={{ fontSize: '0.7rem', color: '#888' }}>Frames:</span>
+                                <input type="number" value={anim.num_frames} onChange={e => {
+                                  const updated = { ...currentPreset };
+                                  updated.animations[idx].num_frames = parseInt(e.target.value);
+                                  setCurrentPreset(updated);
+                                }} style={{ width: '50px', padding: '0.2rem', borderRadius: '4px', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.15)', color: '#fff', fontSize: '0.75rem' }} />
+                                <button onClick={() => { setEditingAnim(null); savePreset(); }} style={{ marginLeft: 'auto', padding: '0.2rem 0.5rem', borderRadius: '4px', background: '#4ade80', border: 'none', color: '#000', fontSize: '0.7rem', cursor: 'pointer', fontWeight: 'bold' }}>
+                                  <Check size={10} /> Save
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <>
+                              <div style={{ flex: 1 }}>
+                                <div style={{ fontWeight: 'bold', fontSize: '0.8rem', color: '#e0e0e0' }}>{anim.display_name}</div>
+                                <div style={{ fontSize: '0.7rem', color: '#666', marginTop: '2px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '280px' }}>{anim.prompt}</div>
+                              </div>
+                              <button onClick={() => setEditingAnim(anim.id)} style={{ padding: '2px 6px', background: 'none', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '4px', color: '#888', cursor: 'pointer', fontSize: '0.7rem' }}>✏️</button>
+                              <button onClick={() => {
+                                const updated = { ...currentPreset, animations: currentPreset.animations.filter((_, i) => i !== idx) };
+                                setCurrentPreset(updated);
+                                savePreset();
+                              }} style={{ padding: '2px 6px', background: 'none', border: '1px solid rgba(239,68,68,0.2)', borderRadius: '4px', color: '#ef4444', cursor: 'pointer', fontSize: '0.7rem' }}>🗑</button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Add Animation + Actions */}
+                  <button className="btn-secondary" style={{ fontSize: '0.8rem' }} onClick={() => {
+                    const name = prompt('Animation name (e.g., "Sword Slash")');
+                    if (!name) return;
+                    const id = name.toLowerCase().replace(/\s+/g, '_');
+                    const newAnim = { id, display_name: name, prompt: '', num_frames: 25, seed: -1 };
+                    const updated = { ...currentPreset, animations: [...(currentPreset?.animations || []), newAnim] };
+                    setCurrentPreset(updated);
+                    setBatchChecked(prev => ({ ...prev, [id]: true }));
+                    setEditingAnim(id);
+                  }}>+ Add Animation</button>
+
+                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    <button className="btn-secondary" onClick={() => setStage('slicing')} style={{ fontSize: '0.8rem' }}>
+                      <ArrowLeft size={14} /> Back
+                    </button>
+                    <button className="btn-primary" style={{ flex: 1, fontSize: '0.85rem', background: 'linear-gradient(to right, #f59e0b, #ef4444)' }}
+                      onClick={handleStartBatch}
+                      disabled={!videoEngineReady || batchStatus.running || !(currentPreset?.animations || []).some(a => batchChecked[a.id])}
+                    >
+                      {batchStatus.running ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
+                      {batchStatus.running ? `Running ${batchStatus.completed}/${batchStatus.total}...` : `Run Batch (${Object.values(batchChecked).filter(Boolean).length})`}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Right: Batch Progress */}
+                <div className="glass-card" style={{ background: '#020202', minHeight: '400px', padding: '1.5rem', overflowY: 'auto' }}>
+                  {!batchStatus.running && batchStatus.results.length === 0 && (
+                    <div style={{ color: '#333', textAlign: 'center', marginTop: '30%' }}>
+                      <Play size={48} style={{ marginBottom: '1rem', opacity: 0.2 }} />
+                      <p>Select animations and hit Run Batch</p>
+                      <p style={{ fontSize: '0.75rem', color: '#444', marginTop: '0.5rem' }}>Est. ~2 min per animation after warmup</p>
+                    </div>
+                  )}
+
+                  {(batchStatus.running || batchStatus.results.length > 0) && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                        <h4 style={{ margin: 0, fontSize: '0.85rem' }}>
+                          {batchStatus.running ? `Batch: ${batchStatus.completed}/${batchStatus.total}` : `Complete: ${batchStatus.results.filter(r => r.status === 'success').length}/${batchStatus.total}`}
+                        </h4>
+                        {batchStatus.running && (
+                          <button className="btn-secondary" style={{ padding: '0.3rem 0.6rem', fontSize: '0.7rem', color: '#ef4444' }}
+                            onClick={async () => {
+                              const activeApi = rapidEngineReady ? rapidApiBase : videoApiBase;
+                              await fetch(`${activeApi}/batch/cancel`, { method: 'POST' });
+                            }}>Cancel</button>
+                        )}
+                      </div>
+
+                      {/* Overall progress bar */}
+                      <div style={{ width: '100%', height: '6px', background: 'rgba(255,255,255,0.05)', borderRadius: '10px', overflow: 'hidden', marginBottom: '0.5rem' }}>
+                        <motion.div initial={{ width: 0 }} animate={{ width: `${batchStatus.total > 0 ? (batchStatus.completed / batchStatus.total * 100) : 0}%` }} style={{ height: '100%', background: 'linear-gradient(to right, #f59e0b, #ef4444)' }} />
+                      </div>
+
+                      {batchStatus.running && batchStatus.current_name && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.5rem', background: 'rgba(59,130,246,0.08)', borderRadius: '6px', border: '1px solid rgba(59,130,246,0.2)' }}>
+                          <Loader2 size={14} className="animate-spin" color="#3b82f6" />
+                          <span style={{ fontSize: '0.8rem', color: '#3b82f6' }}>{batchStatus.current_name}</span>
+                        </div>
+                      )}
+
+                      {batchStatus.results.map((r, i) => (
+                        <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.4rem 0.6rem', background: r.status === 'success' ? 'rgba(74,222,128,0.05)' : r.status === 'error' ? 'rgba(239,68,68,0.05)' : 'rgba(255,255,255,0.02)', borderRadius: '6px', border: `1px solid ${r.status === 'success' ? 'rgba(74,222,128,0.15)' : r.status === 'error' ? 'rgba(239,68,68,0.15)' : 'rgba(255,255,255,0.05)'}` }}>
+                          <span>{r.status === 'success' ? '✅' : r.status === 'error' ? '❌' : '⏭️'}</span>
+                          <span style={{ flex: 1, fontSize: '0.8rem', color: '#ccc' }}>{r.name}</span>
+                          {r.duration && <span style={{ fontSize: '0.7rem', color: '#666' }}>{r.duration}s</span>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+              )}
             </motion.div>
           )}
+
         </AnimatePresence>
       </main>
 

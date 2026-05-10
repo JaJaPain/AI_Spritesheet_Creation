@@ -1,0 +1,33 @@
+{
+  "view_name": "Front View",
+  "animations": [
+    {
+      "id": "idle_front",
+      "display_name": "Idle Breathing",
+      "prompt": "Front-facing game sprite idle animation. Subtle chest breathing and gentle sway. Character facing the camera, stationary.",
+      "num_frames": 25,
+      "seed": -1
+    },
+    {
+      "id": "wave",
+      "display_name": "Wave",
+      "prompt": "Front-facing game sprite waving hand animation. Character facing the camera. One arm raises and waves side to side.",
+      "num_frames": 25,
+      "seed": -1
+    },
+    {
+      "id": "cast_spell",
+      "display_name": "Cast Spell",
+      "prompt": "Front-facing game sprite magic casting animation. Character facing the camera. Arms raise, magical gesture, hands glow.",
+      "num_frames": 25,
+      "seed": -1
+    },
+    {
+      "id": "celebrate",
+      "display_name": "Celebrate",
+      "prompt": "Front-facing game sprite celebration animation. Character facing the camera. Fist pump or victory pose.",
+      "num_frames": 25,
+      "seed": -1
+    }
+  ]
+}

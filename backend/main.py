@@ -3190,6 +3190,66 @@ async def generate_directional_poses(req: DirectionalPoseRequest):
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
+# ─── Animation Preset Management ───────────────────────────────────────
+PRESETS_DIR = os.path.join(os.path.dirname(__file__), "animation_presets")
+os.makedirs(PRESETS_DIR, exist_ok=True)
+
+@app.get("/api/presets")
+async def list_presets():
+    """List all available animation preset views."""
+    presets = []
+    for fname in sorted(os.listdir(PRESETS_DIR)):
+        if fname.endswith(".json"):
+            fpath = os.path.join(PRESETS_DIR, fname)
+            try:
+                with open(fpath, "r") as f:
+                    data = json.load(f)
+                presets.append({
+                    "id": fname.replace(".json", ""),
+                    "view_name": data.get("view_name", fname.replace(".json", "").replace("_", " ").title()),
+                    "animation_count": len(data.get("animations", []))
+                })
+            except Exception:
+                continue
+    return {"presets": presets}
+
+@app.get("/api/presets/{view_id}")
+async def get_preset(view_id: str):
+    """Get a specific animation preset by view ID."""
+    fpath = os.path.join(PRESETS_DIR, f"{view_id}.json")
+    if not os.path.exists(fpath):
+        raise HTTPException(status_code=404, detail=f"Preset '{view_id}' not found")
+    with open(fpath, "r") as f:
+        return json.load(f)
+
+@app.put("/api/presets/{view_id}")
+async def save_preset(view_id: str, request: Request):
+    """Create or update an animation preset."""
+    data = await request.json()
+    if "view_name" not in data or "animations" not in data:
+        raise HTTPException(status_code=400, detail="Preset must have 'view_name' and 'animations'")
+    # Auto-generate IDs for animations that don't have one
+    for anim in data["animations"]:
+        if not anim.get("id"):
+            anim["id"] = anim.get("display_name", "animation").lower().replace(" ", "_")
+        if "num_frames" not in anim:
+            anim["num_frames"] = 25
+        if "seed" not in anim:
+            anim["seed"] = -1
+    fpath = os.path.join(PRESETS_DIR, f"{view_id}.json")
+    with open(fpath, "w") as f:
+        json.dump(data, f, indent=2)
+    return {"status": "saved", "view_id": view_id, "animation_count": len(data["animations"])}
+
+@app.delete("/api/presets/{view_id}")
+async def delete_preset(view_id: str):
+    """Delete an animation preset."""
+    fpath = os.path.join(PRESETS_DIR, f"{view_id}.json")
+    if not os.path.exists(fpath):
+        raise HTTPException(status_code=404, detail=f"Preset '{view_id}' not found")
+    os.remove(fpath)
+    return {"status": "deleted", "view_id": view_id}
+
 def find_free_port(start_port):
     import socket
     port = start_port

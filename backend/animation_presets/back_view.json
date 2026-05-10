@@ -1,0 +1,26 @@
+{
+  "view_name": "Back View",
+  "animations": [
+    {
+      "id": "walk_away",
+      "display_name": "Walk Away",
+      "prompt": "Back-view game sprite walk cycle. Character facing away from camera. Walking forward motion, centered in frame on treadmill.",
+      "num_frames": 25,
+      "seed": -1
+    },
+    {
+      "id": "run_away",
+      "display_name": "Run Away",
+      "prompt": "Back-view game sprite running animation. Character facing away from camera. Fast running forward, centered in frame.",
+      "num_frames": 25,
+      "seed": -1
+    },
+    {
+      "id": "idle_back",
+      "display_name": "Idle Breathing",
+      "prompt": "Back-view game sprite idle standing animation. Subtle breathing motion. Character facing away from camera, stationary.",
+      "num_frames": 25,
+      "seed": -1
+    }
+  ]
+}
