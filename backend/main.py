@@ -11,7 +11,7 @@ import shutil
 import base64
 import io
 from typing import Optional, List
-from fastapi import FastAPI, Body, HTTPException, Request, File, UploadFile
+from fastapi import FastAPI, Body, HTTPException, Request, File, UploadFile, BackgroundTasks
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.concurrency import run_in_threadpool
@@ -35,6 +35,9 @@ from rembg import remove, new_session
 import gc
 from animator import AffineMeshAnimator, create_walk_cycle, LIMB_HIERARCHY, pad_image_for_outpaint
 from limb_borrower import borrow_and_warp_limb
+import subprocess
+import requests
+import socket
 
 # Setup logging
 logging.basicConfig(
@@ -200,6 +203,17 @@ class ModelManager:
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
         gc.collect()
+
+    def vram_handoff(self):
+        """Specifically clears everything to hand over the GPU to the Video Forge."""
+        logger.info("--- VRAM HANDOFF INITIATED ---")
+        self.unload_all()
+        # Additional aggressive clearing
+        if self.device == "cuda":
+            with torch.no_grad():
+                torch.cuda.empty_cache()
+        gc.collect()
+        logger.info("GPU Memory cleared for Video Forge.")
 
     def load_sdxl(self, controlnet_type="canny"):
         """Load SDXL + ControlNet pipeline.
@@ -587,10 +601,103 @@ class ModelManager:
 
 manager = ModelManager()
 
+class VideoForgeOrchestrator:
+    def __init__(self, search_range=(8001, 8020)):
+        self.search_range = search_range
+        self.active_url = None
+        self.process = None
+
+    def discover(self):
+        """Check if any Video Forge is already running in our range."""
+        for p in range(self.search_range[0], self.search_range[1] + 1):
+            url = f"http://localhost:{p}"
+            try:
+                resp = requests.get(f"{url}/status", timeout=0.5)
+                if resp.json().get("identity") == "video-forge":
+                    self.active_url = url
+                    return True
+            except:
+                continue
+        return False
+
+    def start(self):
+        """Starts the Video Forge engine if not already running."""
+        if self.discover():
+            logger.info(f"Auto-Discovery: Video Forge found at {self.active_url}")
+            return self.active_url
+
+        # Find first available port in range
+        port = self.search_range[0]
+        logger.info(f"Auto-Start: Searching for available port starting at {port}...")
+        while port <= self.search_range[1]:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                if s.connect_ex(('localhost', port)) != 0:
+                    break
+            port += 1
+            
+        logger.info(f"Auto-Start: Selected port {port}. Resolving paths...")
+        
+        # Resolve path to VideoCreation directory (relative to this script in /backend)
+        try:
+            creation_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "VideoCreation"))
+            bat_path = os.path.join(creation_dir, "run_everything.bat")
+            
+            if not os.path.exists(bat_path):
+                logger.error(f"CRITICAL: Could not find Video Forge .bat at {bat_path}")
+                return None
+
+            # Get the current main backend port
+            main_port = str(port_global if 'port_global' in globals() else 8000)
+            
+            logger.info(f"Launching Video Forge: {bat_path} on port {port} (Main App on {main_port})")
+            
+            self.process = subprocess.Popen(
+                ["cmd", "/c", "run_everything.bat", str(port), main_port],
+                cwd=creation_dir,
+                creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0
+            )
+            
+            # Polling wait for readiness
+            self.active_url = f"http://localhost:{port}"
+            logger.info(f"Background Process Spawned (PID: {self.process.pid}). Waiting for discovery at {self.active_url}...")
+            
+            for i in range(60): # Wait up to 60 seconds
+                time.sleep(1)
+                if self.discover():
+                    logger.info(f"SUCCESS: Video Forge is live at {self.active_url}")
+                    return self.active_url
+                if i % 5 == 0 and i > 0:
+                    logger.info(f"Warmup in progress... ({i}s/60s elapsed)")
+            
+            logger.warning("Warmup timed out, but process is still running. Discovery might happen later.")
+            return self.active_url 
+            
+        except Exception as inner_e:
+            logger.error(f"Internal Orchestrator Error: {inner_e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return None
+
+orchestrator = VideoForgeOrchestrator()
+
+
+@app.get("/warmup-video-forge")
+async def warmup_video_forge(background_tasks: BackgroundTasks):
+    """Tells the main backend to prepare and launch the Video Forge engine."""
+    logger.info("Warmup request received from frontend. Offloading to background task.")
+    manager.vram_handoff() # Free GPU memory
+    background_tasks.add_task(orchestrator.start)
+    return {"status": "success", "message": "Warmup sequence initiated in background."}
+
 
 @app.get("/")
 async def root():
-    return {"status": "active", "device": manager.device}
+    return {"status": "active", "identity": "main-backend", "device": manager.device}
+
+@app.get("/status")
+async def status():
+    """Consistent status endpoint for discovery."""
+    return {"status": "active", "identity": "main-backend", "device": manager.device}
 
 
 @app.post("/describe-anchor")
@@ -2958,6 +3065,6 @@ def find_free_port(start_port):
 
 if __name__ == "__main__":
     import uvicorn
-    port = find_free_port(8000)
-    logger.info(f"Starting FLUX SpriteForge server on port {port}...")
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    port_global = find_free_port(8000)
+    logger.info(f"Starting FLUX SpriteForge server on port {port_global}...")
+    uvicorn.run(app, host="0.0.0.0", port=port_global)

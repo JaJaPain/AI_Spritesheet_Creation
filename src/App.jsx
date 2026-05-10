@@ -416,51 +416,80 @@ function LimbMasker({ imageUrl, onSave, onCancel, title, initialMask }) {
 }
 
 function App() {
+  // Global API Discovery State
   const [apiBase, setApiBase] = useState(null)
   const [stage, setStage] = useState('prompt') // prompt, selecting-anchor, animating, editing, preview
   const [apiReady, setApiReady] = useState(false)
+  const [videoApiBase, setVideoApiBase] = useState(null)
 
   useEffect(() => {
     let timeout = null;
     const discover = async () => {
-      let found = false;
-      // If we already have a base, check if it's still alive first
+      let mainFound = false;
+      let videoFound = false;
+
+      // Check existing bases first
       if (apiBase) {
         try {
           const res = await fetch(`${apiBase}/`, { method: 'GET' });
           const data = await res.json();
           if (data.status === 'active') {
             setApiReady(true);
-            timeout = setTimeout(discover, 5000); // Check again in 5s
-            return;
+            mainFound = true;
           }
-        } catch (e) {
-          setApiReady(false);
-        }
+        } catch (e) { setApiReady(false); }
       }
 
-      for (let p = 8000; p <= 8010; p++) {
+      if (videoApiBase) {
         try {
-          const res = await fetch(`http://localhost:${p}/`, { method: 'GET' });
+          const res = await fetch(`${videoApiBase}/status`, { method: 'GET' });
           const data = await res.json();
-          if (data.status === 'active') {
-            console.log(`SpriteForge backend found on port ${p}`);
-            setApiBase(`http://localhost:${p}`);
-            setApiReady(true);
-            found = true;
-            break;
+          if (data.identity === 'video-forge') {
+            setVideoEngineReady(true);
+            videoFound = true;
           }
-        } catch (e) {}
+        } catch (e) { setVideoEngineReady(false); }
+      }
+
+      // If either is missing, scan ports 8000-8020
+      if (!mainFound || !videoFound) {
+        for (let p = 8000; p <= 8020; p++) {
+          const url = `http://localhost:${p}`;
+          // Skip if we already checked these as active bases
+          if (url === apiBase && mainFound) continue;
+          if (url === videoApiBase && videoFound) continue;
+
+          try {
+            const res = await fetch(`${url}/status`, { method: 'GET' });
+            if (res.ok) {
+              const data = await res.json();
+              
+              if (data.identity === 'video-forge' && !videoFound) {
+                console.log(`Video Forge discovered on port ${p}`);
+                setVideoApiBase(url);
+                setVideoEngineReady(true);
+                videoFound = true;
+              } else if (data.identity === 'main-backend' && !mainFound) {
+                console.log(`Main Backend discovered on port ${p}`);
+                setApiBase(url);
+                setApiReady(true);
+                mainFound = true;
+              }
+            }
+          } catch (e) {
+            // Silence noise for port scanning
+          }
+          if (mainFound && videoFound) break;
+        }
       }
       
-      if (!found) {
-        setApiReady(false);
-      }
-      timeout = setTimeout(discover, found ? 10000 : 2000);
+      setApiReady(mainFound);
+      setVideoEngineReady(videoFound);
+      timeout = setTimeout(discover, (mainFound && videoFound) ? 10000 : 3000);
     }
     discover();
     return () => clearTimeout(timeout);
-  }, [apiBase])
+  }, [apiBase, videoApiBase])
   const [prompt, setPrompt] = useState('')
   const [variants, setVariants] = useState([])
   const [loading, setLoading] = useState(false)
@@ -503,7 +532,7 @@ function App() {
   const [numGenerations, setNumGenerations] = useState(1)
   const [zoomLevel, setZoomLevel] = useState(1)
   const turnaroundCanvasRef = useRef(null)
-  const fileInputRef = useRef(null)
+
   
   // Slicing State
   const [slicedUrls, setSlicedUrls] = useState([])
@@ -532,6 +561,79 @@ function App() {
   const [activeDirection, setActiveDirection] = useState(null)
   const [directionalLimbPacks, setDirectionalLimbPacks] = useState({}) // { 'front': { limbs } }
   const [directionalLimbMasks, setDirectionalLimbMasks] = useState({}) // { 'front': { 'torso': maskBase64 } }
+
+  // Video Forge State
+  const [videoStage, setVideoStage] = useState('idle') // idle, generating, done
+  const [videoUrl, setVideoUrl] = useState(null)
+  const [videoPrompt, setVideoPrompt] = useState('')
+  const [selectedVideoSlice, setSelectedVideoSlice] = useState(null)
+  const [videoHeartbeat, setVideoHeartbeat] = useState({ status: 'Offline', progress: 0 })
+  const [videoEngineReady, setVideoEngineReady] = useState(false)
+  const [isWarmingUp, setIsWarmingUp] = useState(false)
+
+  // Video Engine Heartbeat Poller
+  useEffect(() => {
+    let timeout = null;
+    const pollHeartbeat = async () => {
+      if (!videoApiBase || !videoEngineReady) {
+        timeout = setTimeout(pollHeartbeat, 2000);
+        return;
+      }
+      try {
+        const res = await fetch(`${videoApiBase}/status`);
+        const data = await res.json();
+        if (data.identity === 'video-forge') {
+           setVideoHeartbeat(data);
+           setIsWarmingUp(false);
+        } else {
+           setVideoEngineReady(false);
+        }
+      } catch (e) {
+        setVideoEngineReady(false);
+        setVideoHeartbeat({ status: 'Offline', progress: 0 });
+      }
+      timeout = setTimeout(pollHeartbeat, 3000);
+    };
+    pollHeartbeat();
+    return () => clearTimeout(timeout);
+  }, [videoApiBase, videoEngineReady]);
+
+  const handleForgeVideo = async () => {
+    if (!selectedVideoSlice || !videoPrompt) return;
+    setVideoStage('generating');
+    setVideoUrl(null);
+    
+    try {
+      const formData = new FormData();
+      // Ensure we strip cache busters if present
+      const cleanUrl = selectedVideoSlice.split('?')[0];
+      formData.append('image_url', cleanUrl);
+      formData.append('prompt', videoPrompt);
+      
+      const response = await fetch(`${videoApiBase}/generate`, {
+        method: 'POST',
+        body: formData
+      });
+      
+      if (response.ok) {
+        const blob = await response.blob();
+        setVideoUrl(URL.createObjectURL(blob));
+        setVideoStage('done');
+      } else {
+        try {
+          const err = await response.json();
+          alert(`Forge failed: ${err.detail}`);
+        } catch(e) {
+          alert("Forge failed. The engine might be out of memory.");
+        }
+        setVideoStage('idle');
+      }
+    } catch (e) {
+      console.error(e);
+      alert("Lost connection to Video Forge engine. Is run_everything.bat running?");
+      setVideoStage('idle');
+    }
+  };
 
   // Check for saved anchors ONLY after discovery completes
   useEffect(() => {
@@ -940,35 +1042,7 @@ Continue?`;
     setWandHistory([]);
   }
 
-  const handleImageUpload = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    
-    const formData = new FormData();
-    formData.append('file', file);
-    
-    try {
-      const res = await fetch(`${apiBase}/upload-turnaround`, {
-        method: 'POST',
-        body: formData
-      });
-      const data = await res.json();
-      if (data.status === 'success') {
-        const newProject = {
-          id: data.project_id,
-          image_url: data.image_url,
-          prompt: "Uploaded Turnaround"
-        };
-        setProjectId(data.project_id);
-        setMainImage(data.image_url);
-        setSavedProjects(prev => [newProject, ...prev]);
-        handleLoadProject(newProject);
-      }
-    } catch (err) {
-      console.error("Upload failed:", err);
-      alert("Upload failed. See console for details.");
-    }
-  };
+
 
   const handleWandClick = (e) => {
     if (!isWandActive || !turnaroundUrl) return;
@@ -1552,22 +1626,7 @@ Continue?`;
                   >
                     <Settings size={16} />
                   </button>
-                  <button 
-                    className="btn-secondary" 
-                    style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.6rem 1rem', fontSize: '0.85rem' }}
-                    onClick={() => fileInputRef.current?.click()}
-                    disabled={!apiReady}
-                  >
-                    <Upload size={16} />
-                    Upload Sheet
-                  </button>
-                  <input 
-                    type="file" 
-                    ref={fileInputRef} 
-                    style={{ display: 'none' }} 
-                    onChange={handleImageUpload}
-                    accept="image/*"
-                  />
+
                   <button 
                     className="btn-secondary" 
                     style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.6rem 1rem', fontSize: '0.85rem' }}
@@ -2127,10 +2186,27 @@ Continue?`;
                           justifyContent: 'center', 
                           gap: '0.4rem'
                         }}
-                        onClick={() => {
-                          const url = slicedUrls[i];
-                          const videoForgeUrl = `http://localhost:8001/?imageUrl=${encodeURIComponent(url)}`;
-                          window.open(videoForgeUrl, '_blank');
+                        onClick={async () => {
+                          setSelectedVideoSlice(slicedUrls[i]);
+                          const templatePrompt = `Image 1 role: identity anchor. Preserve the exact approved anchor sprite identity.
+Subject: Side view sprite walking form left to right. Character stays in one place as if on a treadmill.
+Primary request: create 8-frame walking sequence.
+Look and rendering: High-resolution pixelated sprite art. Crisp chunky sprite edges. Preserve visible pixel structure. No painterly rendering, no airbrushing, no soft gradients.
+Background: Opaque exact flat chroma green background #00FF00.`;
+                          setVideoPrompt(templatePrompt);
+                          setStage('video-forge');
+                          // Trigger auto-start/warmup on the main backend
+                          setIsWarmingUp(true);
+                          try {
+                            fetch(`${apiBase}/warmup-video-forge`).then(r => r.json()).then(data => {
+                              if (data.status === 'success') {
+                                console.log("Video Forge Warmup Initiated at:", data.url);
+                                setVideoApiBase(data.url);
+                              }
+                            });
+                          } catch (e) {
+                            console.error("Warmup trigger failed:", e);
+                          }
                         }}
                       >
                         <Video size={12} />
@@ -2570,6 +2646,197 @@ Continue?`;
                 >
                   Export Character Index (Totality)
                 </button>
+              </div>
+            </motion.div>
+          )}
+
+          {stage === 'video-forge' && (
+            <motion.div
+              key="video-forge"
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              className="glass-card"
+              style={{ maxWidth: '1000px', margin: '0 auto', textAlign: 'center' }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem' }}>
+                <div style={{ textAlign: 'left' }}>
+                  <h2 style={{ margin: 0 }}>Video <span className="gradient-text">Forge</span></h2>
+                  <p style={{ color: 'var(--text-dim)', fontSize: '0.9rem' }}>Cinematic Sprite Generation Pipeline</p>
+                </div>
+                
+                <div style={{ 
+                  background: videoEngineReady ? 'rgba(74, 222, 128, 0.1)' : 'rgba(239, 68, 68, 0.1)', 
+                  border: `1px solid ${videoEngineReady ? '#4ade80' : '#ef4444'}`,
+                  padding: '0.5rem 1rem',
+                  borderRadius: '12px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.6rem'
+                }}>
+                  <div style={{ 
+                    width: '10px', height: '10px', borderRadius: '50%', 
+                    background: videoEngineReady ? '#4ade80' : '#ef4444',
+                    boxShadow: videoEngineReady ? '0 0 10px #4ade80' : 'none'
+                  }} />
+                  <span style={{ fontSize: '0.8rem', color: videoEngineReady ? '#4ade80' : '#ef4444', fontWeight: 'bold' }}>
+                    {videoEngineReady ? 'ENGINE READY' : 'ENGINE OFFLINE'}
+                  </span>
+                  
+                  {/* Persistent Warmup Button */}
+                  <button 
+                    className="btn-primary" 
+                    title="Restart Video Engine"
+                    style={{ 
+                      padding: '4px 8px', 
+                      background: isWarmingUp ? '#3b82f6' : 'rgba(255,255,255,0.05)', 
+                      border: '1px solid rgba(255,255,255,0.1)',
+                      borderRadius: '8px'
+                    }}
+                    onClick={async () => {
+                      setIsWarmingUp(true);
+                      try {
+                        const r = await fetch(`${apiBase}/warmup-video-forge`);
+                        const data = await r.json();
+                        if (data.status === 'success') {
+                          console.log("Warmup initiated.");
+                        }
+                      } catch (e) {
+                        console.error("Warmup failed:", e);
+                        setIsWarmingUp(false);
+                      }
+                    }}
+                  >
+                    {isWarmingUp ? <Loader2 className="animate-spin" size={14} /> : <Zap size={14} />}
+                  </button>
+                </div>
+              </div>
+
+              {!videoEngineReady && (
+                <div className="glass-card" style={{ 
+                  background: isWarmingUp ? 'rgba(59, 130, 246, 0.05)' : 'rgba(239, 68, 68, 0.05)', 
+                  borderColor: isWarmingUp ? 'rgba(59, 130, 246, 0.2)' : 'rgba(239, 68, 68, 0.2)', 
+                  marginBottom: '2rem', padding: '2rem' 
+                }}>
+                   {isWarmingUp ? (
+                     <>
+                       <p style={{ color: '#3b82f6', fontWeight: 'bold', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.6rem' }}>
+                         <Loader2 className="animate-spin" size={18} /> Warming Up Engine...
+                       </p>
+                       <p style={{ fontSize: '0.9rem', color: 'var(--text-dim)', marginTop: '0.5rem' }}>
+                         The Video Forge is initializing AI models and clearing VRAM. This can take up to 60 seconds.
+                       </p>
+                     </>
+                   ) : (
+                     <>
+                       <p style={{ color: '#ef4444', fontWeight: 'bold' }}>⚠️ Engine Connection Lost</p>
+                       <p style={{ fontSize: '0.9rem', color: 'var(--text-dim)', marginTop: '0.5rem' }}>
+                         The Video Forge is not responding. Click the <Zap size={14} /> lightning icon above to jump-start it.
+                       </p>
+                     </>
+                   )}
+                </div>
+              )}
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2rem' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+                  <div className="glass-card" style={{ 
+                    padding: '0', 
+                    overflow: 'hidden', 
+                    height: '300px', 
+                    background: '#00FF00' /* VISIBLE GREEN SCREEN */,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center'
+                  }}>
+                    <img 
+                      src={selectedVideoSlice?.startsWith('http') ? selectedVideoSlice : `${apiBase}${selectedVideoSlice}`} 
+                      style={{ 
+                        maxWidth: '100%', 
+                        maxHeight: '100%', 
+                        objectFit: 'contain',
+                        filter: 'drop-shadow(0 0 10px rgba(0,0,0,0.3))'
+                      }} 
+                      alt="Target Slice" 
+                    />
+                  </div>
+                  
+                  <div style={{ textAlign: 'left' }}>
+                    <label style={{ fontSize: '0.8rem', color: 'var(--accent-primary)', fontWeight: 'bold', textTransform: 'uppercase', marginBottom: '0.5rem', display: 'block' }}>Motion Prompt</label>
+                    <textarea 
+                      placeholder="Describe the cinematic motion (e.g., 'Character walking towards camera, high fidelity, smooth transition')"
+                      value={videoPrompt}
+                      onChange={(e) => setVideoPrompt(e.target.value)}
+                      style={{ height: '100px', resize: 'none' }}
+                      disabled={videoStage === 'generating'}
+                    />
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '1rem' }}>
+                    <button className="btn-secondary" onClick={() => setStage('slicing')} disabled={videoStage === 'generating'}>
+                      <ArrowLeft size={18} /> Back to Slices
+                    </button>
+                    <button 
+                      className="btn-primary" 
+                      style={{ flex: 1, background: 'linear-gradient(to right, #3b82f6, #8b5cf6)' }}
+                      onClick={handleForgeVideo}
+                      disabled={!videoEngineReady || videoStage === 'generating' || !videoPrompt}
+                    >
+                      {videoStage === 'generating' ? <Loader2 size={18} className="animate-spin" /> : <Video size={18} />}
+                      {videoStage === 'generating' ? 'Forging Video...' : 'Forge Cinematic Video'}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="glass-card" style={{ background: '#020202', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '400px', position: 'relative' }}>
+                  {videoStage === 'idle' && (
+                    <div style={{ color: '#333', textAlign: 'center' }}>
+                      <Video size={48} style={{ marginBottom: '1rem', opacity: 0.2 }} />
+                      <p>Awaiting generation...</p>
+                    </div>
+                  )}
+
+                  {videoStage === 'generating' && (
+                    <div style={{ width: '100%', padding: '2rem' }}>
+                      <Loader2 size={48} className="animate-spin" color="var(--accent-primary)" style={{ marginBottom: '1.5rem' }} />
+                      <h3 style={{ marginBottom: '1rem' }}>{videoHeartbeat.status}</h3>
+                      
+                      <div style={{ width: '100%', height: '8px', background: 'rgba(255,255,255,0.05)', borderRadius: '10px', overflow: 'hidden', marginBottom: '0.5rem' }}>
+                        <motion.div 
+                          initial={{ width: 0 }}
+                          animate={{ width: `${videoHeartbeat.progress}%` }}
+                          style={{ height: '100%', background: 'linear-gradient(to right, #3b82f6, #8b5cf6)' }}
+                        />
+                      </div>
+                      <p style={{ fontSize: '0.8rem', color: 'var(--text-dim)' }}>Progress: {videoHeartbeat.progress}%</p>
+                      
+                      <div style={{ marginTop: '2rem', padding: '1rem', background: 'rgba(255,255,255,0.02)', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.05)' }}>
+                         <p style={{ fontSize: '0.7rem', color: '#666' }}>
+                           Note: Initial generation takes ~9 minutes to load WanVideo GGUF models. 
+                           Subsequent generations will be significantly faster.
+                         </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {videoStage === 'done' && videoUrl && (
+                    <div style={{ width: '100%', height: '100%', position: 'relative' }}>
+                      <video 
+                        src={videoUrl} 
+                        controls 
+                        autoPlay 
+                        loop 
+                        style={{ width: '100%', height: '100%', borderRadius: '8px', objectFit: 'contain' }}
+                      />
+                      <button 
+                        className="btn-secondary"
+                        style={{ position: 'absolute', top: '10px', right: '10px', padding: '0.4rem 0.8rem', fontSize: '0.7rem' }}
+                        onClick={() => window.open(videoUrl)}
+                      >
+                        <Download size={14} /> Download MP4
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
             </motion.div>
           )}
