@@ -4,49 +4,49 @@
     {
       "id": "walk_right",
       "display_name": "Walk Right",
-      "prompt": "Side-view game sprite walk cycle. Character facing right. Character remains centered in frame as if walking on treadmill. Smooth looping motion.",
+      "prompt": "Side-view game sprite walk cycle animation. Character facing right, walking in place on invisible treadmill. Legs and arms move in natural walking motion. Fixed camera, character centered in frame throughout. Solid bright green background #00FF00 must remain completely unchanged. No color grading. No lighting changes.",
       "num_frames": 25,
       "seed": -1
     },
     {
       "id": "run_right",
       "display_name": "Run Right",
-      "prompt": "Side-view game sprite running animation. Character facing right. Fast leg movement, arms pumping. Centered in frame on treadmill.",
+      "prompt": "Side-view game sprite running animation. Character facing right, running in place. Fast leg stride, arms pumping. Fixed camera, character centered in frame throughout. Solid bright green background #00FF00 must remain completely unchanged. No color grading. No lighting changes.",
       "num_frames": 25,
       "seed": -1
     },
     {
       "id": "idle_breathing",
       "display_name": "Idle Breathing",
-      "prompt": "Side-view game sprite idle standing animation. Subtle chest breathing, gentle sway. Character facing right, stationary.",
+      "prompt": "Side-view game sprite idle standing animation. Subtle chest breathing rise and fall, gentle body sway. Character facing right. Fixed camera, character centered in frame throughout. Solid bright green background #00FF00 must remain completely unchanged. No color grading. No lighting changes.",
       "num_frames": 25,
       "seed": -1
     },
     {
       "id": "attack_slash",
       "display_name": "Attack Slash",
-      "prompt": "Side-view game sprite melee attack animation. Character facing right. Full arm swing slash motion. Centered in frame.",
+      "prompt": "Side-view game sprite melee attack animation. Character facing right. Arm swings weapon in full slash arc. Body lunges forward slightly then recovers. Fixed camera, character centered in frame throughout. Solid bright green background #00FF00 must remain completely unchanged. No color grading. No lighting changes.",
       "num_frames": 25,
       "seed": -1
     },
     {
       "id": "jump",
       "display_name": "Jump",
-      "prompt": "Side-view game sprite jump animation. Character facing right. Crouch, leap upward, land. Centered in frame.",
+      "prompt": "Side-view game sprite jump animation. Character facing right. Crouches down, leaps upward with arms raised, lands back down. Fixed camera, character centered in frame throughout. Solid bright green background #00FF00 must remain completely unchanged. No color grading. No lighting changes.",
       "num_frames": 25,
       "seed": -1
     },
     {
       "id": "death",
       "display_name": "Death",
-      "prompt": "Side-view game sprite death animation. Character facing right. Staggers and falls to ground. Centered in frame.",
+      "prompt": "Side-view game sprite death animation. Character facing right. Staggers backward, collapses and falls to the ground. Dramatic motion. Fixed camera, character centered in frame throughout. Solid bright green background #00FF00 must remain completely unchanged. No color grading. No lighting changes.",
       "num_frames": 25,
       "seed": -1
     },
     {
       "id": "hit_reaction",
       "display_name": "Hit Reaction",
-      "prompt": "Side-view game sprite hit reaction flinch animation. Character facing right. Quick recoil then recovery. Centered in frame.",
+      "prompt": "Side-view game sprite hit reaction animation. Character facing right. Quick flinch recoil backward, then recovers to standing pose. Fixed camera, character centered in frame throughout. Solid bright green background #00FF00 must remain completely unchanged. No color grading. No lighting changes.",
       "num_frames": 25,
       "seed": -1
     }

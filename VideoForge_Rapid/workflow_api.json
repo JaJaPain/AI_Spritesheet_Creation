@@ -26,8 +26,8 @@
     "inputs": {
       "model_name": "t5-v1_1-xxl-encoder-Q5_K_M.gguf",
       "precision": "bf16",
-      "positive_prompt": "A character performing a walking loop, stationary and centered, high quality, no purple tint",
-      "negative_prompt": "low quality, blurry, distorted, purple haze, magenta tint",
+      "positive_prompt": "A character performing a walking loop, high quality. Fixed camera, character centered in frame throughout. Solid green background unchanged.",
+      "negative_prompt": "low quality, blurry, distorted, purple haze, magenta tint, color grading, cinematic lighting, background change, blue background, cyan background",
       "quantization": "disabled",
       "use_disk_cache": true,
       "device": "gpu"
@@ -52,7 +52,7 @@
       "width": 480,
       "height": 480,
       "num_frames": 25,
-      "noise_aug_strength": 0.03,
+      "noise_aug_strength": 0.15,
       "start_latent_strength": 1.0,
       "end_latent_strength": 1.0,
       "force_offload": true,
@@ -72,8 +72,8 @@
   },
   "35": {
     "inputs": {
-      "steps": 4,
-      "cfg": 1,
+      "steps": 10,
+      "cfg": 3.5,
       "shift": 5,
       "seed": 42,
       "force_offload": true,
