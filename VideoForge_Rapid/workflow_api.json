@@ -52,7 +52,7 @@
       "width": 480,
       "height": 480,
       "num_frames": 25,
-      "noise_aug_strength": 0.15,
+      "noise_aug_strength": 0.25,
       "start_latent_strength": 1.0,
       "end_latent_strength": 1.0,
       "force_offload": true,
@@ -74,7 +74,7 @@
     "inputs": {
       "steps": 10,
       "cfg": 3.5,
-      "shift": 5,
+      "shift": 8,
       "seed": 42,
       "force_offload": true,
       "scheduler": "unipc",
@@ -106,10 +106,10 @@
   "28": {
     "inputs": {
       "enable_vae_tiling": true,
-      "tile_x": 272,
-      "tile_y": 272,
-      "tile_stride_x": 144,
-      "tile_stride_y": 128,
+      "tile_x": 480,
+      "tile_y": 480,
+      "tile_stride_x": 480,
+      "tile_stride_y": 480,
       "vae": [
         "11",
         0

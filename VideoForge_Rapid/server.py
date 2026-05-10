@@ -46,7 +46,8 @@ async def forge_video(
     image: UploadFile = File(None),
     image_url: str = Form(None),
     prompt: str = Form(...),
-    num_frames: int = Form(24),
+    num_frames: int = Form(25),
+    steps: int = Form(10),
     seed: int = Form(-1)
 ):
     """
@@ -112,7 +113,7 @@ async def forge_video(
         # Update workflow with our specific run data
         workflow["58"]["inputs"]["image"] = temp_path # Load Image Node
         workflow["35"]["inputs"]["seed"] = seed # Sampler Node
-        # steps and cfg use workflow_api.json defaults (10 steps, 3.5 cfg)
+        workflow["35"]["inputs"]["steps"] = steps
         workflow["63"]["inputs"]["num_frames"] = num_frames # Encode Node
         
         # Override the text prompt
@@ -196,7 +197,7 @@ def run_batch_worker(image_path, animations, character_id, view_id):
             if seed == -1:
                 seed = rand_mod.randint(0, 2**32 - 1)
             workflow["35"]["inputs"]["seed"] = seed
-            # steps and cfg come from workflow_api.json defaults (10 steps, 3.5 cfg)
+            workflow["35"]["inputs"]["steps"] = anim.get("steps", 10)
             workflow["63"]["inputs"]["num_frames"] = anim.get("num_frames", 25)
             workflow["16"]["inputs"]["positive_prompt"] = anim["prompt"]
             

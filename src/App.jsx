@@ -446,6 +446,8 @@ function App() {
   const [editingAnim, setEditingAnim] = useState(null)
   const [animDuration, setAnimDuration] = useState(25) // 25=1.5s, 49=3s, 97=6s
   const durationOptions = [{ frames: 25, label: '1.5s' }, { frames: 49, label: '3s' }, { frames: 97, label: '6s' }]
+  const [animQuality, setAnimQuality] = useState(10)
+  const qualityOptions = [{ steps: 10, label: 'Draft' }, { steps: 20, label: 'Standard' }, { steps: 30, label: 'High' }]
 
   // Load preset list
   const loadPresetList = async () => {
@@ -499,7 +501,7 @@ function App() {
       formData.append('image_url', selectedVideoSlice);
     }
     
-    const withDuration = selected.map(a => ({ ...a, num_frames: animDuration }));
+    const withDuration = selected.map(a => ({ ...a, num_frames: animDuration, steps: animQuality }));
     formData.append('animations_json', JSON.stringify(withDuration));
     formData.append('character_id', activeProjectId || 'unknown');
     formData.append('view_id', selectedPresetId);
@@ -594,6 +596,7 @@ function App() {
       
       formData.append('prompt', videoPrompt);
       formData.append('num_frames', animDuration);
+      formData.append('steps', animQuality);
       
       const response = await fetch(`${activeApi}${endpoint}`, {
         method: 'POST',
@@ -2140,13 +2143,24 @@ Flat opaque green background #2E8B57.`;
                 </button>
               </div>
 
-              {/* Duration Toggle */}
-              <div style={{ display: 'flex', gap: '0', marginBottom: '1.5rem', background: 'rgba(255,255,255,0.03)', borderRadius: '10px', padding: '4px', border: '1px solid rgba(255,255,255,0.06)', maxWidth: '300px' }}>
-                {durationOptions.map(opt => (
-                  <button key={opt.frames} onClick={() => setAnimDuration(opt.frames)} style={{ flex: 1, padding: '0.4rem', borderRadius: '8px', border: 'none', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.75rem', background: animDuration === opt.frames ? 'linear-gradient(to right, #10b981, #059669)' : 'transparent', color: animDuration === opt.frames ? '#fff' : '#666', transition: 'all 0.2s' }}>
-                    {opt.label} ({opt.frames}f)
-                  </button>
-                ))}
+              {/* Duration & Quality Toggles */}
+              <div style={{ display: 'flex', gap: '1rem', marginBottom: '1.5rem' }}>
+                <div style={{ display: 'flex', gap: '0', background: 'rgba(255,255,255,0.03)', borderRadius: '10px', padding: '4px', border: '1px solid rgba(255,255,255,0.06)', flex: 1 }}>
+                  <span style={{ padding: '0.4rem 0.6rem', fontSize: '0.65rem', color: '#555', fontWeight: 'bold' }}>⏱</span>
+                  {durationOptions.map(opt => (
+                    <button key={opt.frames} onClick={() => setAnimDuration(opt.frames)} style={{ flex: 1, padding: '0.4rem', borderRadius: '8px', border: 'none', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.75rem', background: animDuration === opt.frames ? 'linear-gradient(to right, #10b981, #059669)' : 'transparent', color: animDuration === opt.frames ? '#fff' : '#666', transition: 'all 0.2s' }}>
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+                <div style={{ display: 'flex', gap: '0', background: 'rgba(255,255,255,0.03)', borderRadius: '10px', padding: '4px', border: '1px solid rgba(255,255,255,0.06)', flex: 1 }}>
+                  <span style={{ padding: '0.4rem 0.6rem', fontSize: '0.65rem', color: '#555', fontWeight: 'bold' }}>✨</span>
+                  {qualityOptions.map(opt => (
+                    <button key={opt.steps} onClick={() => setAnimQuality(opt.steps)} style={{ flex: 1, padding: '0.4rem', borderRadius: '8px', border: 'none', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.75rem', background: animQuality === opt.steps ? 'linear-gradient(to right, #8b5cf6, #6366f1)' : 'transparent', color: animQuality === opt.steps ? '#fff' : '#666', transition: 'all 0.2s' }}>
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               {!batchMode ? (
