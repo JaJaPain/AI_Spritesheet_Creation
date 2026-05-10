@@ -2,115 +2,7 @@ import React, { useState, useEffect, useRef } from 'react'
 import { Sparkles, Wand2, Play, Download, Settings, Image as ImageIcon, Loader2, ArrowLeft, RefreshCw, Save, Upload, X, Check, FolderOpen, HelpCircle, Trash2, ChevronLeft, ChevronRight, Video } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 
-function LivePreview({ rig, params }) {
-  const canvasRef = useRef(null);
-  const [time, setTime] = useState(0);
 
-  useEffect(() => {
-    let frame;
-    const tick = (t) => {
-      setTime(t / 1000 * params.speed);
-      frame = requestAnimationFrame(tick);
-    };
-    frame = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(frame);
-  }, [params.speed]);
-
-  useEffect(() => {
-    if (!canvasRef.current || !rig) return;
-    const ctx = canvasRef.current.getContext('2d');
-    const width = canvasRef.current.width;
-    const height = canvasRef.current.height;
-
-    ctx.clearRect(0, 0, width, height);
-    
-    // Simulate Joint Positions
-    const phase = (time * 2) % (Math.PI * 2);
-    const { stride, bounce } = params;
-    const simulatedJoints = {};
-    
-    Object.entries(rig.joints).forEach(([name, pos]) => {
-      let nx = pos.x;
-      let ny = pos.y;
-      
-      if (name.includes('knee_l') || name.includes('ankle_l') || name.includes('foot_l')) {
-          nx += Math.sin(phase) * stride;
-          ny += Math.max(0, Math.cos(phase)) * bounce;
-      } else if (name.includes('knee_r') || name.includes('ankle_r') || name.includes('foot_r')) {
-          nx += Math.sin(phase + Math.PI) * stride;
-          ny += Math.max(0, Math.cos(phase + Math.PI)) * bounce;
-      }
-      
-      if (name.includes('hip') || name.includes('torso') || name.includes('shoulder') || name.includes('nose')) {
-          ny += Math.abs(Math.sin(phase * 2)) * (bounce * 0.5);
-      }
-      
-      if (name.includes('wrist_l') || name.includes('elbow_l')) {
-          nx += Math.sin(phase + Math.PI) * (stride * 0.5);
-      } else if (name.includes('wrist_r') || name.includes('elbow_r')) {
-          nx += Math.sin(phase) * (stride * 0.5);
-      }
-      
-      simulatedJoints[name] = { x: nx, y: ny };
-    });
-
-    // Draw Skeletal Simulation
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
-    ctx.lineWidth = 2;
-    
-    // Draw Bones (Lines)
-    const bones = [
-      ['shoulder_l', 'elbow_l'], ['elbow_l', 'wrist_l'],
-      ['shoulder_r', 'elbow_r'], ['elbow_r', 'wrist_r'],
-      ['hip_l', 'knee_l'], ['knee_l', 'ankle_l'],
-      ['hip_r', 'knee_r'], ['knee_r', 'ankle_r'],
-      ['shoulder_l', 'shoulder_r'], ['hip_l', 'hip_r']
-    ];
-
-    bones.forEach(([a, b]) => {
-      if (simulatedJoints[a] && simulatedJoints[b]) {
-        ctx.beginPath();
-        ctx.moveTo(simulatedJoints[a].x * width, simulatedJoints[a].y * height);
-        ctx.lineTo(simulatedJoints[b].x * width, simulatedJoints[b].y * height);
-        ctx.stroke();
-      }
-    });
-
-    // Draw Joints
-    Object.entries(simulatedJoints).forEach(([name, pos]) => {
-      ctx.fillStyle = name.includes('_l') ? '#8b5cf6' : name.includes('_r') ? '#d946ef' : '#fff';
-      ctx.beginPath();
-      ctx.arc(pos.x * width, pos.y * height, 4, 0, Math.PI * 2);
-      ctx.fill();
-    });
-
-    // Label
-    ctx.fillStyle = '#666';
-    ctx.font = '10px Inter';
-    ctx.fillText("Real-time Skeletal Overlay", 10, height - 10);
-
-  }, [time, rig, params]);
-
-  return (
-    <div style={{ position: 'relative', width: '100%', height: '100%', minHeight: '350px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      <img src={rig?.url} style={{ maxHeight: '80%', maxWidth: '80%', objectFit: 'contain', opacity: 0.3, filter: 'grayscale(1)' }} />
-      <canvas 
-        ref={canvasRef} 
-        width={400} 
-        height={400} 
-        style={{ 
-          position: 'absolute', 
-          top: '50%', 
-          left: '50%', 
-          transform: 'translate(-50%, -50%)',
-          width: '100%',
-          height: '100%',
-          pointerEvents: 'none'
-        }} 
-      />
-    </div>
-  );
-}
 function LimbMasker({ imageUrl, onSave, onCancel, title, initialMask }) {
   const canvasRef = useRef(null);
   const maskCanvasRef = useRef(null);
@@ -528,6 +420,8 @@ function App() {
   const [isLoadModalOpen, setIsLoadModalOpen] = useState(false)
   const [savedProjects, setSavedProjects] = useState([])
   const [isDeleteMode, setIsDeleteMode] = useState(false)
+  const [isResetMode, setIsResetMode] = useState(false)
+
   const [projectToDelete, setProjectToDelete] = useState(null)
   const [numGenerations, setNumGenerations] = useState(1)
   const [zoomLevel, setZoomLevel] = useState(1)
@@ -540,10 +434,7 @@ function App() {
   const [selectedVersionIndices, setSelectedVersionIndices] = useState([0, 0, 0, 0, 0])
   const [slicing, setSlicing] = useState(false)
   
-  // Rigging State
-  const [rigData, setRigData] = useState([])
-  const [rigging, setRigging] = useState(false)
-  const [selectedRigIdx, setSelectedRigIdx] = useState(0)
+
   
   // Surgery & Correction State
   const [isMasking, setIsMasking] = useState(false)
@@ -556,11 +447,7 @@ function App() {
     setSliceDirections(newDirs);
   }
   const [targetRotation, setTargetRotation] = useState('front-quarter')
-  const [regeneratingLimb, setRegeneratingLimb] = useState(null)
-  const [poseLabels, setPoseLabels] = useState({}) // { index: 'front' }
-  const [activeDirection, setActiveDirection] = useState(null)
-  const [directionalLimbPacks, setDirectionalLimbPacks] = useState({}) // { 'front': { limbs } }
-  const [directionalLimbMasks, setDirectionalLimbMasks] = useState({}) // { 'front': { 'torso': maskBase64 } }
+
 
   // Video Forge State
   const [videoStage, setVideoStage] = useState('idle') // idle, generating, done
@@ -570,6 +457,8 @@ function App() {
   const [videoHeartbeat, setVideoHeartbeat] = useState({ status: 'Offline', progress: 0 })
   const [videoEngineReady, setVideoEngineReady] = useState(false)
   const [isWarmingUp, setIsWarmingUp] = useState(false)
+  const [activeSurgicalIndex, setActiveSurgicalIndex] = useState(null)
+
 
   // Video Engine Heartbeat Poller
   useEffect(() => {
@@ -847,15 +736,18 @@ Continue?`;
     }
   }
 
-  const handleSaveProject = async () => {
+  const handleSaveProject = async (silent = false, overrideVersions = null, overrideIndices = null) => {
     // Increment click count for force override
-    const newCount = saveClickCount + 1;
-    setSaveClickCount(newCount);
-    const forceOverwrite = newCount >= 3;
-    
-    if (forceOverwrite) {
-      console.log(">>> [FORCE] Overwriting project file...");
-      setSaveClickCount(0);
+    let forceOverwrite = false;
+    if (!silent) {
+      const newCount = saveClickCount + 1;
+      setSaveClickCount(newCount);
+      forceOverwrite = newCount >= 3;
+      
+      if (forceOverwrite) {
+        console.log(">>> [FORCE] Overwriting project file...");
+        setSaveClickCount(0);
+      }
     }
 
     try {
@@ -867,8 +759,8 @@ Continue?`;
           image_url: turnaroundUrl,
           project_id: activeProjectId,
           force_overwrite: forceOverwrite,
-          all_slice_versions: allSliceVersions,
-          selected_indices: selectedVersionIndices
+          all_slice_versions: overrideVersions || allSliceVersions,
+          selected_indices: overrideIndices || selectedVersionIndices
         })
       });
       const data = await res.json();
@@ -878,7 +770,7 @@ Continue?`;
         const cleanPath = data.image_url.startsWith('/') ? data.image_url : `/${data.image_url}`;
         setTurnaroundUrl(`${apiBase}${cleanPath}?t=${Date.now()}`);
         setWandHistory([]);
-        alert(`Project saved as ${data.project_id}`);
+        if (!silent) alert(`Project saved as ${data.project_id}`);
       }
     } catch (err) {
       console.error("Failed to save project:", err);
@@ -948,7 +840,7 @@ Continue?`;
     }
   }
 
-  const fetchSavedProjects = async (deleteMode = false) => {
+  const fetchSavedProjects = async (mode = 'load') => {
     try {
       console.log("Fetching project list...");
       const res = await fetch(`${apiBase}/list-projects`);
@@ -958,8 +850,10 @@ Continue?`;
       const data = await res.json();
       if (data.status === 'success') {
         setSavedProjects(data.saves);
-        setIsDeleteMode(deleteMode);
+        setIsDeleteMode(mode === 'delete');
+        setIsResetMode(mode === 'reset');
         setIsLoadModalOpen(true);
+
       } else {
         alert("Server failed to list projects: " + (data.message || "Unknown error"));
       }
@@ -970,8 +864,9 @@ Continue?`;
   }
 
   const handleResetProject = async (project) => {
-    const msg = `FACTORY RESET: This will delete all AI corrections for ${project.id} and restore the ORIGINAL character sheet.\n\nThis cannot be undone. Continue?`;
+    const msg = `This will reset this folder back to the original turnaround and will delete all other images in this folder.\n\nThis cannot be undone. Continue?`;
     if (!window.confirm(msg)) return;
+
     
     try {
       const res = await fetch(`${apiBase}/reset-project`, {
@@ -1119,28 +1014,7 @@ Continue?`;
     }
   }
 
-  const handleRig = async () => {
-    setRigging(true)
-    try {
-      const res = await fetch(`${apiBase}/rig-poses`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          frame_urls: slicedUrls,
-          project_id: activeProjectId
-        })
-      })
-      const data = await res.json()
-      if (data.status === 'success') {
-        setRigData(data.rigs)
-        setStage('rigging')
-      }
-    } catch (err) {
-      console.error("Error rigging:", err)
-    } finally {
-      setRigging(false)
-    }
-  }
+
 
   const toggleExcludeFrame = (index) => {
     setExcludedFrames(prev => {
@@ -1175,165 +1049,11 @@ Continue?`;
   }
 
 
-  const swapLimbSource = async (limbName, sourceIdx) => {
-    // Re-trigger extraction for just one limb? 
-    // For simplicity, let's just re-run the full extraction with a new source
-    setLoading(true);
-    try {
-      const res = await fetch(`${apiBase}/extract-limbs`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          project_id: activeProjectId,
-          pose_index: 0, 
-          source_pose_index: sourceIdx,
-          label: activeDirection
-        })
-      });
-      const data = await res.json();
-      if (data.status === 'success') {
-        setDirectionalLimbPacks(prev => ({
-          ...prev,
-          [activeDirection]: { ...prev[activeDirection], [limbName]: data.limb_urls[limbName] }
-        }));
-      }
-    } catch (err) {
-      console.error("Swap failed:", err);
-    } finally {
-      setLoading(false);
-    }
-  }
 
-  const handleGenerateAnimation = async () => {
-    if (!rigData || rigData.length === 0) return;
-    setLoading(true);
-    try {
-      const activeRig = rigData[0];
-      const res = await fetch(`${apiBase}/generate-animation`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          frame_url: activeRig.url,
-          joints: activeRig.joints,
-          project_id: activeProjectId,
-          anim_type: walkParams.type,
-          stride: walkParams.stride,
-          bounce: walkParams.bounce,
-          num_frames: 12,
-          limb_pack: directionalLimbPacks['front'] || {} 
-        })
-      });
-      const data = await res.json();
-      if (data.status === 'success') {
-        setAnimFrames(data.urls.map(u => `${apiBase}${u}`));
-        setStage('preview-animation');
-      }
-    } catch (err) {
-      console.error("Animation failed:", err);
-    } finally {
-      setLoading(false);
-    }
-  }
 
-  const handleCompleteSocket = async (name, url) => {
-    setRegeneratingLimb(name);
-    try {
-      const res = await fetch(`${apiBase}/complete-limb-socket`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          project_id: activeProjectId, 
-          limb_url: url, 
-          limb_name: name,
-          torso_url: directionalLimbPacks[activeDirection]?.torso 
-        })
-      });
-      const data = await res.json();
-      if (data.status === 'success') {
-        setDirectionalLimbPacks(prev => ({
-          ...prev,
-          [activeDirection]: { ...prev[activeDirection], [name]: data.url }
-        }));
-      }
-    } catch (e) { console.error(e); }
-    finally { setRegeneratingLimb(null); }
-  };
 
-  const handleSetPoseLabel = async (idx, label) => {
-    setPoseLabels(prev => ({ ...prev, [idx]: label }));
-    try {
-      await fetch(`${apiBase}/set-pose-label`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project_id: activeProjectId, pose_index: idx, label })
-      });
-    } catch (e) { console.error(e); }
-  };
 
-  const handleExplodeDirection = async (idx) => {
-    const label = poseLabels[idx];
-    if (!label) return;
-    setLoading(true);
-    setActiveDirection(label);
-    try {
-      const res = await fetch(`${apiBase}/extract-limbs`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project_id: activeProjectId, pose_index: idx, label })
-      });
-      const data = await res.json();
-      if (data.status === 'success') {
-        setDirectionalLimbPacks(prev => ({ ...prev, [label]: data.limb_urls }));
-        setStage('directional-surgery');
-      }
-    } catch (e) { console.error(e); }
-    finally { setLoading(false); }
-  };
 
-  const handleGenerateDirectional = async (dir) => {
-     setLoading(true);
-     try {
-       const res = await fetch(`${apiBase}/generate-directional-poses`, {
-         method: 'POST',
-         headers: { 'Content-Type': 'application/json' },
-         body: JSON.stringify({ project_id: activeProjectId, target_direction: dir })
-       });
-       const data = await res.json();
-       if (data.status === 'success') {
-         alert(`Generated ${dir} view!`);
-       }
-     } catch (e) { console.error(e); }
-     finally { setLoading(false); }
-  }
-
-  const [walkParams, setWalkParams] = useState({ stride: 0.15, bounce: 0.05, speed: 1.0, type: 'walk' });
-  const [animFrames, setAnimFrames] = useState([]);
-  const [currentAnimIdx, setCurrentAnimIdx] = useState(0);
-
-  useEffect(() => {
-    if (stage === 'preview-animation' && animFrames.length > 0) {
-      const interval = setInterval(() => {
-        setCurrentAnimIdx(prev => (prev + 1) % animFrames.length);
-      }, 100 / walkParams.speed);
-      return () => clearInterval(interval);
-    }
-  }, [stage, animFrames, walkParams.speed]);
-
-  const handleBuildIndex = async () => {
-    try {
-      const res = await fetch(`${apiBase}/build-character-index`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project_id: activeProjectId })
-      });
-      const data = await res.json();
-      if (data.status === 'success') {
-        alert(`Character Index created! Totality package ready at ${data.index_url}`);
-      }
-    } catch (err) {
-      console.error("Index build failed:", err);
-    }
-  }
 
   const handleQuickFix = async (index, specificDirection = null) => {
     setLoading(true);
@@ -1377,11 +1097,15 @@ Continue?`;
             setAllSliceVersions(absoluteVersions);
             
             // SURGICAL UPDATE: Only auto-select the latest for the slice we just fixed
+            let newIndices = [0, 0, 0, 0, 0];
             setSelectedVersionIndices(prev => {
-              const newIndices = [...prev];
+              newIndices = [...prev];
               newIndices[index] = Math.max(0, absoluteVersions[index].length - 1);
               return newIndices;
             });
+
+            // Persist immediately so it's there if the user navigates away
+            handleSaveProject(true, absoluteVersions, newIndices);
           }
 
           setSlicedUrls(freshUrls);
@@ -1394,17 +1118,7 @@ Continue?`;
   const handleFixPose = async (maskBase64) => {
     setIsMasking(false);
     
-    if (activeManualLimb) {
-      const name = activeManualLimb;
-      // Save mask locally first so it persists even if generation fails
-      setDirectionalLimbMasks(prev => ({
-        ...prev,
-        [activeDirection]: { ...(prev[activeDirection] || {}), [name]: maskBase64 }
-      }));
-      setActiveManualLimb(null);
-      await handleRegenerateLimb(name, maskBase64);
-      return;
-    }
+
 
     setLoading(true);
     try {
@@ -1437,38 +1151,41 @@ Continue?`;
             alpha_matting: alphaMatting,
             force_reslice: true, // MUST force to update files
             foreground_threshold: removalSensitivity,
-            background_threshold: Math.max(0, removalSensitivity - 230)
+            background_threshold: Math.max(0, removalSensitivity - 230),
+            target_slice_index: activeSurgicalIndex
           }),
         });
+
         const sliceData = await sliceRes.json();
         if (sliceData.status === 'success') {
             const freshUrls = sliceData.urls.map(u => `${apiBase}${u}?t=${Date.now()}`);
             
-            // For manual surgery, we might not know which slice changed, 
-            // so we'll check which images are actually different from current selection
-            setAllSliceVersions(prev => {
-              return prev.map((versions, idx) => {
-                const newUrl = freshUrls[idx];
-                if (!versions.includes(newUrl)) {
-                  return [...versions, newUrl];
-                }
-                return versions;
-              });
-            });
+            let absoluteVersions = [];
+            if (sliceData.all_slice_versions) {
+              absoluteVersions = sliceData.all_slice_versions.map(group => 
+                group.map(url => url.startsWith('http') ? url : `${apiBase}${url}`)
+              );
+              setAllSliceVersions(absoluteVersions);
+            } else {
+              // Fallback if not provided (shouldn't happen with new backend)
+              absoluteVersions = allSliceVersions;
+            }
 
             // Auto-select newest versions that were added
+            let newIndices = [0,0,0,0,0];
             setSelectedVersionIndices(prev => {
-              return prev.map((vIdx, idx) => {
+              newIndices = prev.map((vIdx, idx) => {
                 // If we added a new version, select it
-                return allSliceVersions[idx].length; 
+                return absoluteVersions[idx] ? absoluteVersions[idx].length - 1 : vIdx; 
               });
+              return newIndices;
             });
 
             setSlicedUrls(freshUrls);
-            // Stay in current stage or return to slicing? 
-            // Better to stay in rigging if possible, but we need to re-rig
-            alert("Poses updated. Re-analyzing skeletons...");
-            handleRig(); 
+            
+            // Persist immediately
+            handleSaveProject(true, absoluteVersions, newIndices);
+
         }
       }
     } catch (err) {
@@ -1478,35 +1195,7 @@ Continue?`;
     }
   }
 
-  const handleRegenerateLimb = async (limbName, manualMask = null) => {
-    setRegeneratingLimb(limbName);
-    const rigIdx = Object.keys(poseLabels).find(key => poseLabels[key] === activeDirection);
-    const activeRigUrl = rigIdx !== undefined ? rigData[rigIdx].url : selectedAnchor;
-    
-    try {
-      const res = await fetch(`${apiBase}/generate-isolated-limb`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          project_id: activeProjectId,
-          limb_name: limbName,
-          anchor_url: activeRigUrl,
-          mask_image: manualMask
-        })
-      });
-      const data = await res.json();
-      if (data.status === 'success') {
-        setDirectionalLimbPacks(prev => ({
-          ...prev,
-          [activeDirection]: { ...prev[activeDirection], [limbName]: data.url }
-        }));
-      }
-    } catch (err) {
-      console.error("Limb regeneration failed:", err);
-    } finally {
-      setRegeneratingLimb(null);
-    }
-  }
+
 
   const selectAnchor = async (variant) => {
     setSelectedAnchor(variant)
@@ -1555,9 +1244,6 @@ Continue?`;
     setSlicedUrls([])
     setAllSliceVersions([[], [], [], [], []])
     setSelectedVersionIndices([0, 0, 0, 0, 0])
-    setRigData([])
-    setPoseLabels({})
-    setDirectionalLimbPacks({})
   }
 
   // Global Keyboard Shortcuts
@@ -1630,7 +1316,7 @@ Continue?`;
                   <button 
                     className="btn-secondary" 
                     style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.6rem 1rem', fontSize: '0.85rem' }}
-                    onClick={() => fetchSavedProjects(false)}
+                    onClick={() => fetchSavedProjects('load')}
                     disabled={!apiReady}
                   >
                     <FolderOpen size={16} />
@@ -1639,13 +1325,28 @@ Continue?`;
                   <button 
                     className="btn-secondary" 
                     style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.6rem 1rem', fontSize: '0.85rem', borderColor: '#ef444466' }}
-                    onClick={() => fetchSavedProjects(true)}
+                    onClick={() => fetchSavedProjects('delete')}
+
                     disabled={!apiReady}
                   >
                     <Trash2 size={16} color="#ef4444" />
                     Delete Sprite
                   </button>
+                  <button 
+                    className="btn-secondary" 
+                    style={{ 
+                      display: 'flex', alignItems: 'center', justifyContent: 'center', 
+                      padding: '0.6rem', minWidth: '40px', fontSize: '0.75rem', fontWeight: 'bold',
+                      borderColor: 'rgba(139, 92, 246, 0.3)', color: 'var(--accent-primary)'
+                    }} 
+                    onClick={() => fetchSavedProjects('reset')}
+                    disabled={!apiReady}
+                    title="Surgical Reset (SR)"
+                  >
+                    SR
+                  </button>
                 </div>
+
                 <div style={{ display: 'flex', gap: '0.8rem', alignItems: 'center' }}>
                   <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
                     <select 
@@ -2173,6 +1874,8 @@ Continue?`;
                         {loading ? <Loader2 size={12} className="animate-spin" /> : <Wand2 size={12} />}
                         {loading ? 'Processing...' : `Quick Fix ${i+1}`}
                       </button>
+
+
                       <button 
                         className="btn-secondary" 
                         style={{ 
@@ -2218,47 +1921,7 @@ Background: Opaque exact flat chroma green background #00FF00.`;
               })}
               </div>
 
-              {/* Pose Repair / Surgical Correction Area */}
-              <div style={{ 
-                background: 'rgba(0,0,0,0.3)', 
-                padding: '1.5rem', 
-                borderRadius: '12px', 
-                border: '1px solid var(--glass-border)',
-                marginBottom: '3rem',
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                gap: '1rem'
-              }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--accent-primary)' }}>
-                   <Sparkles size={18} />
-                   <span style={{ fontSize: '0.9rem', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '1px' }}>Surgical Pose Repair</span>
-                </div>
-                <p style={{ fontSize: '0.8rem', color: 'var(--text-dim)', maxWidth: '600px' }}>
-                  If a pose was generated incorrectly or is a duplicate, use the <b>Surgical Studio</b> to mask that specific slice and re-roll it with the correct direction.
-                </p>
-                <div style={{ display: 'flex', gap: '0.5rem', background: 'rgba(0,0,0,0.5)', padding: '6px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)' }}>
-                   <select 
-                     className="btn-secondary" 
-                     style={{ border: 'none', background: 'none', fontSize: '0.85rem' }}
-                     value={targetRotation}
-                     onChange={(e) => setTargetRotation(e.target.value)}
-                   >
-                     <option value="front-quarter">Fix to: 3/4 Front</option>
-                     <option value="back-quarter">Fix to: 3/4 Back</option>
-                     <option value="side">Fix to: Side View</option>
-                     <option value="front">Fix to: Front View</option>
-                     <option value="back">Fix to: Back View</option>
-                   </select>
-                   <button 
-                     className="btn-primary" 
-                     onClick={() => setIsMasking(true)} 
-                     style={{ padding: '0.5rem 1.5rem', fontSize: '0.85rem', background: 'var(--accent-primary)', border: 'none' }}
-                   >
-                     <Wand2 size={16} /> Open Surgical Studio
-                   </button>
-                </div>
-              </div>
+
               
               <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}>
                 <button className="btn-secondary" onClick={() => { setStage('prompt'); setSlicedUrls([]); }}>
@@ -2267,388 +1930,12 @@ Background: Opaque exact flat chroma green background #00FF00.`;
                 <button className="btn-secondary" onClick={() => { setStage('prompt'); setIsTurnaroundModalOpen(true); }}>
                   <ArrowLeft size={18} style={{ marginRight: '0.5rem' }} /> Back to Turnaround
                 </button>
-                <button 
-                  className="btn-primary" 
-                  style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem 2rem' }}
-                  onClick={handleRig}
-                  disabled={rigging}
-                >
-                  {rigging ? <Loader2 size={18} className="animate-spin" /> : <Wand2 size={18} />}
-                  {rigging ? 'Analyzing Joints...' : 'Proceed to Rigging (Phase 4)'}
-                </button>
+
               </div>
             </motion.div>
           )}
 
-          {stage === 'rigging' && (
-            <motion.div
-              key="rigging"
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="glass-card"
-              style={{ maxWidth: '1200px', margin: '0 auto', textAlign: 'center' }}
-            >
-              <h2 style={{ marginBottom: '1.5rem' }}>AI <span className="gradient-text">Skeleton Rigging</span></h2>
-              <p style={{ color: 'var(--text-dim)', marginBottom: '2rem' }}>
-                MediaPipe has detected the skeletal joints. These points will serve as pivots for animation.
-              </p>
-              
-              <div style={{ 
-                display: 'grid', 
-                gridTemplateColumns: 'repeat(5, 1fr)', 
-                gap: '1rem',
-                marginBottom: '3rem'
-              }}>
-                {rigData.map((rig, i) => (
-                  <div 
-                    key={i} 
-                    className="glass-card" 
-                    style={{ 
-                      padding: '0', 
-                      overflow: 'hidden', 
-                      height: '350px', 
-                      position: 'relative',
-                      border: selectedRigIdx === i ? '2px solid var(--accent-primary)' : '1px solid var(--glass-border)',
-                      cursor: 'pointer'
-                    }}
-                    onClick={() => setSelectedRigIdx(i)}
-                  >
-                    <div style={{ 
-                      height: '250px', 
-                      display: 'flex', 
-                      alignItems: 'center', 
-                      justifyContent: 'center',
-                      background: '#111',
-                      position: 'relative'
-                    }}>
-                      <img src={rig.url} alt={`Pose ${i}`} style={{ maxHeight: '100%', maxWidth: '100%', objectFit: 'contain' }} />
-                      <svg viewBox="0 0 1 1" style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
-                        {Object.entries(rig.joints).map(([name, pos]) => (
-                          <circle key={name} cx={pos.x} cy={pos.y} r="0.01" fill={pos.v > 0.5 ? "#8b5cf6" : "#444"} stroke="white" strokeWidth="0.002" />
-                        ))}
-                      </svg>
-                    </div>
 
-                    <div style={{ padding: '1rem', background: 'rgba(0,0,0,0.3)' }}>
-                      <select 
-                        className="select-input" 
-                        value={poseLabels[i] || ''} 
-                        onChange={(e) => handleSetPoseLabel(i, e.target.value)}
-                        style={{ width: '100%', marginBottom: '0.5rem', background: '#222', color: 'white', border: '1px solid #444', padding: '4px', borderRadius: '4px' }}
-                      >
-                        <option value="">Assign Direction</option>
-                        <option value="front">Front (S)</option>
-                        <option value="back">Back (N)</option>
-                        <option value="side">Side (E/W)</option>
-                        <option value="3_4_front">3/4 Front</option>
-                        <option value="3_4_back">3/4 Back</option>
-                      </select>
-                      
-                      <button 
-                        className="btn-primary" 
-                        disabled={!poseLabels[i] || loading}
-                        onClick={() => handleExplodeDirection(i)}
-                        style={{ width: '100%', padding: '0.5rem', fontSize: '0.8rem', opacity: poseLabels[i] ? 1 : 0.5 }}
-                      >
-                        {loading && activeDirection === poseLabels[i] ? <Loader2 className="animate-spin" size={14} /> : 'Explode Direction'}
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-              
-              <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}>
-                <button className="btn-secondary" onClick={() => setStage('slicing')}>
-                  <ArrowLeft size={18} /> Back to Slices
-                </button>
-              </div>
-            </motion.div>
-          )}
-
-          {stage === 'directional-surgery' && (
-            <motion.div
-              key="directional-surgery"
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="glass-card"
-              style={{ maxWidth: '1000px', margin: '0 auto', textAlign: 'center' }}
-            >
-              <h2 style={{ marginBottom: '0.5rem' }}>Directional <span className="gradient-text">Surgery: {activeDirection?.toUpperCase()}</span></h2>
-              <p style={{ color: 'var(--text-dim)', marginBottom: '2rem' }}>
-                We've extracted the parts for this specific view. Round out the joints for a seamless animation rig.
-              </p>
-
-              <div style={{ display: 'flex', justifyContent: 'center', gap: '1rem', marginBottom: '2rem' }}>
-                 <button 
-                   className="btn-secondary" 
-                   onClick={async () => {
-                     const limbs = Object.keys(directionalLimbPacks[activeDirection] || {});
-                     for (const l of limbs) {
-                       await handleRegenerateLimb(l);
-                     }
-                   }}
-                   disabled={regeneratingLimb !== null}
-                 >
-                   {regeneratingLimb ? <Loader2 className="animate-spin" size={16} /> : <Wand2 size={16} />}
-                   {regeneratingLimb ? ` Generating ${regeneratingLimb}...` : ` Re-explode Full ${activeDirection} Pack`}
-                 </button>
-              </div>
-
-              <div style={{ 
-                display: 'grid', 
-                gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', 
-                gap: '1.5rem',
-                marginBottom: '3rem'
-              }}>
-
-                {Object.entries(directionalLimbPacks[activeDirection] || {}).map(([name, url]) => (
-                  <div key={name} className="glass-card" style={{ padding: '1rem', background: '#080808' }}>
-                    <div style={{ height: '200px', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: '1rem' }}>
-                       <img src={`${apiBase}${url}`} style={{ maxHeight: '100%', maxWidth: '100%', objectFit: 'contain' }} />
-                    </div>
-                    <div style={{ fontSize: '0.8rem', textTransform: 'uppercase', marginBottom: '0.5rem', color: 'var(--accent-primary)' }}>{name}</div>
-                    
-                    <button 
-                      className="btn-secondary" 
-                      style={{ marginTop: '0.5rem', fontSize: '0.65rem', width: '100%', color: 'var(--accent-primary)' }}
-                      onClick={() => handleRegenerateLimb(name)}
-                      disabled={regeneratingLimb === name}
-                    >
-                      {regeneratingLimb === name ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />} 
-                      {regeneratingLimb === name ? ' Generating...' : ' Explode with AI'}
-                    </button>
-                    <button 
-                      className="btn-secondary" 
-                      style={{ marginTop: '0.4rem', fontSize: '0.65rem', width: '100%', borderColor: 'rgba(139, 92, 246, 0.3)' }}
-                      onClick={() => {
-                        const rigIdx = Object.keys(poseLabels).find(key => poseLabels[key] === activeDirection);
-                        const url = rigIdx !== undefined ? rigData[rigIdx].url : turnaroundUrl;
-                        setTurnaroundUrl(url); // Ensure we mask the correct view
-                        setActiveManualLimb(name);
-                        setIsMasking(true);
-                      }}
-                      disabled={regeneratingLimb === name}
-                    >
-                      <Wand2 size={12} /> Manual Explode
-                    </button>
-                    <button 
-                      className="btn-secondary" 
-                      style={{ marginTop: '0.4rem', fontSize: '0.65rem', width: '100%', borderColor: 'rgba(217, 70, 239, 0.3)' }}
-                      onClick={() => handleCompleteSocket(name, url)}
-                    >
-                      Round Out Joint (Socket)
-                    </button>
-                  </div>
-                ))}
-              </div>
-
-              <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}>
-                <button className="btn-secondary" onClick={() => setStage('rigging')}>Back to Poses</button>
-                <button 
-                  className="btn-primary" 
-                  style={{ padding: '0.75rem 2rem' }}
-                  onClick={() => setStage('8dir-bake')}
-                >
-                  Proceed to 8-Dir Baking
-                </button>
-              </div>
-            </motion.div>
-          )}
-
-          {stage === '8dir-bake' && (
-            <motion.div
-              key="8dir-bake"
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              className="glass-card"
-              style={{ maxWidth: '1000px', margin: '0 auto', textAlign: 'center' }}
-            >
-              <h2 style={{ marginBottom: '1.5rem' }}>8-Directional <span className="gradient-text">Baking</span></h2>
-              <p style={{ color: 'var(--text-dim)', marginBottom: '2rem' }}>
-                Industry Standard: Generate the intermediate 45-degree angles to complete the 8-directional sprite set.
-              </p>
-
-              <div style={{ 
-                display: 'grid', 
-                gridTemplateColumns: 'repeat(4, 1fr)', 
-                gap: '1rem',
-                marginBottom: '3rem'
-              }}>
-                {[
-                  { id: 'N', label: 'North (Back)', type: 'cardinal' },
-                  { id: 'NE', label: 'North-East', type: 'bake' },
-                  { id: 'E', label: 'East (Side)', type: 'cardinal' },
-                  { id: 'SE', label: 'South-East', type: 'bake' },
-                  { id: 'S', label: 'South (Front)', type: 'cardinal' },
-                  { id: 'SW', label: 'South-West', type: 'bake' },
-                  { id: 'W', label: 'West (Side)', type: 'cardinal' },
-                  { id: 'NW', label: 'North-West', type: 'bake' }
-                ].map((dir) => (
-                  <div key={dir.id} className="glass-card" style={{ padding: '1rem', background: '#080808', border: dir.type === 'bake' ? '1px dashed #444' : '1px solid #222' }}>
-                    <div style={{ height: '150px', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: '0.5rem' }}>
-                       {/* Simplified: Show placeholder or generated image */}
-                       <div style={{ color: '#444' }}>{dir.id} View</div>
-                    </div>
-                    <div style={{ fontSize: '0.7rem', fontWeight: 'bold', marginBottom: '0.5rem' }}>{dir.label}</div>
-                    
-                    {dir.type === 'bake' ? (
-                      <button 
-                        className="btn-primary" 
-                        style={{ fontSize: '0.6rem', width: '100%', padding: '4px' }}
-                        onClick={() => handleGenerateDirectional(dir.id)}
-                        disabled={loading}
-                      >
-                        {loading ? 'Baking...' : 'Bake with FLUX'}
-                      </button>
-                    ) : (
-                      <div style={{ fontSize: '0.6rem', color: '#888' }}>Cardinally Set</div>
-                    )}
-                  </div>
-                ))}
-              </div>
-
-              <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}>
-                <button className="btn-secondary" onClick={() => setStage('limb-surgery')}>Back to Surgery</button>
-                <button 
-                  className="btn-primary" 
-                  style={{ padding: '0.75rem 2rem' }}
-                  onClick={() => setStage('anim-tuner')}
-                >
-                  Proceed to Animator
-                </button>
-              </div>
-            </motion.div>
-          )}
-          {stage === 'anim-tuner' && (
-            <motion.div
-              key="anim-tuner"
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              className="glass-card"
-              style={{ maxWidth: '1000px', margin: '0 auto', textAlign: 'center', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2rem' }}
-            >
-              <div style={{ textAlign: 'left' }}>
-                <h2 style={{ marginBottom: '1.5rem' }}>Animation <span className="gradient-text">Tuner</span></h2>
-                <p style={{ color: 'var(--text-dim)', marginBottom: '2rem' }}>
-                  Adjust the parameters for the Mesh Deformation animation.
-                </p>
-
-                <div style={{ marginBottom: '1.5rem' }}>
-                    <label style={{ fontSize: '0.9rem', display: 'block', marginBottom: '0.5rem' }}>Animation Type</label>
-                    <select 
-                      className="btn-secondary" 
-                      style={{ width: '100%', padding: '0.75rem' }}
-                      value={walkParams.type}
-                      onChange={(e) => setWalkParams({...walkParams, type: e.target.value})}
-                    >
-                      <option value="walk">Walk Cycle (Looping)</option>
-                      <option value="jump">Jump / Hop (Looping)</option>
-                      <option value="attack">Basic Attack (Thrust)</option>
-                    </select>
-                 </div>
-
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem', textAlign: 'left', marginBottom: '2rem' }}>
-                  <div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-                       <label style={{ fontSize: '0.9rem' }}>Stride Length</label>
-                       <span style={{ color: 'var(--accent-primary)', fontWeight: 'bold' }}>{walkParams.stride}</span>
-                    </div>
-                    <input type="range" min="0.05" max="0.4" step="0.01" value={walkParams.stride} onChange={(e) => setWalkParams({...walkParams, stride: parseFloat(e.target.value)})} style={{ width: '100%' }} />
-                  </div>
-                  <div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-                       <label style={{ fontSize: '0.9rem' }}>Bounce / Lift</label>
-                       <span style={{ color: 'var(--accent-primary)', fontWeight: 'bold' }}>{walkParams.bounce}</span>
-                    </div>
-                    <input type="range" min="0" max="0.15" step="0.01" value={walkParams.bounce} onChange={(e) => setWalkParams({...walkParams, bounce: parseFloat(e.target.value)})} style={{ width: '100%' }} />
-                  </div>
-                  <div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-                       <label style={{ fontSize: '0.9rem' }}>Playback Speed</label>
-                       <span style={{ color: 'var(--accent-primary)', fontWeight: 'bold' }}>{walkParams.speed}x</span>
-                    </div>
-                    <input type="range" min="0.5" max="2.0" step="0.1" value={walkParams.speed} onChange={(e) => setWalkParams({...walkParams, speed: parseFloat(e.target.value)})} style={{ width: '100%' }} />
-                  </div>
-                </div>
-
-                <div style={{ display: 'flex', gap: '1rem' }}>
-                  <button className="btn-secondary" onClick={() => setStage('rigging')}>Back</button>
-                  <button 
-                    className="btn-primary" 
-                    style={{ flex: 1, padding: '0.75rem' }}
-                    onClick={handleGenerateAnimation}
-                    disabled={loading}
-                  >
-                    {loading ? <Loader2 className="animate-spin" /> : <Play size={18} />} Bake Walk Cycle
-                  </button>
-                </div>
-              </div>
-
-              {/* Real-time Preview */}
-              <div style={{ 
-                background: '#050505', 
-                borderRadius: '12px', 
-                border: '1px solid var(--glass-border)',
-                position: 'relative',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                overflow: 'hidden'
-              }}>
-                <LivePreview 
-                  rig={rigData[0]} 
-                  params={walkParams} 
-                />
-                <div style={{ position: 'absolute', top: '10px', left: '10px', background: 'rgba(0,0,0,0.5)', padding: '2px 8px', borderRadius: '4px', fontSize: '0.7rem', color: 'var(--accent-primary)' }}>
-                  LIVE PREVIEW (REAL-TIME)
-                </div>
-              </div>
-            </motion.div>
-          )}
-
-          {stage === 'preview-animation' && (
-            <motion.div
-              key="preview-animation"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              className="glass-card"
-              style={{ maxWidth: '600px', margin: '0 auto', textAlign: 'center' }}
-            >
-              <h2 style={{ marginBottom: '1.5rem' }}>Animation <span className="gradient-text">Preview</span></h2>
-              
-              <div style={{ 
-                width: '100%', 
-                aspectRatio: '1/1', 
-                background: '#050505', 
-                borderRadius: '12px', 
-                border: '1px solid var(--glass-border)',
-                marginBottom: '2rem',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                overflow: 'hidden'
-              }}>
-                {animFrames.length > 0 && (
-                  <img 
-                    src={animFrames[currentAnimIdx]} 
-                    alt="Animated Preview" 
-                    style={{ maxHeight: '90%', maxWidth: '90%', objectFit: 'contain', imageRendering: 'pixelated' }} 
-                  />
-                )}
-              </div>
-
-              <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}>
-                <button className="btn-secondary" onClick={() => setStage('anim-tuner')}>Adjust Parameters</button>
-                <button 
-                  className="btn-primary"
-                  onClick={handleBuildIndex}
-                  style={{ background: 'var(--accent-secondary)' }}
-                >
-                  Export Character Index (Totality)
-                </button>
-              </div>
-            </motion.div>
-          )}
 
           {stage === 'video-forge' && (
             <motion.div
@@ -2870,8 +2157,11 @@ Background: Opaque exact flat chroma green background #00FF00.`;
               onClick={(e) => e.stopPropagation()}
             >
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
-                <h2 style={{ fontSize: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <Upload size={24} color="var(--accent-secondary)" /> Load Saved Project
+                <h2 style={{ fontSize: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                  <FolderOpen size={24} color="var(--accent-primary)" />
+                  {isDeleteMode ? <span style={{ color: '#ef4444' }}>Delete</span> : 
+                   isResetMode ? <span style={{ color: 'var(--accent-primary)' }}>Reset</span> : 'Load'}{' '}
+                  Project
                 </h2>
                 <button 
                   style={{ background: 'none', border: 'none', color: 'var(--text-dim)', cursor: 'pointer', padding: '0.5rem' }}
@@ -3264,29 +2554,46 @@ Background: Opaque exact flat chroma green background #00FF00.`;
                         onClick={() => {
                           if (isDeleteMode) {
                             setProjectToDelete(project);
+                          } else if (isResetMode) {
+                            handleResetProject(project);
                           } else {
                             handleLoadProject(project);
                           }
                         }}
+
                       >
-                        {isDeleteMode && (
+                        { (isDeleteMode || isResetMode) && (
                         <div style={{ position: 'absolute', top: '1rem', right: '1rem', zIndex: 5, display: 'flex', gap: '0.5rem' }}>
-                          <div 
-                            style={{ background: 'var(--accent-primary)', borderRadius: '50%', padding: '0.35rem', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', boxShadow: '0 2px 10px rgba(0,0,0,0.5)' }}
-                            title="Factory Reset (Restore Original)"
-                            onClick={(e) => { e.stopPropagation(); handleResetProject(project); }}
-                          >
-                            <RefreshCw size={12} color="white" />
-                          </div>
-                          <div 
-                            style={{ background: '#ef4444', borderRadius: '50%', padding: '0.35rem', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', boxShadow: '0 2px 10px rgba(0,0,0,0.5)' }}
-                            title="Delete Project"
-                            onClick={(e) => { e.stopPropagation(); setProjectToDelete(project); }}
-                          >
-                            <Trash2 size={12} color="white" />
-                          </div>
+                          {isResetMode && (
+                            <div 
+                              style={{ background: 'var(--accent-primary)', borderRadius: '50%', padding: '0.35rem', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', boxShadow: '0 2px 10px rgba(0,0,0,0.5)' }}
+                              title="Reset Project"
+                              onClick={(e) => { e.stopPropagation(); handleResetProject(project); }}
+                            >
+                              <RefreshCw size={12} color="white" />
+                            </div>
+                          )}
+                          {isDeleteMode && (
+                            <>
+                              <div 
+                                style={{ background: 'var(--accent-primary)', borderRadius: '50%', padding: '0.35rem', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', boxShadow: '0 2px 10px rgba(0,0,0,0.5)' }}
+                                title="Factory Reset (Restore Original)"
+                                onClick={(e) => { e.stopPropagation(); handleResetProject(project); }}
+                              >
+                                <RefreshCw size={12} color="white" />
+                              </div>
+                              <div 
+                                style={{ background: '#ef4444', borderRadius: '50%', padding: '0.35rem', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', boxShadow: '0 2px 10px rgba(0,0,0,0.5)' }}
+                                title="Delete Project"
+                                onClick={(e) => { e.stopPropagation(); setProjectToDelete(project); }}
+                              >
+                                <Trash2 size={12} color="white" />
+                              </div>
+                            </>
+                          )}
                         </div>
                         )}
+
                         <div style={{ 
                           width: '100%', aspectRatio: '16/9', background: '#000', borderRadius: '4px', overflow: 'hidden', marginBottom: '1rem',
                           border: '1px solid var(--glass-border)'

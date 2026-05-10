@@ -1407,38 +1407,59 @@ async def delete_project(project_id: str):
 
 @app.post("/reset-project")
 async def reset_project(req: dict):
-    """Restores the project to the ORIGINAL sheet and clears AI corrections."""
+    """Restores the project to the ORIGINAL sheet and clears ALL AI corrections."""
     try:
         pid = req.get("project_id")
         project_dir = os.path.join("Output_Saves", pid)
         original_sheet = os.path.join(project_dir, f"{pid}_turnaround_ORIGINAL.png")
-        if not os.path.exists(original_sheet):
-             raise HTTPException(status_code=404, detail="Original sheet not found")
         
-        # Keep original and metadata, delete everything else
+        if not os.path.exists(original_sheet):
+             # Fallback: if ORIGINAL doesn't exist, try the base turnaround.png
+             original_sheet = os.path.join(project_dir, f"{pid}_turnaround.png")
+             
+        if not os.path.exists(original_sheet):
+             raise HTTPException(status_code=404, detail="Original turnaround image not found")
+        
+        # 1. CACHE ESSENTIAL METADATA
+        meta_path = os.path.join(project_dir, "metadata.json")
+        core_meta = {}
+        if os.path.exists(meta_path):
+            with open(meta_path, "r") as f:
+                old_meta = json.load(f)
+            # Keep only the "Creation" state
+            core_meta = {
+                "id": old_meta.get("id", pid),
+                "prompt": old_meta.get("prompt", ""),
+                "seed": old_meta.get("seed"),
+                "created_at": old_meta.get("created_at", time.time()),
+                "updated_at": time.time(),
+                "image_url": f"/output_saves/{pid}/{pid}_turnaround.png"
+            }
+        
+        # 2. DELETE EVERYTHING ELSE
+        # We delete all files and folders except the original sheet and metadata.json
         for f in os.listdir(project_dir):
             path = os.path.join(project_dir, f)
             if f != "metadata.json" and f != f"{pid}_turnaround_ORIGINAL.png":
-                if os.path.isfile(path): os.remove(path)
-                elif os.path.isdir(path): shutil.rmtree(path)
+                try:
+                    if os.path.isfile(path): os.remove(path)
+                    elif os.path.isdir(path): shutil.rmtree(path)
+                except Exception as de:
+                    logger.warning(f"  Failed to delete {f} during reset: {de}")
         
-        # Re-link original
+        # 3. RESTORE ORIGINAL SHEET
         shutil.copy2(original_sheet, os.path.join(project_dir, f"{pid}_turnaround.png"))
         
-        # Reset metadata
-        meta_path = os.path.join(project_dir, "metadata.json")
-        with open(meta_path, "r") as f:
-            meta = json.load(f)
-        meta["image_url"] = f"/output_saves/{pid}/{pid}_turnaround.png"
-        meta.pop("all_slice_versions", None)
-        meta.pop("slice_segments", None)
+        # 4. WRITE FRESH METADATA
         with open(meta_path, "w") as f:
-            json.dump(meta, f)
+            json.dump(core_meta, f)
             
+        logger.info(f"Project {pid} reset to factory state.")
         return {"status": "success"}
     except Exception as e:
         logger.error(f"Error resetting project {pid}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/save-project")
 async def save_project(req: SaveProjectRequest):
@@ -1528,25 +1549,26 @@ async def slice_turnaround(req: SliceRequest):
             shutil.copy2(project_sheet_path, backup_path)
             logger.info(f"  Golden Backup created for manual/existing turnaround: {backup_path}")
             
-        # Ensure metadata exists
+        # Ensure metadata exists and is loaded early
         meta_path = os.path.join(output_dir, "metadata.json")
+        meta = {}
+        if os.path.exists(meta_path):
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
         
         # Determine the relative URL for the sheet being sliced
-        # If it's already a relative /output_saves/ URL, use it. Otherwise, use the project sheet name.
         sheet_rel_url = req.image_url
         if not sheet_rel_url.startswith("/output_saves/"):
             sheet_rel_url = f"/output_saves/{pid}/{project_sheet_name}"
 
-        if not os.path.exists(meta_path):
-            with open(meta_path, "w") as f:
-                json.dump({"id": pid, "created_at": time.time(), "image_url": sheet_rel_url}, f)
-        else:
-            # Load existing meta to preserve other fields
-            with open(meta_path, "r") as f:
-                meta = json.load(f)
-            meta["image_url"] = sheet_rel_url
-            with open(meta_path, "w") as f:
-                json.dump(meta, f)
+        # Initialize or update image_url
+        meta["image_url"] = sheet_rel_url
+        if "id" not in meta: meta["id"] = pid
+        if "created_at" not in meta: meta["created_at"] = time.time()
+        
+        with open(meta_path, "w") as f:
+            json.dump(meta, f)
+
             
         # Smart Cache: Only reuse if files exist AND sheet hasn't changed AND we aren't forcing
         if not is_new_project and not getattr(req, 'force_reslice', False):
@@ -1763,7 +1785,20 @@ async def slice_turnaround(req: SliceRequest):
                 # IMPORTANT: We crop from 'image' (the clean sheet), NOT 'working_image'
                 # (crop is already defined above)
                 
-                if req.remover_type == "none":
+                # --- SURGICAL OPTIMIZATION ---
+                # Only run expensive AI background removal if this is the target slice
+                # or if it's a global reslice (None).
+                is_target = (req.target_slice_index is None or req.target_slice_index == i)
+                
+                if not is_target:
+                    # Non-target slice: Use simple removal for the stitched sheet to stay fast
+                    no_bg = crop.convert("RGBA")
+                    data = np.array(no_bg)
+                    r, g, b, a = data.T
+                    white_mask = (r > 240) & (g > 240) & (b > 240)
+                    data[..., 3][white_mask.T] = 0
+                    no_bg = Image.fromarray(data)
+                elif req.remover_type == "none":
                     # Do nothing, just use the raw crop
                     no_bg = crop.convert("RGBA")
                 elif req.remover_type == "simple":
@@ -1908,24 +1943,37 @@ async def slice_turnaround(req: SliceRequest):
             
             # 1. Save the individual normalized pose for rigging/display
             # SURGICAL VERSIONING: Only add a unique tag if this is the target slice
+            is_target = (req.target_slice_index is None or req.target_slice_index == i)
             v_tag = ""
-            if req.force_reslice:
-                if req.target_slice_index is None or req.target_slice_index == i:
+            
+            if is_target:
+                if req.force_reslice:
                     v_tag = f"_{int(time.time()) % 100000}"
-            
-            out_name = f"{pid}_pose_{i}{v_tag}.png"
-            
-            canvas = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
-            cpaste_x = (512 - new_w) // 2
-            cpaste_y = 512 - new_h - 10
-            canvas.paste(resized, (cpaste_x, cpaste_y), resized)
-            
-            save_path = os.path.join(output_dir, out_name)
-            canvas.save(save_path)
-            
-            url_prefix = f"/output_saves/{pid}/"
-            new_url = f"{url_prefix}{out_name}"
-            sliced_urls.append(new_url)
+                out_name = f"{pid}_pose_{i}{v_tag}.png"
+                
+                canvas = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+                cpaste_x = (512 - new_w) // 2
+                cpaste_y = 512 - new_h - 10
+                canvas.paste(resized, (cpaste_x, cpaste_y), resized)
+                
+                save_path = os.path.join(output_dir, out_name)
+                canvas.save(save_path)
+                
+                url_prefix = f"/output_saves/{pid}/"
+                new_url = f"{url_prefix}{out_name}"
+                sliced_urls.append(new_url)
+                logger.info(f"    Saved NEW version for target slice {i+1}: {out_name}")
+            else:
+                # HANDS OFF: Reuse existing filename and skip saving
+                try:
+                    current_url = meta["all_slice_versions"][i][meta["selected_indices"][i]]
+                    sliced_urls.append(current_url)
+                    logger.info(f"    Keeping existing version for slice {i+1}: {current_url}")
+                except:
+                    # Fallback if metadata is missing
+                    out_name = f"{pid}_pose_{i}.png"
+                    sliced_urls.append(f"/output_saves/{pid}/{out_name}")
+
             
             # 2. Paste into the "Perfect Stitched Sheet" slots (512px each)
             slot_x = i * 512
@@ -1981,9 +2029,14 @@ async def slice_turnaround(req: SliceRequest):
             
             # Append new versions to the history
             for i, url in enumerate(sliced_urls):
+                # SURGICAL METADATA: Only add to history if this is the target
+                if req.target_slice_index is not None and i != req.target_slice_index:
+                    continue
+                    
                 if i < len(meta["all_slice_versions"]):
                     if url not in meta["all_slice_versions"][i]:
                         meta["all_slice_versions"][i].append(url)
+
             
             # Update current selected indices to point to these new versions
             if req.target_slice_index is not None:
