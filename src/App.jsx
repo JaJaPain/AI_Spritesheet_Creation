@@ -593,6 +593,7 @@ function App() {
       }
       
       formData.append('prompt', videoPrompt);
+      formData.append('num_frames', animDuration);
       
       const response = await fetch(`${activeApi}${endpoint}`, {
         method: 'POST',
