@@ -444,6 +444,8 @@ function App() {
   const [batchChecked, setBatchChecked] = useState({})
   const [batchStatus, setBatchStatus] = useState({ running: false, total: 0, completed: 0, current_name: '', results: [] })
   const [editingAnim, setEditingAnim] = useState(null)
+  const [animDuration, setAnimDuration] = useState(25) // 25=1.5s, 49=3s, 97=6s
+  const durationOptions = [{ frames: 25, label: '1.5s' }, { frames: 49, label: '3s' }, { frames: 97, label: '6s' }]
 
   // Load preset list
   const loadPresetList = async () => {
@@ -497,7 +499,8 @@ function App() {
       formData.append('image_url', selectedVideoSlice);
     }
     
-    formData.append('animations_json', JSON.stringify(selected));
+    const withDuration = selected.map(a => ({ ...a, num_frames: animDuration }));
+    formData.append('animations_json', JSON.stringify(withDuration));
     formData.append('character_id', activeProjectId || 'unknown');
     formData.append('view_id', selectedPresetId);
     
@@ -2134,6 +2137,15 @@ Flat opaque green background #2E8B57.`;
                 <button onClick={() => setBatchMode(true)} style={{ flex: 1, padding: '0.5rem', borderRadius: '8px', border: 'none', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.8rem', background: batchMode ? 'linear-gradient(to right, #f59e0b, #ef4444)' : 'transparent', color: batchMode ? '#fff' : '#666', transition: 'all 0.2s' }}>
                   <Play size={14} style={{ marginRight: '0.4rem', verticalAlign: 'middle' }} />Batch Mode
                 </button>
+              </div>
+
+              {/* Duration Toggle */}
+              <div style={{ display: 'flex', gap: '0', marginBottom: '1.5rem', background: 'rgba(255,255,255,0.03)', borderRadius: '10px', padding: '4px', border: '1px solid rgba(255,255,255,0.06)', maxWidth: '300px' }}>
+                {durationOptions.map(opt => (
+                  <button key={opt.frames} onClick={() => setAnimDuration(opt.frames)} style={{ flex: 1, padding: '0.4rem', borderRadius: '8px', border: 'none', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.75rem', background: animDuration === opt.frames ? 'linear-gradient(to right, #10b981, #059669)' : 'transparent', color: animDuration === opt.frames ? '#fff' : '#666', transition: 'all 0.2s' }}>
+                    {opt.label} ({opt.frames}f)
+                  </button>
+                ))}
               </div>
 
               {!batchMode ? (
