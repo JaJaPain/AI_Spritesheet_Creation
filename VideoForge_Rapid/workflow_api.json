@@ -39,23 +39,6 @@
     "class_type": "LoadImage",
     "_meta": { "title": "Load Image" }
   },
-  "12": {
-    "inputs": {
-      "clip_name": "clip_vision_h.safetensors"
-    },
-    "class_type": "CLIPVisionLoader",
-    "_meta": { "title": "CLIP Vision Loader" }
-  },
-  "65": {
-    "inputs": {
-      "strength": 1.0,
-      "crop": "center",
-      "clip_vision": ["12", 0],
-      "start_image": ["58", 0]
-    },
-    "class_type": "WanVideoClipVisionEncode",
-    "_meta": { "title": "WanVideo CLIP Vision Encode" }
-  },
   "63": {
     "inputs": {
       "width": 480,
@@ -66,8 +49,7 @@
       "end_latent_strength": 1.0,
       "force_offload": true,
       "vae": ["11", 0],
-      "start_image": ["58", 0],
-      "clip_vision_embeds": ["65", 0]
+      "start_image": ["58", 0]
     },
     "class_type": "WanVideoImageToVideoEncode",
     "_meta": { "title": "WanVideo ImageToVideo Encode" }
