@@ -67,7 +67,7 @@
       "height": 480,
       "num_frames": 25,
       "noise_aug_strength": 0.15,
-      "start_latent_strength": 0.7,
+      "start_latent_strength": 0.85,
       "end_latent_strength": 1.0,
       "force_offload": true,
       "vae": ["11", 0],
