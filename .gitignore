@@ -54,3 +54,19 @@ backend/Output_Saves/
 # ComfyUI / VideoCreation (large, local-only)
 VideoCreation/
 legacy_archive/
+
+# ComfyTestFolder - entire ComfyUI install (has its own .git)
+ComfyTestFolder/
+
+# Pull_Frames_Check - generated assets
+Pull_Frames_Check/backend/uploads/
+Pull_Frames_Check/backend/frames/
+Pull_Frames_Check/backend/processed/
+Pull_Frames_Check/backend/__pycache__/
+Pull_Frames_Check/*.mp4
+
+# Video outputs
+*.mp4
+*.avi
+*.mov
+*.webm
