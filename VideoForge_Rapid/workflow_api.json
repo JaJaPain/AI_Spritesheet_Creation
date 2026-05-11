@@ -108,8 +108,8 @@
       "enable_vae_tiling": true,
       "tile_x": 480,
       "tile_y": 480,
-      "tile_stride_x": 480,
-      "tile_stride_y": 480,
+      "tile_stride_x": 240,
+      "tile_stride_y": 240,
       "vae": [
         "11",
         0
