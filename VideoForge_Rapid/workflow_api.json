@@ -72,7 +72,7 @@
       "force_offload": true,
       "vae": ["11", 0],
       "start_image": ["58", 0],
-      "clip_vision_embeds": ["65", 0]
+      "clip_embeds": ["65", 0]
     },
     "class_type": "WanVideoImageToVideoEncode",
     "_meta": { "title": "WanVideo ImageToVideo Encode" }
