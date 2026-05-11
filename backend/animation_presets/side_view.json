@@ -4,7 +4,7 @@
     {
       "id": "walk_right",
       "display_name": "Walk Right",
-      "prompt": "Side-view game sprite walk cycle animation. Character facing right, walking in place on invisible treadmill. Legs and arms move in natural walking motion. Fixed camera, character centered in frame throughout. Solid bright green background #00FF00 must remain completely unchanged. No color grading. No lighting changes.",
+      "prompt": "Side-view 2D game sprite walk cycle animation. Character facing right. Strong exaggerated walking motion with high motion amplitude. Full stride treadmill walk cycle. Large arm swings. Clear alternating leg steps. Feet lifting visibly off the ground. Dynamic pose transitions between frames. Character remains perfectly centered. Fixed side camera. Bright solid green background #00FF00 remains perfectly unchanged. No lighting changes. No cinematic effects. No camera movement.",
       "num_frames": 25,
       "seed": -1
     },

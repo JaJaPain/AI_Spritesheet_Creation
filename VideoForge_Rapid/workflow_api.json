@@ -52,7 +52,7 @@
       "width": 480,
       "height": 480,
       "num_frames": 25,
-      "noise_aug_strength": 0.25,
+      "noise_aug_strength": 0.55,
       "start_latent_strength": 1.0,
       "end_latent_strength": 1.0,
       "force_offload": true,
@@ -73,7 +73,7 @@
   "35": {
     "inputs": {
       "steps": 10,
-      "cfg": 1.5,
+      "cfg": 1.0,
       "shift": 5,
       "seed": 42,
       "force_offload": true,
