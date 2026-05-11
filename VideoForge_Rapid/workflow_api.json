@@ -73,8 +73,8 @@
   "35": {
     "inputs": {
       "steps": 10,
-      "cfg": 3.5,
-      "shift": 8,
+      "cfg": 1.5,
+      "shift": 5,
       "seed": 42,
       "force_offload": true,
       "scheduler": "unipc",
@@ -84,7 +84,7 @@
       "rope_function": "comfy",
       "start_step": 0,
       "end_step": -1,
-      "add_noise_to_samples": false,
+      "add_noise_to_samples": true,
       "model": [
         "10",
         0
