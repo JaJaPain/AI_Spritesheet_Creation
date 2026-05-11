@@ -89,15 +89,15 @@ async def forge_video(
 
         # --- ADVANCED COMPOSITING (Sea Green & Square Frame) ---
         img = Image.open(temp_path).convert("RGBA")
-        target_size = 720
-        sea_green = (46, 139, 87, 255) 
+        target_size = 480
+        bright_green = (0, 255, 0, 255)
         
         w, h = img.size
         scale = min(target_size / w, target_size / h) * 0.85
         new_w, new_h = int(w * scale), int(h * scale)
         img_resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
         
-        canvas = Image.new("RGBA", (target_size, target_size), sea_green)
+        canvas = Image.new("RGBA", (target_size, target_size), bright_green)
         paste_x = (target_size - new_w) // 2
         paste_y = (target_size - new_h) // 2
         canvas.alpha_composite(img_resized, (paste_x, paste_y))
