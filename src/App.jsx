@@ -597,6 +597,8 @@ function App() {
       formData.append('prompt', videoPrompt);
       formData.append('num_frames', animDuration);
       formData.append('steps', animQuality);
+      formData.append('character_id', activeProjectId || 'unknown');
+      formData.append('view_id', selectedPresetId || 'side_view');
       
       const response = await fetch(`${activeApi}${endpoint}`, {
         method: 'POST',

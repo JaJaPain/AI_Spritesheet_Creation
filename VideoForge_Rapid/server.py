@@ -48,7 +48,9 @@ async def forge_video(
     prompt: str = Form(...),
     num_frames: int = Form(25),
     steps: int = Form(10),
-    seed: int = Form(-1)
+    seed: int = Form(-1),
+    character_id: str = Form("unknown"),
+    view_id: str = Form("side_view")
 ):
     """
     Rapid Forge: Optimized for Wan 2.2 4-step generation.
@@ -123,10 +125,16 @@ async def forge_video(
         video_path = wrapper.run_workflow(workflow)
         
         if video_path:
-            # Move to our outputs
-            final_filename = f"rapid_out_{int(time.time())}.mp4"
-            final_path = os.path.join(OUTPUT_DIR, final_filename)
+            # Save to project folder
+            anim_dir = os.path.join(PROJECT_SAVES_DIR, character_id, "animations", view_id)
+            os.makedirs(anim_dir, exist_ok=True)
+            final_filename = f"single_{int(time.time())}.mp4"
+            final_path = os.path.join(anim_dir, final_filename)
             shutil.copy(video_path, final_path)
+            
+            # Also keep a copy in outputs for the video URL response
+            out_path = os.path.join(OUTPUT_DIR, final_filename)
+            shutil.copy(video_path, out_path)
             
             progress_state["status"] = "Success"
             progress_state["progress"] = 100
