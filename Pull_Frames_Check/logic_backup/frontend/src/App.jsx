@@ -24,24 +24,13 @@ import {
   Eraser,
   Sparkles,
   Square,
-  PenTool,
-  Droplet
+  PenTool
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 const API_BASE = "http://127.0.0.1:8000";
 
-const SurgicalStudio = ({ 
-  projectId, 
-  frameName, 
-  initialUrl, 
-  onSave, 
-  onCancel,
-  showGuides,
-  setShowGuides,
-  guidePos,
-  setGuidePos
-}) => {
+const SurgicalStudio = ({ projectId, frameName, initialUrl, onSave, onCancel }) => {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
   const [isDrawing, setIsDrawing] = useState(false);
@@ -58,21 +47,8 @@ const SurgicalStudio = ({
   const [selection, setSelection] = useState(null); // { x, y, w, h }
   const [lassoPoints, setLassoPoints] = useState([]);
   const [isSelecting, setIsSelecting] = useState(false);
-  const [graftRotation, setGraftRotation] = useState(0);
-  const [graftZOrder, setGraftZOrder] = useState('front'); // 'front' or 'back'
-  const [graftFlipH, setGraftFlipH] = useState(false);
-  const [graftFlipV, setGraftFlipV] = useState(false);
-  const [smudgeStrength, setSmudgeStrength] = useState(0.5);
-  const lastDrawPos = useRef(null);
   
   const lastPos = useRef({ x: 0, y: 0 });
-  const [isDraggingGuides, setIsDraggingGuides] = useState(false);
-
-  const handleStudioGuideMove = (e) => {
-    if (!isDraggingGuides || !showGuides) return;
-    const pos = getMousePos(e);
-    setGuidePos(pos);
-  };
 
   const startSelection = (e) => {
     const pos = getMousePos(e);
@@ -170,18 +146,9 @@ const SurgicalStudio = ({
 
     // Draw the graft centered on click
     ctx.save();
-    
-    if (graftZOrder === 'back') {
-      ctx.globalCompositeOperation = 'destination-over';
-    } else {
-      ctx.globalCompositeOperation = 'source-over';
-    }
-
-    ctx.translate(pos.x, pos.y);
-    ctx.rotate(graftRotation * Math.PI / 180);
-    ctx.scale(graftFlipH ? -1 : 1, graftFlipV ? -1 : 1);
-    ctx.drawImage(graftSource.canvas, -graftSource.w/2, -graftSource.h/2);
-    
+    // Simple feathering: use a temporary canvas with a radial mask?
+    // For now, clean stamp is better for precision.
+    ctx.drawImage(graftSource.canvas, pos.x - graftSource.w/2, pos.y - graftSource.h/2);
     ctx.restore();
     saveState();
   };
@@ -311,8 +278,7 @@ const SurgicalStudio = ({
     }
     setIsDrawing(true);
     const pos = getMousePos(e);
-    lastDrawPos.current = pos;
-    if (tool === 'eraser') draw(pos.x, pos.y);
+    draw(pos.x, pos.y);
   };
 
   const onDoubleClick = (e) => {
@@ -337,63 +303,25 @@ const SurgicalStudio = ({
       return;
     }
     if (!isDrawing) return;
-    if (isDraggingGuides) {
-      handleStudioGuideMove(e);
-      return;
-    }
-    if (tool === 'eraser') {
-      draw(pos.x, pos.y);
-    } else if (tool === 'smudge') {
-      smudge(pos.x, pos.y);
-    }
-    lastDrawPos.current = pos;
+    draw(pos.x, pos.y);
   };
 
   const onMouseUp = () => {
-    if (isDrawing) saveState();
     setIsDrawing(false);
     setIsPanning(false);
-    setIsDraggingGuides(false);
     if (isSelecting) endSelection();
-    lastDrawPos.current = null;
   };
 
   const draw = (x, y) => {
+    if (tool !== 'eraser') return;
     const canvas = canvasRef.current;
     const ctx = canvas.getContext('2d');
-    ctx.save();
     ctx.globalCompositeOperation = 'destination-out';
     ctx.beginPath();
     const radius = (brushSize / 2) / zoom;
     ctx.arc(x, y, radius, 0, Math.PI * 2);
     ctx.fill();
-    ctx.restore();
-  };
-
-  const smudge = (x, y) => {
-    if (!lastDrawPos.current) return;
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
-    const px = lastDrawPos.current.x;
-    const py = lastDrawPos.current.y;
-    
-    // Brush size in canvas space
-    const size = brushSize / zoom;
-    
-    ctx.save();
-    // Clip to circular brush
-    ctx.beginPath();
-    ctx.arc(x, y, size/2, 0, Math.PI * 2);
-    ctx.clip();
-    
-    // Move pixels from previous position to current
-    ctx.globalAlpha = smudgeStrength;
-    ctx.drawImage(
-      canvas, 
-      px - size/2, py - size/2, size, size, 
-      x - size/2, y - size/2, size, size
-    );
-    ctx.restore();
+    saveState();
   };
 
   const onWheel = (e) => {
@@ -407,13 +335,6 @@ const SurgicalStudio = ({
       if (e.ctrlKey && e.key === 'z') { e.preventDefault(); undo(); }
       if (e.key === '[') setBrushSize(prev => Math.max(prev - 2, 1));
       if (e.key === ']') setBrushSize(prev => Math.min(prev + 2, 200));
-      if (e.key === 'r') setGraftRotation(prev => (prev + 5) % 360);
-      if (e.key === 'R') setGraftRotation(prev => (prev - 5 + 360) % 360);
-      if (e.key === 'h') setGraftFlipH(prev => !prev);
-      if (e.key === 'v') setGraftFlipV(prev => !prev);
-      if (e.key === 'e') setTool('eraser');
-      if (e.key === 's') setTool('smudge');
-      if (e.key === 'g') setTool('graft');
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
@@ -447,14 +368,6 @@ const SurgicalStudio = ({
               style={{ background: tool === 'eraser' ? 'var(--primary)' : 'transparent', border: 'none', color: 'white', padding: '0.4rem', borderRadius: '0.5rem', cursor: 'pointer' }}
             >
               <Eraser size={18} />
-            </button>
-            <button 
-              className={`btn btn-icon ${tool === 'smudge' ? 'active' : ''}`} 
-              onClick={() => setTool('smudge')}
-              title="Smudge (S)"
-              style={{ background: tool === 'smudge' ? 'var(--primary)' : 'transparent', border: 'none', color: 'white', padding: '0.4rem', borderRadius: '0.5rem', cursor: 'pointer' }}
-            >
-              <Droplet size={18} />
             </button>
             <button 
               className={`btn btn-icon ${tool === 'graft' ? 'active' : ''}`} 
@@ -521,15 +434,6 @@ const SurgicalStudio = ({
             )}
           </div>
 
-          <button 
-            className={`btn btn-outline ${showGuides ? 'active' : ''}`} 
-            onClick={() => setShowGuides(!showGuides)} 
-            style={{ borderColor: showGuides ? 'var(--primary)' : 'var(--border)', color: showGuides ? 'var(--primary)' : 'var(--text-dim)' }}
-            title="Toggle Alignment Guides"
-          >
-            <Move size={18} />
-          </button>
-
           <button className="btn btn-outline" onClick={handleDehalo} disabled={isLoading || isProcessing} style={{ borderColor: 'var(--primary)', color: 'var(--primary)' }}>
             {isProcessing ? <div className="loading-spinner" style={{ width: 14, height: 14 }}></div> : <Sparkles size={18} />}
             De-Halo (2px)
@@ -576,44 +480,6 @@ const SurgicalStudio = ({
               imageRendering: 'pixelated'
             }} />
 
-            {showGuides && (
-              <div 
-                className="studio-guides-overlay"
-                style={{ position: 'absolute', inset: 0, zIndex: 1200, pointerEvents: 'none' }}
-              >
-                <div className="guide-line-h" style={{ 
-                  position: 'absolute', 
-                  top: guidePos.y, 
-                  left: 0, 
-                  width: '100%', 
-                  height: '1px', 
-                  background: '#ff4444',
-                  boxShadow: '0 0 8px rgba(255, 68, 68, 0.4)',
-                }} />
-                <div className="guide-line-v" style={{ 
-                  position: 'absolute', 
-                  left: guidePos.x, 
-                  top: 0, 
-                  width: '1px', 
-                  height: '100%', 
-                  background: '#ff4444',
-                  boxShadow: '0 0 8px rgba(255, 68, 68, 0.4)',
-                }} />
-                <div className="guide-handle" style={{
-                  position: 'absolute',
-                  left: guidePos.x - 10,
-                  top: guidePos.y - 10,
-                  width: 20,
-                  height: 20,
-                  borderRadius: '50%',
-                  border: '2px solid #ff4444',
-                  background: isDraggingGuides ? '#ff4444' : 'rgba(255, 68, 68, 0.2)',
-                  pointerEvents: 'all',
-                  cursor: isDraggingGuides ? 'grabbing' : 'crosshair'
-                }} onMouseDown={(e) => { e.stopPropagation(); setIsDraggingGuides(true); }} />
-              </div>
-            )}
-
             {/* Overlays */}
             <svg style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', overflow: 'visible' }}>
               {selection && (
@@ -648,7 +514,7 @@ const SurgicalStudio = ({
                   />
                 </g>
               )}
-              {(tool === 'eraser' || tool === 'smudge') && !isPanning && (
+              {tool === 'eraser' && !isPanning && (
                 <circle cx={mousePos.x} cy={mousePos.y} r={(brushSize / 2) / zoom} fill="none" stroke="rgba(255,255,255,0.5)" strokeWidth={1 / zoom} />
               )}
             </svg>
@@ -674,19 +540,11 @@ const SurgicalStudio = ({
                       c.drawImage(graftSource.canvas, 0, 0);
                     }
                   }}
-                  style={{ 
-                    width: '100%', 
-                    height: '100%', 
-                    imageRendering: 'pixelated',
-                    transform: `rotate(${graftRotation}deg) scale(${graftFlipH ? -1 : 1}, ${graftFlipV ? -1 : 1})`,
-                    opacity: graftZOrder === 'back' ? 0.4 : 0.8
-                  }}
+                  style={{ width: '100%', height: '100%', imageRendering: 'pixelated' }}
                 />
               </div>
             )}
           </div>
-        </div>
-
         </div>
 
         {error && (
@@ -712,83 +570,15 @@ const SurgicalStudio = ({
             </div>
           </div>
           <div style={{ borderLeft: '1px solid var(--border)', height: '30px' }}></div>
-          {tool === 'smudge' && (
-            <>
-              <div className="tool-group">
-                <label style={{ fontSize: '0.7rem', display: 'block', marginBottom: '0.5rem', color: 'var(--text-dim)' }}>Smudge Strength: {Math.round(smudgeStrength * 100)}%</label>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <input type="range" min="0.05" max="1" step="0.05" value={smudgeStrength} onChange={(e) => setSmudgeStrength(parseFloat(e.target.value))} />
-                </div>
-              </div>
-              <div style={{ borderLeft: '1px solid var(--border)', height: '30px' }}></div>
-            </>
-          )}
           <div className="tool-group" style={{ textAlign: 'center' }}>
             <div style={{ fontSize: '0.7rem' }}>Zoom: {Math.round(zoom * 100)}%</div>
             <div style={{ fontSize: '0.6rem', opacity: 0.5 }}>
               {tool === 'graft' ? (!graftSource ? 'Drag to select source head' : 'Click to stamp head') : 'Wheel to Zoom | Mid-Click to Pan'}
             </div>
           </div>
-
-          {graftSource && (
-            <>
-              <div style={{ borderLeft: '1px solid var(--border)', height: '30px' }}></div>
-              <div className="tool-group">
-                <label style={{ fontSize: '0.7rem', display: 'block', marginBottom: '0.5rem', color: 'var(--text-dim)' }}>Graft Rotation: {graftRotation}°</label>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <RotateCcw size={14} onClick={() => setGraftRotation(0)} style={{ cursor: 'pointer', marginRight: '0.5rem' }} title="Reset Rotation" />
-                  <input type="range" min="0" max="360" value={graftRotation} onChange={(e) => setGraftRotation(parseInt(e.target.value))} />
-                  <span style={{ fontSize: '0.6rem', opacity: 0.5 }}>'R' to rotate</span>
-                </div>
-              </div>
-              <div style={{ borderLeft: '1px solid var(--border)', height: '30px' }}></div>
-              <div className="tool-group">
-                <label style={{ fontSize: '0.7rem', display: 'block', marginBottom: '0.5rem', color: 'var(--text-dim)' }}>Mirroring</label>
-                <div style={{ display: 'flex', gap: '0.5rem' }}>
-                  <button 
-                    className={`btn btn-icon ${graftFlipH ? 'active' : ''}`}
-                    onClick={() => setGraftFlipH(prev => !prev)}
-                    style={{ padding: '0.4rem', background: graftFlipH ? 'var(--primary)' : 'rgba(255,255,255,0.05)', border: 'none', borderRadius: '0.3rem', color: 'white' }}
-                    title="Flip Horizontal (H)"
-                  >
-                    <Move size={14} style={{ transform: 'rotate(90deg)' }} />
-                  </button>
-                  <button 
-                    className={`btn btn-icon ${graftFlipV ? 'active' : ''}`}
-                    onClick={() => setGraftFlipV(prev => !prev)}
-                    style={{ padding: '0.4rem', background: graftFlipV ? 'var(--primary)' : 'rgba(255,255,255,0.05)', border: 'none', borderRadius: '0.3rem', color: 'white' }}
-                    title="Flip Vertical (V)"
-                  >
-                    <Move size={14} />
-                  </button>
-                </div>
-              </div>
-              <div style={{ borderLeft: '1px solid var(--border)', height: '30px' }}></div>
-              <div className="tool-group">
-                <label style={{ fontSize: '0.7rem', display: 'block', marginBottom: '0.5rem', color: 'var(--text-dim)' }}>Z-Order</label>
-                <div style={{ display: 'flex', background: 'rgba(255,255,255,0.05)', borderRadius: '0.5rem', padding: '0.2rem' }}>
-                  <button 
-                    onClick={() => setGraftZOrder('front')} 
-                    style={{ 
-                      padding: '0.2rem 0.6rem', fontSize: '0.7rem', border: 'none', borderRadius: '0.3rem', 
-                      background: graftZOrder === 'front' ? 'var(--primary)' : 'transparent',
-                      color: 'white', cursor: 'pointer'
-                    }}
-                  >Front</button>
-                  <button 
-                    onClick={() => setGraftZOrder('back')} 
-                    style={{ 
-                      padding: '0.2rem 0.6rem', fontSize: '0.7rem', border: 'none', borderRadius: '0.3rem', 
-                      background: graftZOrder === 'back' ? 'var(--primary)' : 'transparent',
-                      color: 'white', cursor: 'pointer'
-                    }}
-                  >Behind</button>
-                </div>
-              </div>
-            </>
-          )}
         </div>
       </div>
+    </div>
   );
 };
 
@@ -805,10 +595,6 @@ function App() {
   const [frameOffsets, setFrameOffsets] = useState({}); // { frameName: { x, y } }
   const [onionSkin, setOnionSkin] = useState(false);
   const [onionSkinDepth, setOnionSkinDepth] = useState(1); // How many frames before/after
-  const [onionSkinOpacity, setOnionSkinOpacity] = useState(1); // Multiplier for onion skin opacity
-  const [showGuides, setShowGuides] = useState(false);
-  const [guidePos, setGuidePos] = useState({ x: 256, y: 256 });
-  const [isDraggingGuides, setIsDraggingGuides] = useState(false);
   const [showPreview, setShowPreview] = useState(true);
   const [useProcessed, setUseProcessed] = useState(false);
   const [exporting, setExporting] = useState(false);
@@ -817,7 +603,6 @@ function App() {
   const [isBulkProcessing, setIsBulkProcessing] = useState(false);
   const [bulkProgress, setBulkProgress] = useState({ current: 0, total: 0 });
   const [forceRerun, setForceRerun] = useState(false);
-  const [imageSize, setImageSize] = useState({ w: 512, h: 512 }); // Natural size of frames
 
   const fileInputRef = useRef(null);
   const saveTimeoutRef = useRef(null);
@@ -924,7 +709,6 @@ function App() {
         setUseProcessed(s.useProcessed || false);
         setOnionSkin(s.onionSkin || false);
         setOnionSkinDepth(s.onionSkinDepth || 1);
-        setOnionSkinOpacity(s.onionSkinOpacity || 1);
       }
     } catch (err) {
       console.error("Failed to load project", err);
@@ -948,10 +732,7 @@ function App() {
         fps,
         useProcessed,
         onionSkin,
-        onionSkinDepth,
-        onionSkinOpacity,
-        guidePos,
-        showGuides
+        onionSkinDepth
       };
       
       try {
@@ -966,7 +747,7 @@ function App() {
     }, 1000);
 
     return () => clearTimeout(saveTimeoutRef.current);
-  }, [selectedFrames, frameOffsets, bgRemovedFrames, fps, useProcessed, onionSkin, onionSkinDepth, onionSkinOpacity, showGuides, guidePos, projectId]);
+  }, [selectedFrames, frameOffsets, bgRemovedFrames, fps, useProcessed, onionSkin, onionSkinDepth, projectId]);
 
   const stepFrame = (dir) => {
     if (selectedFrames.length === 0) return;
@@ -999,14 +780,12 @@ function App() {
         if (stateRes.data.status === 'success') {
           const s = stateRes.data.state;
           setSelectedFrames(s.selectedFrames || []);
-          setFrameOffsets(s.frameOffsets || {});          setBgRemovedFrames(s.bgRemovedFrames || {});
+          setFrameOffsets(s.frameOffsets || {});
+          setBgRemovedFrames(s.bgRemovedFrames || {});
           setFps(s.fps || 12);
           setUseProcessed(s.useProcessed || false);
           setOnionSkin(s.onionSkin || false);
           setOnionSkinDepth(s.onionSkinDepth || 1);
-          setOnionSkinOpacity(s.onionSkinOpacity || 1);
-          if (s.guidePos) setGuidePos(s.guidePos);
-          if (s.showGuides !== undefined) setShowGuides(s.showGuides);
         } else {
           // Default initialization
           setSelectedFrames(res.data.frames.map(f => f.name));
@@ -1076,41 +855,12 @@ function App() {
       const res = await axios.post(`${API_BASE}/remove-bg`, formData);
       const busterUrl = `${res.data.processed_url}?t=${Date.now()}`;
       setBgRemovedFrames(prev => ({
+        ...prev,
         [frameName]: busterUrl
       }));
     } catch (err) {
       console.error("BG Removal failed", err);
     }
-  };
-
-  const handleMainGuideMove = (e) => {
-    if (!isDraggingGuides || !showGuides) return;
-    
-    const previewWindow = document.querySelector('.preview-window');
-    if (!previewWindow) return;
-    
-    const rect = previewWindow.getBoundingClientRect();
-    const containerCenterX = rect.width / 2;
-    const containerCenterY = rect.height / 2;
-    
-    // Scale in main view
-    const mainScale = Math.min(
-      (rect.height * 0.9) / imageSize.h,
-      (rect.width * 0.9) / imageSize.w,
-      1
-    );
-    
-    // Offset from container center (ignoring frame nudges for the guide itself)
-    const screenX = e.clientX - rect.left;
-    const screenY = e.clientY - rect.top;
-    
-    const imgRelX = (screenX - containerCenterX) / mainScale;
-    const imgRelY = (screenY - containerCenterY) / mainScale;
-    
-    setGuidePos({
-      x: imgRelX + imageSize.w / 2,
-      y: imgRelY + imageSize.h / 2
-    });
   };
 
   // Animation Playback Logic
@@ -1170,10 +920,7 @@ function App() {
         <div className="header-actions" style={{ display: 'flex', gap: '1rem' }}>
           {projectId && (
             <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-              <div 
-                title="When enabled, 'Process All Backgrounds' will re-process every frame in the project, overwriting previous results. Useful if you want to redo the AI pass."
-                style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: 'rgba(255,255,255,0.05)', padding: '0.4rem 0.8rem', borderRadius: '0.5rem', fontSize: '0.7rem' }}
-              >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: 'rgba(255,255,255,0.05)', padding: '0.4rem 0.8rem', borderRadius: '0.5rem', fontSize: '0.7rem' }}>
                 <input 
                   type="checkbox" 
                   id="force-rerun" 
@@ -1218,10 +965,6 @@ function App() {
             initialUrl={getFrameUrl(studioFrame)}
             onSave={handleSaveStudio}
             onCancel={() => setStudioFrame(null)}
-            showGuides={showGuides}
-            setShowGuides={setShowGuides}
-            guidePos={guidePos}
-            setGuidePos={setGuidePos}
           />
         )}
       </AnimatePresence>
@@ -1290,30 +1033,22 @@ function App() {
               <div className="glass-card preview-window" style={{ position: 'relative', marginBottom: '2rem' }}>
                 {/* Frame HUD Overlay */}
                 {currentPreviewFrame && (
-                  <div 
-                    className="preview-hud" 
-                    onClick={() => setStudioFrame(currentPreviewFrame)}
-                    style={{ 
-                      position: 'absolute', 
-                      top: '1rem', 
-                      right: '1rem', 
-                      background: 'rgba(0,0,0,0.6)', 
-                      padding: '0.4rem 0.8rem', 
-                      borderRadius: '0.5rem', 
-                      fontSize: '0.75rem', 
-                      fontWeight: '800', 
-                      color: 'var(--primary)',
-                      zIndex: 110,
-                      border: '1px solid var(--border)',
-                      backdropFilter: 'blur(4px)',
-                      letterSpacing: '1px',
-                      cursor: 'pointer',
-                      transition: 'all 0.2s'
-                    }}
-                    onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--primary)'; e.currentTarget.style.color = 'white'; }}
-                    onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(0,0,0,0.6)'; e.currentTarget.style.color = 'var(--primary)'; }}
-                  >
-                    EDIT FRAME #{frames.find(f => f.name === currentPreviewFrame)?.index}
+                  <div className="preview-hud" style={{ 
+                    position: 'absolute', 
+                    top: '1rem', 
+                    right: '1rem', 
+                    background: 'rgba(0,0,0,0.6)', 
+                    padding: '0.4rem 0.8rem', 
+                    borderRadius: '0.5rem', 
+                    fontSize: '0.75rem', 
+                    fontWeight: '800', 
+                    color: 'var(--primary)',
+                    zIndex: 110,
+                    border: '1px solid var(--border)',
+                    backdropFilter: 'blur(4px)',
+                    letterSpacing: '1px'
+                  }}>
+                    FRAME #{frames.find(f => f.name === currentPreviewFrame)?.index}
                   </div>
                 )}
                 
@@ -1333,9 +1068,16 @@ function App() {
                           src={getFrameUrl(name)} 
                           alt="" 
                           style={{ 
-                            opacity: Math.min(1, (onionSkinDepth === 0 ? 0.05 : Math.max(0.05, 0.3 - (wrapDist * 0.1))) * onionSkinOpacity),
-                            transform: `translate(calc(-50% + ${offset.x}px), calc(-50% + ${offset.y}px))`,
-                            zIndex: 1
+                            position: 'absolute', 
+                            opacity: onionSkinDepth === 0 ? 0.05 : Math.max(0.05, 0.3 - (wrapDist * 0.1)),
+                            transform: `translate(${offset.x}px, ${offset.y}px)`,
+                            width: 'auto',
+                            height: 'auto',
+                            maxWidth: '100%',
+                            maxHeight: '100%',
+                            left: '50%',
+                            top: '50%',
+                            transformOrigin: 'center'
                           }} 
                         />
                       );
@@ -1344,19 +1086,13 @@ function App() {
                 )}
 
                 {previewImgSrc ? (
-                  <div className="current-frame-container" style={{ zIndex: 2, position: 'absolute', inset: 0 }}>
+                  <div className="current-frame-container" style={{ zIndex: 2, position: 'relative' }}>
                     <img 
                       src={previewImgSrc} 
                       alt="Preview" 
                       key={previewImgSrc} 
-                      onLoad={(e) => {
-                        if (e.target.naturalWidth) {
-                          setImageSize({ w: e.target.naturalWidth, h: e.target.naturalHeight });
-                        }
-                      }}
                       style={{ 
-                        transform: `translate(calc(-50% + ${frameOffsets[currentPreviewFrame]?.x || 0}px), calc(-50% + ${frameOffsets[currentPreviewFrame]?.y || 0}px))`,
-                        zIndex: 10
+                        transform: `translate(${frameOffsets[currentPreviewFrame]?.x || 0}px, ${frameOffsets[currentPreviewFrame]?.y || 0}px)`
                       }}
                     />
                   </div>
@@ -1366,7 +1102,7 @@ function App() {
                     <p>Select frames to preview animation</p>
                   </div>
                 )}
-                {/* Playback Controls Overlay */}
+                
                 <div className="preview-controls-overlay" style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
                   <button className="btn btn-outline" onClick={() => stepFrame('prev')} style={{ borderRadius: '50%', width: '40px', height: '40px', padding: 0 }}>
                     <ChevronLeft size={20} />
@@ -1380,54 +1116,6 @@ function App() {
                     <ChevronRight size={20} />
                   </button>
                 </div>
-
-                {showGuides && (
-                  <div 
-                    className="guides-overlay"
-                    onMouseMove={handleMainGuideMove}
-                    onMouseUp={() => setIsDraggingGuides(false)}
-                    onMouseLeave={() => setIsDraggingGuides(false)}
-                    style={{ 
-                      position: 'absolute', 
-                      inset: 0, 
-                      zIndex: 120, 
-                      pointerEvents: isDraggingGuides ? 'all' : 'none'
-                    }}
-                  >
-                    {/* Calculate screen position of the image-space guide */}
-                    {(() => {
-                      const win = document.querySelector('.preview-window');
-                      if (!win) return null;
-                      const rect = win.getBoundingClientRect();
-                      const scale = Math.min((rect.height * 0.9) / imageSize.h, (rect.width * 0.9) / imageSize.w, 1);
-                      const screenX = (rect.width / 2) + (guidePos.x - imageSize.w / 2) * scale;
-                      const screenY = (rect.height / 2) + (guidePos.y - imageSize.h / 2) * scale;
-                      
-                      return (
-                        <>
-                          <div className="guide-line-h" style={{ position: 'absolute', top: screenY, left: 0, width: '100%', height: '1px', background: '#ff4444', boxShadow: '0 0 8px rgba(255, 68, 68, 0.4)', pointerEvents: 'none' }} />
-                          <div className="guide-line-v" style={{ position: 'absolute', left: screenX, top: 0, width: '1px', height: '100%', background: '#ff4444', boxShadow: '0 0 8px rgba(255, 68, 68, 0.4)', pointerEvents: 'none' }} />
-                          <div 
-                            className="guide-handle" 
-                            onMouseDown={(e) => { e.stopPropagation(); setIsDraggingGuides(true); }}
-                            style={{ 
-                              position: 'absolute', 
-                              left: screenX - 10, 
-                              top: screenY - 10, 
-                              width: 20, 
-                              height: 20, 
-                              borderRadius: '50%', 
-                              border: '2px solid #ff4444', 
-                              background: isDraggingGuides ? '#ff4444' : 'rgba(255, 68, 68, 0.2)', 
-                              pointerEvents: 'all',
-                              cursor: 'crosshair'
-                            }} 
-                          />
-                        </>
-                      );
-                    })()}
-                  </div>
-                )}
               </div>
             )}
 
@@ -1518,26 +1206,6 @@ function App() {
                     Show Animation Preview
                   </label>
                 </div>
-                <div className="toggle-container" style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginTop: '1rem' }}>
-                  <input 
-                    type="checkbox" 
-                    id="showGuides" 
-                    checked={showGuides} 
-                    onChange={(e) => setShowGuides(e.target.checked)}
-                  />
-                  <label htmlFor="showGuides" style={{ textTransform: 'none', cursor: 'pointer' }}>
-                    Enable Alignment Guides
-                  </label>
-                </div>
-                {showGuides && (
-                  <button 
-                    className="btn btn-outline" 
-                    onClick={() => setGuidePos({ x: 250, y: 250 })}
-                    style={{ fontSize: '0.7rem', padding: '0.4rem', marginTop: '0.5rem', width: '100%' }}
-                  >
-                    Reset Guide Position
-                  </button>
-                )}
               </div>
             </div>
 
@@ -1560,29 +1228,16 @@ function App() {
                   </div>
 
                   {onionSkin && (
-                    <div className="control-group" style={{ paddingLeft: '1.5rem', gap: '1rem' }}>
-                      <div className="sub-control">
-                        <label style={{ fontSize: '0.7rem' }}>Skin Depth: {onionSkinDepth === 0 ? 'All' : onionSkinDepth}</label>
-                        <input 
-                          type="range" 
-                          min="0" 
-                          max="5" 
-                          step="1"
-                          value={onionSkinDepth} 
-                          onChange={(e) => setOnionSkinDepth(parseInt(e.target.value))}
-                        />
-                      </div>
-                      <div className="sub-control">
-                        <label style={{ fontSize: '0.7rem' }}>Skin Opacity: {Math.round(onionSkinOpacity * 100)}%</label>
-                        <input 
-                          type="range" 
-                          min="1" 
-                          max="5" 
-                          step="0.1"
-                          value={onionSkinOpacity} 
-                          onChange={(e) => setOnionSkinOpacity(parseFloat(e.target.value))}
-                        />
-                      </div>
+                    <div className="control-group" style={{ paddingLeft: '1.5rem' }}>
+                      <label style={{ fontSize: '0.7rem' }}>Skin Depth: {onionSkinDepth === 0 ? 'All' : onionSkinDepth}</label>
+                      <input 
+                        type="range" 
+                        min="0" 
+                        max="5" 
+                        step="1"
+                        value={onionSkinDepth} 
+                        onChange={(e) => setOnionSkinDepth(parseInt(e.target.value))}
+                      />
                     </div>
                   )}
 

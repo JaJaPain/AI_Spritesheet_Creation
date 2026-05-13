@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SpriteForge Standalone Viewer</title>
+    <style>
+        :root {
+            --primary: #6366f1;
+            --primary-glow: rgba(99, 102, 241, 0.4);
+            --bg-dark: #020617;
+            --bg-card: rgba(15, 23, 42, 0.9);
+            --text-main: #f8fafc;
+            --text-dim: #94a3b8;
+            --accent: #ec4899;
+            --border: rgba(255, 255, 255, 0.08);
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        
+        body {
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            background-color: var(--bg-dark);
+            color: var(--text-main);
+            min-height: 100vh;
+            background-image: 
+                radial-gradient(circle at 0% 0%, rgba(99, 102, 241, 0.1) 0%, transparent 50%),
+                radial-gradient(circle at 100% 100%, rgba(236, 72, 153, 0.05) 0%, transparent 50%);
+            display: grid;
+            grid-template-columns: 320px 1fr;
+        }
+
+        aside {
+            background: rgba(15, 23, 42, 0.8);
+            backdrop-filter: blur(20px);
+            border-right: 1px solid var(--border);
+            padding: 2rem;
+            display: flex;
+            flex-direction: column;
+            gap: 2rem;
+        }
+
+        h1 {
+            font-size: 1.5rem;
+            background: linear-gradient(135deg, var(--primary), var(--accent));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            font-weight: 800;
+        }
+
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.8rem;
+        }
+
+        label {
+            font-size: 0.75rem;
+            font-weight: 700;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .btn-upload {
+            background: var(--primary);
+            color: white;
+            border: none;
+            padding: 1rem;
+            border-radius: 0.75rem;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.3s;
+            text-align: center;
+        }
+
+        .btn-upload:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px var(--primary-glow);
+        }
+
+        input[type="range"] {
+            width: 100%;
+            accent-color: var(--primary);
+        }
+
+        main {
+            padding: 3rem;
+            overflow-y: auto;
+        }
+
+        .preview-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 2rem;
+            max-width: 1100px;
+            margin: 0 auto;
+        }
+
+        .preview-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 1.5rem;
+            padding: 2rem;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 1.5rem;
+            transition: 0.3s;
+        }
+
+        .preview-card:hover {
+            border-color: var(--primary);
+            transform: translateY(-5px);
+        }
+
+        .badge {
+            font-size: 0.65rem;
+            background: rgba(255,255,255,0.05);
+            padding: 0.3rem 0.8rem;
+            border-radius: 100px;
+            color: var(--text-dim);
+        }
+
+        .sprite-anim {
+            image-rendering: pixelated;
+            background-repeat: no-repeat;
+        }
+
+        .empty {
+            grid-column: 1 / -1;
+            text-align: center;
+            padding: 10rem 0;
+            color: var(--text-dim);
+            opacity: 0.5;
+        }
+
+        .stats {
+            margin-top: auto;
+            font-size: 0.7rem;
+            color: var(--text-dim);
+            line-height: 1.6;
+        }
+
+        @media (max-width: 900px) {
+            body { grid-template-columns: 1fr; }
+            aside { 
+                border-right: none; 
+                border-bottom: 1px solid var(--border); 
+                height: auto;
+                padding: 1.5rem;
+            }
+            main { padding: 1.5rem; }
+            .preview-grid { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <aside>
+        <div>
+            <h1>SpriteForge</h1>
+            <p style="font-size: 0.7rem; color: var(--text-dim); margin-top: 0.3rem;">Zero-Setup Viewer</p>
+        </div>
+
+        <div class="control-group">
+            <label>Load Asset</label>
+            <label for="file-input" class="btn-upload">Select Spritesheet</label>
+            <input type="file" id="file-input" style="display: none" accept="image/png">
+        </div>
+
+        <div class="control-group">
+            <label>Playback Speed: <span id="fps-val">12</span> FPS</label>
+            <input type="range" id="fps-input" min="1" max="60" value="12">
+        </div>
+
+        <div class="control-group">
+            <label>Grid Columns: <span id="col-val">8</span></label>
+            <input type="range" id="col-input" min="1" max="16" value="8">
+        </div>
+
+        <div class="stats" id="stats">
+            Awaiting 8-column spritesheet...
+        </div>
+    </aside>
+
+    <main>
+        <div class="preview-grid" id="grid">
+            <div class="empty">Upload a PNG to start previewing</div>
+        </div>
+    </main>
+
+    <script>
+        let spriteUrl = null;
+        let fps = 12;
+        let columns = 8;
+        let rows = 1;
+        let frameW = 0;
+        let frameH = 0;
+        let totalFrames = 0;
+        let validFrames = []; // Indices of non-empty frames
+        let currentValidIdx = 0;
+        let lastTime = 0;
+
+        const fileInput = document.getElementById('file-input');
+        const fpsInput = document.getElementById('fps-input');
+        const colInput = document.getElementById('col-input');
+        const grid = document.getElementById('grid');
+        const stats = document.getElementById('stats');
+
+        const scales = [
+            { s: 0.125, l: 'Nano / Tiny (0.125x)' },
+            { s: 0.25, l: 'Mobile UI / Icon (0.25x)' },
+            { s: 0.5, l: 'Mobile Game / SD (0.5x)' },
+            { s: 1.0, l: 'Desktop / Original (1.0x)' }
+        ];
+
+        fileInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                const img = new Image();
+                img.onload = () => {
+                    spriteUrl = event.target.result;
+                    processImage(img);
+                };
+                img.src = event.target.result;
+            };
+            reader.readAsDataURL(file);
+        });
+
+        async function processImage(img) {
+            frameW = img.width / columns;
+            // Use width as height for cells (standard for this project)
+            frameH = frameW; 
+            rows = Math.floor(img.height / frameH);
+            totalFrames = columns * rows;
+            
+            // Detect non-empty frames
+            validFrames = [];
+            const canvas = document.createElement('canvas');
+            canvas.width = frameW;
+            canvas.height = frameH;
+            const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+            for (let i = 0; i < totalFrames; i++) {
+                const r = Math.floor(i / columns);
+                const c = i % columns;
+                ctx.clearRect(0, 0, frameW, frameH);
+                ctx.drawImage(img, c * frameW, r * frameH, frameW, frameH, 0, 0, frameW, frameH);
+                
+                const data = ctx.getImageData(0, 0, frameW, frameH).data;
+                let hasContent = false;
+                for (let j = 3; j < data.length; j += 4) {
+                    if (data[j] > 0) {
+                        hasContent = true;
+                        break;
+                    }
+                }
+                if (hasContent) validFrames.push(i);
+            }
+
+            if (validFrames.length === 0) validFrames = [0]; // Fallback
+            currentValidIdx = 0;
+            
+            updateGrid();
+            updateStats(img.width, img.height);
+        }
+
+        fpsInput.addEventListener('input', (e) => {
+            fps = parseInt(e.target.value);
+            document.getElementById('fps-val').textContent = fps;
+        });
+
+        colInput.addEventListener('input', (e) => {
+            columns = parseInt(e.target.value);
+            document.getElementById('col-val').textContent = columns;
+            if (spriteUrl) {
+                const img = new Image();
+                img.onload = () => processImage(img);
+                img.src = spriteUrl;
+            }
+        });
+
+        function updateGrid() {
+            grid.innerHTML = '';
+            scales.forEach(conf => {
+                const card = document.createElement('div');
+                card.className = 'preview-card';
+                card.innerHTML = `
+                    <div class="badge">${conf.l}</div>
+                    <div class="sprite-anim" id="anim-${conf.s}" style="
+                        width: ${frameW * conf.s}px;
+                        height: ${frameH * conf.s}px;
+                        background-image: url(${spriteUrl});
+                        background-size: ${frameW * columns * conf.s}px ${frameH * rows * conf.s}px;
+                    "></div>
+                    <div style="font-size: 0.6rem; color: var(--text-dim)">${Math.round(frameH * conf.s)}px</div>
+                `;
+                grid.appendChild(card);
+            });
+        }
+
+        function updateStats(w, h) {
+            stats.innerHTML = `
+                <b>Image:</b> ${w}x${h}px<br>
+                <b>Cell:</b> ${Math.round(frameW)}x${Math.round(frameH)}px<br>
+                <b>Grid:</b> ${columns} cols x ${rows} rows<br>
+                <b>Valid:</b> ${validFrames.length} / ${totalFrames} frames
+            `;
+        }
+
+        function animate(time) {
+            if (spriteUrl && validFrames.length > 0 && time - lastTime > 1000 / fps) {
+                currentValidIdx = (currentValidIdx + 1) % validFrames.length;
+                const frameIdx = validFrames[currentValidIdx];
+                const r = Math.floor(frameIdx / columns);
+                const c = frameIdx % columns;
+
+                scales.forEach(conf => {
+                    const el = document.getElementById(`anim-${conf.s}`);
+                    if (el) {
+                        const dw = frameW * conf.s;
+                        const dh = frameH * conf.s;
+                        el.style.backgroundPosition = `-${c * dw}px -${r * dh}px`;
+                    }
+                });
+                lastTime = time;
+            }
+            requestAnimationFrame(animate);
+        }
+
+        requestAnimationFrame(animate);
+    </script>
+</body>
+</html>

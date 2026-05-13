@@ -1,86 +1,111 @@
 {
-  "10": {
+  "13": {
     "inputs": {
-      "model": "wan2.1-i2v-14b-480p-Q4_K_M.gguf",
+      "blocks_to_swap": 20,
+      "offload_img_emb": false,
+      "offload_txt_emb": false
+    },
+    "class_type": "WanVideoBlockSwap",
+    "_meta": { "title": "WanVideo Block Swap" }
+  },
+  "1": {
+    "inputs": {
+      "model": "wan2.1-i2v-14b-720p-Q4_K_M.gguf",
       "base_precision": "bf16",
       "quantization": "disabled",
       "load_device": "offload_device",
-      "attention_mode": "sdpa"
+      "attention_mode": "sdpa",
+      "rms_norm_function": "default",
+      "block_swap_args": ["13", 0]
     },
     "class_type": "WanVideoModelLoader",
     "_meta": { "title": "WanVideo Model Loader" }
   },
-  "11": {
+  "3": {
     "inputs": {
-      "model_name": "Wan2.1_VAE.pth",
+      "model_name": "Wan2_1_VAE_bf16.safetensors",
       "precision": "bf16"
     },
     "class_type": "WanVideoVAELoader",
     "_meta": { "title": "WanVideo VAE Loader" }
   },
-  "16": {
+  "2": {
     "inputs": {
-      "model_name": "t5-v1_1-xxl-encoder-Q5_K_M.gguf",
+      "model_name": "umt5-xxl-enc-fp8_e4m3fn.safetensors",
       "precision": "bf16",
-      "positive_prompt": "A character performing a walking loop, high quality. Fixed camera, character centered in frame throughout. Solid green background unchanged.",
-      "negative_prompt": "low quality, blurry, distorted, purple haze, magenta tint, color grading, cinematic lighting, background change, blue background, cyan background, orange background, peach background, gradient background, warm tones",
-      "quantization": "disabled",
-      "use_disk_cache": true,
-      "device": "gpu"
+      "load_device": "offload_device",
+      "quantization": "disabled"
     },
-    "class_type": "WanVideoTextEncodeCached",
-    "_meta": { "title": "WanVideo Text Encode (Cached)" }
+    "class_type": "LoadWanVideoT5TextEncoder",
+    "_meta": { "title": "WanVideo T5 Text Encoder Loader" }
   },
-  "58": {
+  "4": {
     "inputs": {
-      "image": "test_image.png",
+      "model_name": "open-clip-xlm-roberta-large-vit-huge-14_visual_fp16.safetensors",
+      "precision": "fp16",
+      "load_device": "offload_device"
+    },
+    "class_type": "LoadWanVideoClipTextEncoder",
+    "_meta": { "title": "WanVideo CLIP Text Encoder Loader" }
+  },
+  "5": {
+    "inputs": {
+      "image": "frame_001.png",
       "upload": "image"
     },
     "class_type": "LoadImage",
     "_meta": { "title": "Load Image" }
   },
-  "12": {
+  "6": {
     "inputs": {
-      "clip_name": "clip_vision_h.safetensors"
+      "positive_prompt": "A character performing a walking loop, high quality. Fixed camera, character centered in frame throughout. Solid green background unchanged.",
+      "negative_prompt": "blurry",
+      "force_offload": true,
+      "use_disk_cache": false,
+      "device": "cpu",
+      "t5": ["2", 0]
     },
-    "class_type": "CLIPVisionLoader",
-    "_meta": { "title": "CLIP Vision Loader" }
+    "class_type": "WanVideoTextEncode",
+    "_meta": { "title": "WanVideo Text Encode" }
   },
-  "65": {
+  "7": {
     "inputs": {
-      "strength_1": 1.0,
-      "strength_2": 1.0,
+      "strength_1": 1,
+      "strength_2": 1,
       "crop": "center",
       "combine_embeds": "average",
       "force_offload": true,
       "tiles": 0,
-      "ratio": 1.0,
-      "clip_vision": ["12", 0],
-      "image_1": ["58", 0]
+      "ratio": 0.2,
+      "clip_vision": ["4", 0],
+      "image_1": ["5", 0]
     },
     "class_type": "WanVideoClipVisionEncode",
     "_meta": { "title": "WanVideo CLIP Vision Encode" }
   },
-  "63": {
+  "8": {
     "inputs": {
-      "width": 480,
+      "width": 832,
       "height": 480,
-      "num_frames": 25,
-      "noise_aug_strength": 0.15,
-      "start_latent_strength": 0.85,
-      "end_latent_strength": 1.0,
+      "num_frames": 41,
+      "noise_aug_strength": 0.03,
+      "start_latent_strength": 1,
+      "end_latent_strength": 1,
       "force_offload": true,
-      "vae": ["11", 0],
-      "start_image": ["58", 0],
-      "clip_embeds": ["65", 0]
+      "force_offload_decoder": true,
+      "auto_resize": false,
+      "empty_frame_pad": 0,
+      "vae": ["3", 0],
+      "clip_embeds": ["7", 0],
+      "start_image": ["5", 0]
     },
     "class_type": "WanVideoImageToVideoEncode",
     "_meta": { "title": "WanVideo ImageToVideo Encode" }
   },
-  "35": {
+  "9": {
     "inputs": {
-      "steps": 10,
-      "cfg": 1.0,
+      "steps": 25,
+      "cfg": 6,
       "shift": 5,
       "seed": 42,
       "force_offload": true,
@@ -91,32 +116,32 @@
       "rope_function": "comfy",
       "start_step": 0,
       "end_step": -1,
-      "add_noise_to_samples": true,
-      "model": ["10", 0],
-      "image_embeds": ["63", 0],
-      "text_embeds": ["16", 0]
+      "add_noise_to_samples": false,
+      "model": ["1", 0],
+      "image_embeds": ["8", 0],
+      "text_embeds": ["6", 0]
     },
     "class_type": "WanVideoSampler",
-    "_meta": { "title": "WanVideo Sampler (Rapid)" }
+    "_meta": { "title": "WanVideo Sampler" }
   },
-  "28": {
+  "10": {
     "inputs": {
-      "enable_vae_tiling": true,
-      "tile_x": 480,
-      "tile_y": 480,
-      "tile_stride_x": 240,
-      "tile_stride_y": 240,
-      "vae": ["11", 0],
-      "samples": ["35", 0]
+      "enable_vae_tiling": false,
+      "tile_x": 272,
+      "tile_y": 272,
+      "tile_stride_x": 144,
+      "tile_stride_y": 128,
+      "vae": ["3", 0],
+      "samples": ["9", 0]
     },
     "class_type": "WanVideoDecode",
     "_meta": { "title": "WanVideo Decode" }
   },
-  "30": {
+  "11": {
     "inputs": {
       "frame_rate": 16,
       "loop_count": 0,
-      "filename_prefix": "WanVideo_Rapid",
+      "filename_prefix": "WanVideo_Output",
       "format": "video/h264-mp4",
       "pix_fmt": "yuv420p",
       "crf": 19,
@@ -124,7 +149,7 @@
       "trim_to_audio": false,
       "pingpong": false,
       "save_output": true,
-      "images": ["28", 0]
+      "images": ["10", 0]
     },
     "class_type": "VHS_VideoCombine",
     "_meta": { "title": "Video Combine (VHS)" }

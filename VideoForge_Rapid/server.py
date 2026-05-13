@@ -46,14 +46,14 @@ async def forge_video(
     image: UploadFile = File(None),
     image_url: str = Form(None),
     prompt: str = Form(...),
-    num_frames: int = Form(25),
-    steps: int = Form(10),
+    num_frames: int = Form(41),
+    steps: int = Form(25),
     seed: int = Form(-1),
     character_id: str = Form("unknown"),
     view_id: str = Form("side_view")
 ):
     """
-    Rapid Forge: Optimized for Wan 2.2 4-step generation.
+    Wan 2.1 Forge: High-fidelity 25-step generation with WanVideoWrapper.
     """
     global progress_state
     if seed == -1:
@@ -87,19 +87,20 @@ async def forge_video(
         else:
             raise HTTPException(status_code=400, detail="No image provided")
 
-        # --- ADVANCED COMPOSITING (Sea Green & Square Frame) ---
+        # --- ADVANCED COMPOSITING (Green Screen on 832x480 Widescreen) ---
         img = Image.open(temp_path).convert("RGBA")
-        target_size = 480
+        target_w = 832
+        target_h = 480
         bright_green = (0, 255, 0, 255)
         
         w, h = img.size
-        scale = min(target_size / w, target_size / h) * 0.85
+        scale = min(target_w / w, target_h / h) * 0.85
         new_w, new_h = int(w * scale), int(h * scale)
         img_resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
         
-        canvas = Image.new("RGBA", (target_size, target_size), bright_green)
-        paste_x = (target_size - new_w) // 2
-        paste_y = (target_size - new_h) // 2
+        canvas = Image.new("RGBA", (target_w, target_h), bright_green)
+        paste_x = (target_w - new_w) // 2
+        paste_y = (target_h - new_h) // 2
         canvas.alpha_composite(img_resized, (paste_x, paste_y))
         canvas.convert("RGB").save(temp_path, "PNG")
         
@@ -113,15 +114,15 @@ async def forge_video(
             workflow = json.load(f)
             
         # Update workflow with our specific run data
-        workflow["58"]["inputs"]["image"] = temp_path # Load Image Node
-        workflow["35"]["inputs"]["seed"] = seed # Sampler Node
-        workflow["35"]["inputs"]["steps"] = steps
-        workflow["63"]["inputs"]["num_frames"] = num_frames # Encode Node
+        workflow["5"]["inputs"]["image"] = temp_path # Load Image Node
+        workflow["9"]["inputs"]["seed"] = seed # Sampler Node
+        workflow["9"]["inputs"]["steps"] = steps
+        workflow["8"]["inputs"]["num_frames"] = num_frames # Encode Node
         
         # Override the text prompt
-        workflow["16"]["inputs"]["positive_prompt"] = prompt
+        workflow["6"]["inputs"]["positive_prompt"] = prompt
         
-        print(f"Requesting RAPID generation for: {prompt} (Seed: {seed})")
+        print(f"Requesting Wan 2.1 generation for: {prompt} (Seed: {seed})")
         video_path = wrapper.run_workflow(workflow)
         
         if video_path:
@@ -200,14 +201,14 @@ def run_batch_worker(image_path, animations, character_id, view_id):
                 workflow = json.load(f)
             
             # Configure workflow for this animation
-            workflow["58"]["inputs"]["image"] = image_path
+            workflow["5"]["inputs"]["image"] = image_path
             seed = anim.get("seed", -1)
             if seed == -1:
                 seed = rand_mod.randint(0, 2**32 - 1)
-            workflow["35"]["inputs"]["seed"] = seed
-            workflow["35"]["inputs"]["steps"] = anim.get("steps", 10)
-            workflow["63"]["inputs"]["num_frames"] = anim.get("num_frames", 25)
-            workflow["16"]["inputs"]["positive_prompt"] = anim["prompt"]
+            workflow["9"]["inputs"]["seed"] = seed
+            workflow["9"]["inputs"]["steps"] = anim.get("steps", 25)
+            workflow["8"]["inputs"]["num_frames"] = anim.get("num_frames", 41)
+            workflow["6"]["inputs"]["positive_prompt"] = anim["prompt"]
             
             print(f"[BATCH {i+1}/{len(animations)}] Generating: {anim['display_name']}")
             video_path = wrapper.run_workflow(workflow)
@@ -286,17 +287,18 @@ async def start_batch(
     else:
         raise HTTPException(status_code=400, detail="No image provided")
     
-    # Prepare image (same as single forge)
+    # Prepare image (832x480 green screen canvas)
     img = Image.open(temp_path).convert("RGBA")
-    target_size = 480
+    target_w = 832
+    target_h = 480
     sea_green = (0, 250, 154, 255)
     w, h = img.size
-    scale = min(target_size / w, target_size / h)
+    scale = min(target_w / w, target_h / h)
     new_w, new_h = int(w * scale), int(h * scale)
     img_resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-    canvas = Image.new("RGBA", (target_size, target_size), sea_green)
-    paste_x = (target_size - new_w) // 2
-    paste_y = (target_size - new_h) // 2
+    canvas = Image.new("RGBA", (target_w, target_h), sea_green)
+    paste_x = (target_w - new_w) // 2
+    paste_y = (target_h - new_h) // 2
     canvas.alpha_composite(img_resized, (paste_x, paste_y))
     canvas.convert("RGB").save(temp_path, "PNG")
     

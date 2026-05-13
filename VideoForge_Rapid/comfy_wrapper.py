@@ -76,14 +76,14 @@ class ComfyWrapper:
         with open(workflow_path, 'r') as f:
             workflow = json.load(f)
 
-        # Update prompt (Node 16)
-        workflow["16"]["inputs"]["positive_prompt"] = prompt_text
-        # Update image (Node 58)
-        workflow["58"]["inputs"]["image"] = comfy_filename
-        # Update num_frames (Node 63)
-        workflow["63"]["inputs"]["num_frames"] = num_frames
-        # Update seed (Node 35)
-        workflow["35"]["inputs"]["seed"] = seed
+        # Update prompt (Node 6 - WanVideoTextEncode)
+        workflow["6"]["inputs"]["positive_prompt"] = prompt_text
+        # Update image (Node 5 - LoadImage)
+        workflow["5"]["inputs"]["image"] = comfy_filename
+        # Update num_frames (Node 8 - WanVideoImageToVideoEncode)
+        workflow["8"]["inputs"]["num_frames"] = num_frames
+        # Update seed (Node 9 - WanVideoSampler)
+        workflow["9"]["inputs"]["seed"] = seed
 
         # 3. Queue the prompt
         self.current_status = "Queueing in ComfyUI..."
@@ -107,9 +107,9 @@ class ComfyWrapper:
             
             # Update Heartbeat
             elapsed = time.time() - start_wait
-            # Ballpark progress based on typical 9-minute run (540 seconds)
+            # Ballpark progress based on typical 10-minute run (600 seconds)
             # This provides a 'crawling' progress between 10% and 90%
-            pseudo_progress = 10 + min(80, int((elapsed / 540) * 80))
+            pseudo_progress = 10 + min(80, int((elapsed / 600) * 80))
             self.current_progress = pseudo_progress
             self.current_status = "ComfyUI is forging video frames..."
             self.last_update = time.time()
@@ -122,12 +122,12 @@ class ComfyWrapper:
         self.last_update = time.time()
         
         outputs = history[prompt_id]['outputs']
-        # Node 30 is Video Combine (VHS) which uses 'gifs' key
-        if 'gifs' in outputs['30']:
-            video_output = outputs['30']['gifs'][0]
+        # Node 11 is Video Combine (VHS) which uses 'gifs' key
+        if 'gifs' in outputs['11']:
+            video_output = outputs['11']['gifs'][0]
         else:
             # Fallback for other video nodes
-            video_output = outputs['30'].get('filenames', [{}])[0]
+            video_output = outputs['11'].get('filenames', [{}])[0]
             
         video_filename = video_output.get('filename')
         
@@ -149,8 +149,8 @@ class ComfyWrapper:
         Executes a pre-built workflow (used by the Rapid Forge).
         Handles image upload, queueing, polling, and video download.
         """
-        # 1. Upload the image referenced in the LoadImage node (58)
-        image_path = workflow.get("58", {}).get("inputs", {}).get("image", "")
+        # 1. Upload the image referenced in the LoadImage node (5)
+        image_path = workflow.get("5", {}).get("inputs", {}).get("image", "")
         if image_path and os.path.exists(image_path):
             self.current_status = "Uploading Image..."
             self.current_progress = 5
@@ -159,14 +159,14 @@ class ComfyWrapper:
             print(f"Uploading image {image_path} to ComfyUI...")
             upload_resp = self.upload_image(image_path)
             comfy_filename = upload_resp['name']
-            workflow["58"]["inputs"]["image"] = comfy_filename
+            workflow["5"]["inputs"]["image"] = comfy_filename
         
         # 2. Queue the prompt
         self.current_status = "Queueing in ComfyUI..."
         self.current_progress = 10
         self.last_update = time.time()
         
-        print("Queueing RAPID generation...")
+        print("Queueing Wan 2.1 generation...")
         prompt_resp = self.queue_prompt(workflow)
         prompt_id = prompt_resp['prompt_id']
         
@@ -180,11 +180,11 @@ class ComfyWrapper:
             if prompt_id in history and history[prompt_id].get('outputs'):
                 break
             
-            # Update Heartbeat (Rapid is ~2 min with 4-step)
+            # Update Heartbeat (Wan 2.1 is ~10 min with 25-step)
             elapsed = time.time() - start_wait
-            pseudo_progress = 10 + min(80, int((elapsed / 120) * 80))
+            pseudo_progress = 10 + min(80, int((elapsed / 600) * 80))
             self.current_progress = pseudo_progress
-            self.current_status = "ComfyUI is forging video frames (Rapid)..."
+            self.current_status = "ComfyUI is forging video frames (Wan 2.1)..."
             self.last_update = time.time()
             
             time.sleep(3)
@@ -195,11 +195,11 @@ class ComfyWrapper:
         self.last_update = time.time()
         
         outputs = history[prompt_id]['outputs']
-        # Node 30 is Video Combine (VHS)
-        if '30' in outputs and 'gifs' in outputs['30']:
-            video_output = outputs['30']['gifs'][0]
-        elif '30' in outputs:
-            video_output = outputs['30'].get('filenames', [{}])[0]
+        # Node 11 is Video Combine (VHS)
+        if '11' in outputs and 'gifs' in outputs['11']:
+            video_output = outputs['11']['gifs'][0]
+        elif '11' in outputs:
+            video_output = outputs['11'].get('filenames', [{}])[0]
         else:
             print(f"WARNING: Unexpected output structure: {list(outputs.keys())}")
             self.current_status = "Idle"
