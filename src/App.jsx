@@ -766,9 +766,9 @@ function App() {
   const [batchChecked, setBatchChecked] = useState({})
   const [batchStatus, setBatchStatus] = useState({ running: false, total: 0, completed: 0, current_name: '', results: [] })
   const [editingAnim, setEditingAnim] = useState(null)
-  const [animDuration, setAnimDuration] = useState(25) // 25=1.5s, 49=3s, 97=6s
-  const durationOptions = [{ frames: 25, label: '1.5s' }, { frames: 49, label: '3s' }, { frames: 97, label: '6s' }]
-  const [animQuality, setAnimQuality] = useState(10)
+  const [animDuration, setAnimDuration] = useState(65) // 25=1.5s, 49=3s, 65=4s, 97=6s
+  const durationOptions = [{ frames: 25, label: '1.5s' }, { frames: 49, label: '3s' }, { frames: 65, label: '4s' }, { frames: 97, label: '6s' }]
+  const [animQuality, setAnimQuality] = useState(30)
   const qualityOptions = [{ steps: 10, label: 'Draft' }, { steps: 20, label: 'Standard' }, { steps: 30, label: 'High' }]
 
   // Load preset list
