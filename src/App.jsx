@@ -360,6 +360,7 @@ function App() {
     return () => clearTimeout(timeout);
   }, []); // Run once on mount, recursion handled by setTimeout
   const [prompt, setPrompt] = useState('')
+  const [selectedAngleForFix, setSelectedAngleForFix] = useState('Front')
   const [variants, setVariants] = useState([])
   const [loading, setLoading] = useState(false)
   const [selectedAnchor, setSelectedAnchor] = useState(null)
@@ -405,10 +406,11 @@ function App() {
   const turnaroundCanvasRef = useRef(null)
 
   
-  // Slicing State
+  // Slicing & Kitbashing State
   const [slicedUrls, setSlicedUrls] = useState([])
   const [allSliceVersions, setAllSliceVersions] = useState([[], [], [], [], []])
   const [selectedVersionIndices, setSelectedVersionIndices] = useState([0, 0, 0, 0, 0])
+  const [poseSelections, setPoseSelections] = useState({}) // { "card_0_0": { label: "Front", url: "..." } }
   const [slicing, setSlicing] = useState(false)
   
 
@@ -831,7 +833,9 @@ Continue?`;
       const data = await response.json();
       if (data.status === 'success') {
         const imageUrl = data.url || data.image_url;
-        setTurnaroundUrl(`${apiBase}${imageUrl}?t=${Date.now()}`)
+        const fullUrl = `${apiBase}${imageUrl}?t=${Date.now()}`;
+        setTurnaroundUrl(fullUrl);
+        setOriginalTurnaroundUrl(fullUrl); // MUST lock this in so Quick Fix always uses the Golden Base
         if (data.project_id) {
           setActiveProjectId(data.project_id);
         }
@@ -938,8 +942,29 @@ Continue?`;
           setSelectedVersionIndices([0, 0, 0, 0, 0]);
         }
 
+        if (data.pose_selections && Object.keys(data.pose_selections).length > 0) {
+          // Migrate old format { url: label } to new format { cardId: { label, url } }
+          const first = Object.values(data.pose_selections)[0];
+          if (typeof first === 'string') {
+            // Old format — convert
+            const migrated = {};
+            Object.entries(data.pose_selections).forEach(([url, label], idx) => {
+              migrated[`card_migrated_${idx}`] = { label, url };
+            });
+            setPoseSelections(migrated);
+          } else {
+            setPoseSelections(data.pose_selections);
+          }
+        } else {
+          setPoseSelections({});
+        }
+
         setIsTurnaroundModalOpen(false)
-        setStage('slicing')
+        if (data.is_compounded) {
+          setStage('slicing')
+        } else {
+          setStage('gallery')
+        }
       } else if (data.status === 'error') {
         alert(`Slicing failed: ${data.message}`);
       }
@@ -949,6 +974,132 @@ Continue?`;
       setSlicing(false)
     }
   }
+
+  const handleSelectPose = async (cardId, url, poseLabel) => {
+    setPoseSelections(prev => {
+      const next = { ...prev };
+      if (poseLabel !== 'Unselected') {
+        // Remove any OTHER card that already has this label
+        Object.keys(next).forEach(key => {
+          if (next[key]?.label === poseLabel) delete next[key];
+        });
+        next[cardId] = { label: poseLabel, url: url };
+      } else {
+        delete next[cardId];
+      }
+      
+      if (activeProjectId) {
+        fetch(`${apiBase}/project/${activeProjectId}/save-selections`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ selections: next })
+        }).catch(err => console.error("Failed to save selections:", err));
+      }
+
+      return next;
+    });
+  };
+
+  const handleGenerateMore = async () => {
+    setGeneratingTurnaround(true);
+    try {
+      const response = await fetch(`${apiBase}/generate-turnaround`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          session_id: Date.now().toString(),
+          prompt: prompt,
+          enforce_white: enforceWhite,
+          num_variants: 1,
+          project_id: activeProjectId,
+          use_img2img: true,
+          strength: 0.65
+        })
+      });
+      const data = await response.json();
+      if (data.status === 'success') {
+        const imageUrl = data.url || data.image_url;
+        const freshUrl = `${apiBase}${imageUrl}?t=${Date.now()}`;
+        setTurnaroundUrl(freshUrl);
+        
+        // Auto-trigger slicing so it appears in the gallery
+        const sliceRes = await fetch(`${apiBase}/slice-turnaround`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            image_url: freshUrl,
+            project_id: activeProjectId,
+            remover_type: removerType,
+            alpha_matting: alphaMatting,
+            force_reslice: true,
+            foreground_threshold: removalSensitivity,
+            background_threshold: Math.max(0, removalSensitivity - 230)
+          })
+        });
+        const sliceData = await sliceRes.json();
+        if (sliceData.status === 'success') {
+          // Update the gallery versions
+          if (sliceData.all_slice_versions) {
+            const absoluteVersions = sliceData.all_slice_versions.map(group => 
+              group.map(url => url.startsWith('http') ? url : `${apiBase}${url}`)
+            );
+            setAllSliceVersions(absoluteVersions);
+            setSelectedVersionIndices(absoluteVersions.map(group => Math.max(0, group.length - 1)));
+          }
+        }
+      } else {
+        alert(`Generation failed: ${data.message || 'Unknown error'}`);
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Failed to generate more poses.");
+    } finally {
+      setGeneratingTurnaround(false);
+    }
+  };
+
+  const handleCompoundAndClean = async () => {
+    const selectedSlices = {};
+    Object.values(poseSelections).forEach(({ label, url }) => {
+      selectedSlices[label] = url;
+    });
+    
+    const required = ["Front", "3/4 Front", "Side", "3/4 Back", "Back"];
+    for (let req of required) {
+      if (!selectedSlices[req]) {
+        alert(`Missing selection for: ${req}`);
+        return;
+      }
+    }
+
+    setSlicing(true);
+    try {
+      const res = await fetch(`${apiBase}/compound-and-clean`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          project_id: activeProjectId,
+          selected_slices: selectedSlices
+        })
+      });
+      const data = await res.json();
+      if (data.status === 'success') {
+        const newUrls = required.map(req => selectedSlices[req]);
+        setSlicedUrls(newUrls);
+        setAllSliceVersions(newUrls.map(u => [u]));
+        setSelectedVersionIndices([0, 0, 0, 0, 0]);
+        setTurnaroundUrl(`${apiBase}${data.compounded_url}?t=${Date.now()}`);
+        setStage('slicing');
+      } else {
+        alert('Failed to compound: ' + (data.detail || data.message));
+      }
+    } catch (e) {
+      console.error(e);
+      alert('Error during compound and clean');
+    } finally {
+      setSlicing(false);
+    }
+  };
 
   const fetchSavedProjects = async (mode = 'load') => {
     try {
@@ -1039,7 +1190,26 @@ Continue?`;
         return group[vIdx] || group[0];
       });
       setSlicedUrls(currentUrls);
-      setStage('slicing');
+      if (project.pose_selections && Object.keys(project.pose_selections).length > 0) {
+        const first = Object.values(project.pose_selections)[0];
+        if (typeof first === 'string') {
+          const migrated = {};
+          Object.entries(project.pose_selections).forEach(([url, label], idx) => {
+            migrated[`card_migrated_${idx}`] = { label, url };
+          });
+          setPoseSelections(migrated);
+        } else {
+          setPoseSelections(project.pose_selections);
+        }
+      } else {
+        setPoseSelections({});
+      }
+
+      if (project.is_compounded) {
+        setStage('slicing');
+      } else {
+        setStage('gallery');
+      }
     }
 
     setIsLoadModalOpen(false);
@@ -1176,32 +1346,34 @@ Continue?`;
           project_id: activeProjectId,
           sheet_url: originalTurnaroundUrl || turnaroundUrl,
           slice_index: index,
-          target_rotation: dir
+          target_rotation: dir,
+          num_variants: 2
         })
       });
       const data = await res.json();
       if (data.status === 'success') {
-        const newUrl = `${apiBase}${data.url}`;
-        setTurnaroundUrl(`${newUrl}?t=${Date.now()}`);
+        const urlsToSlice = data.urls || [data.url];
         
-        // Re-slice automatically to update individual pose files
-        const sliceRes = await fetch(`${apiBase}/slice-turnaround`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
-            image_url: data.url, 
-            project_id: activeProjectId, 
-            force_reslice: true,
-            target_slice_index: index
-          })
-        });
-        const sliceData = await sliceRes.json();
-        if (sliceData.status === 'success') {
-          // Use the version history directly from the backend metadata
-          const freshUrls = sliceData.urls.map(u => `${apiBase}${u}?t=${Date.now()}`);
+        let latestSliceData = null;
+        for (const sheetUrl of urlsToSlice) {
+          const sliceRes = await fetch(`${apiBase}/slice-turnaround`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+              image_url: sheetUrl, 
+              project_id: activeProjectId, 
+              force_reslice: true,
+              target_slice_index: index
+            })
+          });
+          latestSliceData = await sliceRes.json();
+        }
+
+        if (latestSliceData && latestSliceData.status === 'success') {
+          const freshUrls = latestSliceData.urls.map(u => `${apiBase}${u}?t=${Date.now()}`);
           
-          if (sliceData.all_slice_versions) {
-            const absoluteVersions = sliceData.all_slice_versions.map(group => 
+          if (latestSliceData.all_slice_versions) {
+            const absoluteVersions = latestSliceData.all_slice_versions.map(group => 
               group.map(url => url.startsWith('http') ? url : `${apiBase}${url}`)
             );
             setAllSliceVersions(absoluteVersions);
@@ -1852,6 +2024,119 @@ Continue?`;
             </motion.div>
           )}
 
+          {stage === 'gallery' && (
+            <motion.div
+              key="gallery"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="glass-card"
+              style={{ maxWidth: '1200px', margin: '0 auto', textAlign: 'center' }}
+            >
+              <h2 style={{ marginBottom: '1.5rem' }}>Kitbashing <span className="gradient-text">Gallery</span></h2>
+              <p style={{ color: 'var(--text-dim)', marginBottom: '2rem' }}>
+                Select exactly one image for each of the 5 poses to build your final character sheet.
+              </p>
+              
+              <div style={{
+                display: 'flex',
+                gap: '1rem',
+                justifyContent: 'center',
+                marginBottom: '2rem'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: 'rgba(255,255,255,0.05)', padding: '0.5rem', borderRadius: '8px' }}>
+                  <span style={{ fontSize: '0.8rem', color: 'var(--text-dim)' }}>Generate 2 Alts for:</span>
+                  <select 
+                     value={selectedAngleForFix}
+                     onChange={e => setSelectedAngleForFix(e.target.value)}
+                     style={{ background: '#222', color: 'white', border: '1px solid #444', borderRadius: '4px', padding: '4px 8px', fontSize: '0.8rem', outline: 'none' }}
+                  >
+                     <option value="Front">Front</option>
+                     <option value="3/4 Front">3/4 Front</option>
+                     <option value="Side">Side</option>
+                     <option value="3/4 Back">3/4 Back</option>
+                     <option value="Back">Back</option>
+                  </select>
+                  <button 
+                    className="btn-secondary"
+                    onClick={() => {
+                      // ALWAYS mask a middle column for maximum surrounding context.
+                      // The angle only affects the PROMPT, not which column gets masked.
+                      // This matches how the old Quick Fix worked — always targeting an actual character.
+                      const numSegments = allSliceVersions.length || 5;
+                      const middleIndex = Math.floor(numSegments / 2);
+                      handleQuickFix(middleIndex, selectedAngleForFix);
+                    }}
+                    disabled={loading}
+                    style={{ padding: '6px 12px' }}
+                  >
+                    {loading ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
+                    Go
+                  </button>
+                </div>
+                <button
+                  className="btn-primary"
+                  onClick={handleCompoundAndClean}
+                  disabled={slicing}
+                  title="Combine selected poses and clean up unused slices"
+                  style={{ background: 'linear-gradient(to right, #10b981, #059669)', border: 'none', display: 'flex', alignItems: 'center', gap: '0.5rem' }}
+                >
+                  {slicing ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />}
+                  Compound & Clean Workspace
+                </button>
+              </div>
+
+              <div style={{ 
+                display: 'grid', 
+                gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', 
+                gap: '1.5rem',
+                marginBottom: '3rem'
+              }}>
+                {allSliceVersions.flatMap((versions, colIndex) => 
+                  versions.map((url, verIndex) => ({ url, colIndex, cardId: `card_${colIndex}_${verIndex}` }))
+                ).map((item, i) => {
+                  const sel = poseSelections[item.cardId];
+                  const currentLabel = sel?.label || 'Unselected';
+                  return (
+                  <div key={item.cardId} style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                    <div className="glass-card" style={{ padding: '0', overflow: 'hidden', height: '250px', background: 'rgba(255,255,255,0.02)', position: 'relative' }}>
+                      <div style={{ 
+                        height: '100%', 
+                        display: 'flex', 
+                        alignItems: 'center', 
+                        justifyContent: 'center',
+                        background: 'repeating-conic-gradient(#111 0% 25%, transparent 0% 50%) 50% / 20px 20px'
+                      }}>
+                        <img src={item.url} alt={`Slice ${i}`} style={{ maxHeight: '100%', maxWidth: '100%', objectFit: 'contain' }} />
+                      </div>
+                    </div>
+                    <select 
+                       value={currentLabel} 
+                       onChange={(e) => handleSelectPose(item.cardId, item.url, e.target.value)}
+                       style={{ 
+                         fontSize: '0.8rem', background: '#222', color: 'white', border: `1px solid ${currentLabel !== 'Unselected' ? 'var(--accent-secondary)' : '#444'}`, borderRadius: '4px', padding: '6px 8px', width: '100%',
+                         boxShadow: currentLabel !== 'Unselected' ? '0 0 10px rgba(217, 70, 239, 0.2)' : 'none',
+                         transition: 'all 0.2s'
+                       }}
+                    >
+                       <option value="Unselected">Unselected</option>
+                       <option value="Front">Front</option>
+                       <option value="3/4 Front">3/4 Front</option>
+                       <option value="Side">Side</option>
+                       <option value="3/4 Back">3/4 Back</option>
+                       <option value="Back">Back</option>
+                    </select>
+                  </div>
+                  );
+                })}
+              </div>
+              <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}>
+                <button className="btn-secondary" onClick={() => { setStage('prompt'); setSlicedUrls([]); }}>
+                  <ArrowLeft size={18} style={{ marginRight: '0.5rem' }} /> Start Over
+                </button>
+              </div>
+            </motion.div>
+          )}
+
           {stage === 'slicing' && (
             <motion.div
               key="slicing"
@@ -1860,9 +2145,9 @@ Continue?`;
               className="glass-card"
               style={{ maxWidth: '1200px', margin: '0 auto', textAlign: 'center' }}
             >
-              <h2 style={{ marginBottom: '1.5rem' }}>Segmented <span className="gradient-text">Character Poses</span></h2>
+              <h2 style={{ marginBottom: '1.5rem' }}>Finalized <span className="gradient-text">Character Poses</span></h2>
               <p style={{ color: 'var(--text-dim)', marginBottom: '2rem' }}>
-                OpenCV has automatically detected, isolated, and removed the background from each pose.
+                Your character sheet is compounded and ready for animation.
               </p>
               
               <div style={{ 
@@ -1872,72 +2157,11 @@ Continue?`;
                 marginBottom: '3rem'
               }}>
                 {slicedUrls.map((url, i) => {
-                  const versions = allSliceVersions[i] || [];
-                  const currentVIdx = selectedVersionIndices[i] || 0;
-                  
-                  const handlePrevVersion = () => {
-                    const newIdx = Math.max(0, currentVIdx - 1);
-                    const newIndices = [...selectedVersionIndices];
-                    newIndices[i] = newIdx;
-                    setSelectedVersionIndices(newIndices);
-                    
-                    const newUrls = [...slicedUrls];
-                    newUrls[i] = versions[newIdx];
-                    setSlicedUrls(newUrls);
-                  };
 
-                  const handleNextVersion = () => {
-                    const newIdx = Math.min(versions.length - 1, currentVIdx + 1);
-                    const newIndices = [...selectedVersionIndices];
-                    newIndices[i] = newIdx;
-                    setSelectedVersionIndices(newIndices);
-                    
-                    const newUrls = [...slicedUrls];
-                    newUrls[i] = versions[newIdx];
-                    setSlicedUrls(newUrls);
-                  };
 
                   return (
                     <div key={i} style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                       <div className="glass-card" style={{ padding: '0', overflow: 'hidden', height: '250px', background: 'rgba(255,255,255,0.02)', position: 'relative' }}>
-                        
-                        {/* Version Navigation Arrows */}
-                        {versions.length > 1 && (
-                          <>
-                            <button 
-                              onClick={handlePrevVersion}
-                              disabled={currentVIdx === 0}
-                              style={{ 
-                                position: 'absolute', left: '5px', top: '50%', transform: 'translateY(-50%)',
-                                background: 'rgba(0,0,0,0.6)', border: '1px solid rgba(255,255,255,0.1)',
-                                color: currentVIdx === 0 ? '#444' : 'white', borderRadius: '50%', padding: '4px',
-                                zIndex: 10, cursor: currentVIdx === 0 ? 'default' : 'pointer'
-                              }}
-                            >
-                              <ChevronLeft size={16} />
-                            </button>
-                            <button 
-                              onClick={handleNextVersion}
-                              disabled={currentVIdx === versions.length - 1}
-                              style={{ 
-                                position: 'absolute', right: '5px', top: '50%', transform: 'translateY(-50%)',
-                                background: 'rgba(0,0,0,0.6)', border: '1px solid rgba(255,255,255,0.1)',
-                                color: currentVIdx === versions.length - 1 ? '#444' : 'white', borderRadius: '50%', padding: '4px',
-                                zIndex: 10, cursor: currentVIdx === versions.length - 1 ? 'default' : 'pointer'
-                              }}
-                            >
-                              <ChevronRight size={16} />
-                            </button>
-                            <div style={{ 
-                              position: 'absolute', bottom: '8px', left: '50%', transform: 'translateX(-50%)',
-                              fontSize: '0.6rem', color: 'var(--accent-secondary)', background: 'rgba(0,0,0,0.7)',
-                              padding: '2px 8px', borderRadius: '10px', zIndex: 5, border: '1px solid rgba(217, 70, 239, 0.2)'
-                            }}>
-                              V{currentVIdx + 1} / {versions.length}
-                            </div>
-                          </>
-                        )}
-
                         <div style={{ 
                           height: '100%', 
                           display: 'flex', 
@@ -1948,57 +2172,26 @@ Continue?`;
                           <img src={url} alt={`Pose ${i}`} style={{ maxHeight: '100%', maxWidth: '100%', objectFit: 'contain' }} />
                         </div>
                       </div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', marginTop: '0.5rem' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <div style={{ fontSize: '0.6rem', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Slice {i+1}</div>
-                        <select 
-                           value={sliceDirections[i]} 
-                           onChange={(e) => handleSetSliceDirection(i, e.target.value)}
-                           style={{ fontSize: '0.6rem', background: '#222', color: 'white', border: '1px solid #444', borderRadius: '4px', padding: '2px 4px' }}
-                        >
-                           <option value="front">Front</option>
-                           <option value="side">Side</option>
-                           <option value="back">Back</option>
-                           <option value="front-quarter">3/4 Front</option>
-                           <option value="back-quarter">3/4 Back</option>
-                        </select>
-                      </div>
-                      <button 
-                        className="btn-secondary" 
-                        style={{ 
-                          padding: '6px 8px', 
-                          fontSize: '0.65rem', 
-                          color: loading ? '#666' : 'var(--accent-primary)', 
-                          borderColor: loading ? '#333' : 'rgba(139, 92, 246, 0.3)', 
-                          width: '100%', 
-                          display: 'flex', 
-                          alignItems: 'center', 
-                          justifyContent: 'center', 
-                          gap: '0.4rem',
-                          cursor: loading ? 'not-allowed' : 'pointer',
-                          background: loading ? 'rgba(255,255,255,0.02)' : undefined
-                        }}
-                        onClick={() => handleQuickFix(i, sliceDirections[i])}
-                        disabled={loading}
-                      >
-                        {loading ? <Loader2 size={12} className="animate-spin" /> : <Wand2 size={12} />}
-                        {loading ? 'Processing...' : `Quick Fix ${i+1}`}
-                      </button>
-
-
-                      <button 
-                        className="btn-secondary" 
-                        style={{ 
-                          marginTop: '0.4rem',
-                          fontSize: '0.65rem', 
-                          color: '#38bdf8', 
-                          borderColor: 'rgba(56, 189, 248, 0.3)', 
-                          width: '100%', 
-                          display: 'flex', 
-                          alignItems: 'center', 
-                          justifyContent: 'center', 
-                          gap: '0.4rem'
-                        }}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', marginTop: '0.5rem' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0 4px' }}>
+                          <div style={{ fontSize: '0.6rem', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Slice {i+1}</div>
+                          <div style={{ fontSize: '0.7rem', color: 'var(--accent-secondary)', fontWeight: 'bold' }}>
+                            {['Front', '3/4 Front', 'Side', '3/4 Back', 'Back'][i]}
+                          </div>
+                        </div>
+                        <button 
+                          className="btn-secondary" 
+                          style={{ 
+                            marginTop: '0.4rem',
+                            fontSize: '0.65rem', 
+                            color: '#38bdf8', 
+                            borderColor: 'rgba(56, 189, 248, 0.3)', 
+                            width: '100%', 
+                            display: 'flex', 
+                            alignItems: 'center', 
+                            justifyContent: 'center', 
+                            gap: '0.4rem'
+                          }}
                         onClick={async () => {
                           setSelectedVideoSlice(slicedUrls[i]);
                           const templatePrompt = `Image 1 role: identity anchor. Preserve exact character colors and materials.
@@ -2035,13 +2228,9 @@ Flat opaque green background #2E8B57.`;
 
               
               <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}>
-                <button className="btn-secondary" onClick={() => { setStage('prompt'); setSlicedUrls([]); }}>
-                  <ArrowLeft size={18} style={{ marginRight: '0.5rem' }} /> Start Over
+                <button className="btn-secondary" onClick={() => setStage('gallery')}>
+                  <ArrowLeft size={18} style={{ marginRight: '0.5rem' }} /> Back to Gallery
                 </button>
-                <button className="btn-secondary" onClick={() => { setStage('prompt'); setIsTurnaroundModalOpen(true); }}>
-                  <ArrowLeft size={18} style={{ marginRight: '0.5rem' }} /> Back to Turnaround
-                </button>
-
               </div>
             </motion.div>
           )}

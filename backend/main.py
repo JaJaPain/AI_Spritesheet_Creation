@@ -28,6 +28,7 @@ from diffusers import (
     FluxPipeline,
     FluxTransformer2DModel,
     FluxFillPipeline,
+    FluxImg2ImgPipeline,
 )
 from transformers import BitsAndBytesConfig
 from diffusers.utils import load_image
@@ -1218,6 +1219,9 @@ class TurnaroundRequest(BaseModel):
     enforce_white: bool = True
     num_variants: int = 1
     auto_slice: bool = True # Automatically slice after generation
+    project_id: Optional[str] = None
+    use_img2img: bool = False # Flag to trigger img2img coherency
+    strength: float = 0.5 # Default denoise strength for img2img
 
 @app.post("/generate-turnaround")
 async def generate_turnaround(req: TurnaroundRequest):
@@ -1250,11 +1254,18 @@ async def generate_turnaround(req: TurnaroundRequest):
         )
         
         logger.info("  Loading Pipeline...")
-        flux_pipe = FluxPipeline.from_pretrained(
-            "black-forest-labs/FLUX.1-dev", 
-            transformer=transformer,
-            torch_dtype=torch.bfloat16
-        )
+        if req.use_img2img:
+            flux_pipe = FluxImg2ImgPipeline.from_pretrained(
+                "black-forest-labs/FLUX.1-dev", 
+                transformer=transformer,
+                torch_dtype=torch.bfloat16
+            )
+        else:
+            flux_pipe = FluxPipeline.from_pretrained(
+                "black-forest-labs/FLUX.1-dev", 
+                transformer=transformer,
+                torch_dtype=torch.bfloat16
+            )
         
         # Enable offloading and VAE optimizations to fit in 16GB VRAM
         flux_pipe.enable_model_cpu_offload()
@@ -1283,7 +1294,7 @@ async def generate_turnaround(req: TurnaroundRequest):
 
         for v_idx in range(num_to_gen):
             max_attempts = 2 if req.enforce_white else 1
-            pid = get_next_project_id()
+            pid = req.project_id if req.project_id else get_next_project_id()
             project_dir = os.path.join("Output_Saves", pid)
             os.makedirs(project_dir, exist_ok=True)
             
@@ -1293,6 +1304,21 @@ async def generate_turnaround(req: TurnaroundRequest):
                 logger.info(f"Variant {v_idx+1}/{num_to_gen} | Attempt {attempt+1}/{max_attempts} | Seed: {seed}")
                 
                 def do_flux_seeded():
+                    if req.use_img2img and req.project_id:
+                        base_image_path = os.path.join("Output_Saves", req.project_id, f"{req.project_id}_turnaround_ORIGINAL.png")
+                        if os.path.exists(base_image_path):
+                            init_image = Image.open(base_image_path).convert("RGB")
+                            return flux_pipe(
+                                prompt=prompt_text,
+                                image=init_image,
+                                strength=req.strength,
+                                num_inference_steps=30,
+                                guidance_scale=3.5,
+                                generator=torch.Generator(device="cpu").manual_seed(seed),
+                                joint_attention_kwargs={"scale": 1.0}
+                            ).images[0]
+                    
+                    # Fallback to Text2Img (Requires standard FluxPipeline)
                     return flux_pipe(
                         prompt=prompt_text,
                         num_inference_steps=30,
@@ -1316,9 +1342,17 @@ async def generate_turnaround(req: TurnaroundRequest):
                 shutil.copy2(filepath, backup_path)
                 logger.info(f"  Golden Backup created: {backup_path}")
                 
-                # Save initial metadata
-                with open(os.path.join(project_dir, "metadata.json"), "w") as f:
-                    json.dump({"prompt": req.prompt, "id": pid, "seed": seed, "created_at": time.time(), "updated_at": time.time()}, f)
+                # Save/Update metadata
+                meta_path = os.path.join(project_dir, "metadata.json")
+                if os.path.exists(meta_path):
+                    with open(meta_path, "r") as f:
+                        meta = json.load(f)
+                    meta["updated_at"] = time.time()
+                    with open(meta_path, "w") as f:
+                        json.dump(meta, f)
+                else:
+                    with open(meta_path, "w") as f:
+                        json.dump({"prompt": req.prompt, "id": pid, "seed": seed, "created_at": time.time(), "updated_at": time.time()}, f)
                     
                 last_image_url = f"/output_saves/{pid}/{filename}"
                 last_project_id = pid
@@ -1535,7 +1569,16 @@ async def save_project(req: SaveProjectRequest):
         
         source_path = resolve_image_path(req.image_url)
         if os.path.exists(source_path):
-            shutil.copy2(source_path, target_path)
+            # Retry to handle Windows file locking from concurrent operations
+            for attempt in range(5):
+                try:
+                    shutil.copy2(source_path, target_path)
+                    break
+                except PermissionError:
+                    if attempt < 4:
+                        time.sleep(0.3)
+                    else:
+                        logger.warning(f"Could not copy source after 5 attempts (file locked): {source_path}")
         else:
             logger.warning(f"Could not resolve source image for saving: {req.image_url}")
                 
@@ -2585,6 +2628,7 @@ class CorrectPoseRequest(BaseModel):
     slice_index: Optional[int] = None # New: Quick fix by slice index
     target_rotation: str # e.g. "front-quarter"
     prompt_override: Optional[str] = None
+    num_variants: int = 1
 
 @app.post("/correct-pose")
 async def correct_pose(req: CorrectPoseRequest):
@@ -2593,10 +2637,6 @@ async def correct_pose(req: CorrectPoseRequest):
         logger.info(f"Correcting pose on sheet {req.sheet_url} for project {req.project_id}")
         
         # Resolve images
-        current_sheet_path = resolve_image_path(req.sheet_url)
-        if not os.path.exists(current_sheet_path):
-            raise HTTPException(status_code=404, detail="Current sheet not found")
-            
         def open_safe_rgb(path):
             img = Image.open(path)
             if img.mode in ("RGBA", "P"):
@@ -2607,7 +2647,7 @@ async def correct_pose(req: CorrectPoseRequest):
                 return bg
             return img.convert("RGB")
 
-        # GOLDEN BASE: Use original for standard sheets, current for pivoted ones
+        # ALWAYS resolve the Golden Base — never rely on req.sheet_url for sizing
         project_dir = os.path.join("Output_Saves", req.project_id)
         meta_path = os.path.join(project_dir, "metadata.json")
         is_pivoted = False
@@ -2618,22 +2658,33 @@ async def correct_pose(req: CorrectPoseRequest):
                 
         original_sheet_path = os.path.join(project_dir, f"{req.project_id}_turnaround_ORIGINAL.png")
         pivoted_sheet_path = os.path.join(project_dir, f"{req.project_id}_turnaround_PIVOTED.png")
-        current_sheet_img = open_safe_rgb(current_sheet_path)
         
-        # Determine which "Golden Base" to use
-        target_base = None
-        if not is_pivoted and os.path.exists(original_sheet_path):
-            target_base = original_sheet_path
-            logger.info(f"  Branch 1 (Preserved) detected. Using ORIGINAL sheet as reference.")
-        elif is_pivoted and os.path.exists(pivoted_sheet_path):
-            target_base = pivoted_sheet_path
-            logger.info(f"  Branch 2 (Pivoted) detected. Using PIVOTED Golden Base as reference.")
-            
-        if target_base:
-            sheet_img = open_safe_rgb(target_base)
+        # Determine which "Golden Base" to use — this is the ONLY source of truth for dimensions
+        golden_base_path = None
+        logger.info(f"  Checking Golden Base paths:")
+        logger.info(f"    ORIGINAL: {os.path.abspath(original_sheet_path)} (exists: {os.path.exists(original_sheet_path)})")
+        logger.info(f"    PIVOTED:  {os.path.abspath(pivoted_sheet_path)} (exists: {os.path.exists(pivoted_sheet_path)})")
+        
+        # Cascade: try PIVOTED first (if flagged), then ORIGINAL, then fallback
+        if is_pivoted and os.path.exists(pivoted_sheet_path):
+            golden_base_path = pivoted_sheet_path
+            logger.info(f"  Using PIVOTED Golden Base for all operations.")
+        elif os.path.exists(original_sheet_path):
+            golden_base_path = original_sheet_path
+            logger.info(f"  Using ORIGINAL Golden Base for all operations.")
         else:
-            logger.info(f"  No Golden Base found for this branch. Using current sheet as reference.")
-            sheet_img = current_sheet_img.copy()
+            # Last resort fallback to whatever was sent
+            fallback_path = resolve_image_path(req.sheet_url)
+            logger.info(f"    Fallback path: {os.path.abspath(fallback_path)} (exists: {os.path.exists(fallback_path)})")
+            if os.path.exists(fallback_path):
+                golden_base_path = fallback_path
+                logger.warning(f"  No Golden Base found! Falling back to req.sheet_url.")
+            else:
+                raise HTTPException(status_code=404, detail=f"No valid sheet found. Checked: {os.path.abspath(original_sheet_path)}")
+            
+        # Use the Golden Base for BOTH the FLUX Fill input AND the compositing target
+        sheet_img = open_safe_rgb(golden_base_path)
+        current_sheet_img = sheet_img  # They are the SAME image — no size mismatch possible
         
         # Resolve mask
         mask_img = None
@@ -2647,13 +2698,66 @@ async def correct_pose(req: CorrectPoseRequest):
                         meta = json.load(f)
                     segments = meta.get("slice_segments", [])
                 
-                # FALLBACK: If segments missing or out of range, calculate equal slices
+                # FALLBACK: If segments missing or out of range, auto-detect from the sheet
                 if req.slice_index >= len(segments) or not segments:
-                    logger.warning(f"  Slice index {req.slice_index} out of range or no segments available. Calculating equal fallback.")
+                    logger.warning(f"  Slice index {req.slice_index} out of range or no segments. Auto-detecting character islands...")
+                    
+                    # Detect character islands using column projection (same logic as slicer)
+                    gray = np.array(sheet_img.convert("L"))
+                    h_img, w_img = gray.shape
+                    # For white bg: character pixels are darker than 240
+                    col_mask = np.any(gray < 240, axis=0).astype(np.uint8)
+                    
+                    # Find contiguous runs of non-background columns
+                    detected_segments = []
+                    in_char = False
+                    start = 0
+                    for x in range(w_img):
+                        if col_mask[x] and not in_char:
+                            start = x
+                            in_char = True
+                        elif not col_mask[x] and in_char:
+                            detected_segments.append([start, x])
+                            in_char = False
+                    if in_char:
+                        detected_segments.append([start, w_img])
+                    
+                    # Merge segments that are very close (< 15px gap = same character)
+                    merged = []
+                    for seg in detected_segments:
+                        if merged and seg[0] - merged[-1][1] < 15:
+                            merged[-1][1] = seg[1]
+                        else:
+                            merged.append(list(seg))
+                    segments = merged
+                    logger.info(f"  Auto-detected {len(segments)} character islands: {segments}")
+                    
+                    # Save them so we don't have to do this again
+                    if os.path.exists(meta_path):
+                        with open(meta_path, "r") as f:
+                            meta = json.load(f)
+                        meta["slice_segments"] = segments
+                        save_metadata_safe(meta_path, meta)
+                    
+                    # Final safety: if still out of range, clamp
+                    if req.slice_index >= len(segments):
+                        req.slice_index = len(segments) // 2
+                        logger.warning(f"  Clamped slice_index to {req.slice_index}")
+                    
+                    # Now use the Smart Hard Walls logic below
                     w, h = sheet_img.size
-                    col_width = w / 5
-                    start_x = int(req.slice_index * col_width)
-                    end_x = int((req.slice_index + 1) * col_width)
+                    s_curr, e_curr = segments[req.slice_index]
+                    if req.slice_index > 0:
+                        e_prev = segments[req.slice_index - 1][1]
+                        start_x = (e_prev + s_curr) // 2
+                    else:
+                        start_x = 0
+                    if req.slice_index < len(segments) - 1:
+                        s_next = segments[req.slice_index + 1][0]
+                        end_x = (e_curr + s_next) // 2
+                    else:
+                        end_x = w
+                    logger.info(f"  Auto-detected Hard Walls for slice {req.slice_index}: x={start_x}-{end_x}")
                 else:
                     # SMART HARD WALLS: Use midpoints between character islands
                     w, h = sheet_img.size
@@ -2704,87 +2808,101 @@ async def correct_pose(req: CorrectPoseRequest):
         
         # 4. Load FLUX Fill
         pipe = manager.load_flux_fill()
-        
-        def do_fill():
-            return pipe(
-                prompt=full_prompt,
-                image=sheet_img,
-                mask_image=mask_img,
-                num_inference_steps=50, 
-                guidance_scale=4.5,
-                width=sheet_img.width,
-                height=sheet_img.height,
-            ).images[0]
+        urls = []
+        for v in range(req.num_variants):
+            seed = random.randint(0, 2**32 - 1)
+            logger.info(f"  Generating variant {v+1}/{req.num_variants} with seed {seed}")
             
-        image = await run_in_threadpool(do_fill)
-        
-        # 5. Clean up the corrected area to prevent background artifacts
-        logger.info("  Cleaning background of corrected pose...")
-        image_no_bg = await run_in_threadpool(
-            remove, 
-            image, 
-            session=rembg_session
-        )
-        
-        # 6. Composite the clean character back onto the CURRENT sheet (preserving other fixes)
-        # First, prepare a "clean" background by wiping the masked area to the background color
-        # Multi-point background detection: Sample corners and mid-edges (10px inset to avoid borders)
-        from collections import Counter
-        current_arr = np.array(current_sheet_img)
-        h_arr, w_arr = current_arr.shape[0], current_arr.shape[1]
-        inset = 10
-        sample_points = [
-            current_arr[inset, inset], current_arr[inset, w_arr-1-inset], 
-            current_arr[h_arr-1-inset, inset], current_arr[h_arr-1-inset, w_arr-1-inset],
-            current_arr[inset, w_arr//2], current_arr[h_arr-1-inset, w_arr//2],
-            current_arr[h_arr//2, inset], current_arr[h_arr//2, w_arr-1-inset]
-        ]
-        point_tuples = [tuple(p) for p in sample_points]
-        avg_bg = Counter(point_tuples).most_common(1)[0][0]
-        
-        # SAFETY: If the detected background is very dark OR not sufficiently light, fallback to white.
-        if sum(avg_bg) < 300: 
-            logger.info(f"  Background check returned {avg_bg}. Too dark for turnaround. Falling back to white.")
-            avg_bg = (255, 255, 255)
+            def do_fill_seeded():
+                return pipe(
+                    prompt=full_prompt,
+                    image=sheet_img,
+                    mask_image=mask_img,
+                    num_inference_steps=50, 
+                    guidance_scale=4.5,
+                    width=sheet_img.width,
+                    height=sheet_img.height,
+                    generator=torch.Generator(device="cpu").manual_seed(seed)
+                ).images[0]
+                
+            image = await run_in_threadpool(do_fill_seeded)
             
-        # 6.1. Create a "clean" background by filling the masked area with avg_bg
-        clean_bg = current_sheet_img.copy()
-        wipe_mask = mask_img.point(lambda p: 255 if p > 128 else 0)
-        bg_fill = Image.new("RGB", current_sheet_img.size, avg_bg)
-        clean_bg.paste(bg_fill, (0, 0), wipe_mask)
-        
-        # 6.2. Composite the isolated character
-        # We must use the character's alpha channel AND the surgical slot mask
-        # to ensure ONLY the character is updated and ONLY in the target slot.
-        if image_no_bg.mode != 'RGBA':
-            image_no_bg = image_no_bg.convert('RGBA')
+            # 5. Clean up the corrected area to prevent background artifacts
+            logger.info("  Cleaning background of corrected pose...")
+            image_no_bg = await run_in_threadpool(
+                remove, 
+                image, 
+                session=rembg_session
+            )
             
-        char_alpha = image_no_bg.getchannel('A')
-        combined_mask = Image.new("L", current_sheet_img.size, 0)
-        # Only use alpha where the surgical mask is active
-        combined_mask.paste(char_alpha, (0, 0), wipe_mask)
-        
-        final_image = clean_bg.copy()
-        final_image.paste(image_no_bg, (0, 0), combined_mask)
-        
-        # Save the result
-        filename = f"corrected_{uuid.uuid4().hex[:8]}.png"
-        filepath = os.path.join(project_dir, filename)
-        final_image.save(filepath)
-        
-        # PERSIST NEW SHEET TO METADATA
-        if os.path.exists(meta_path):
+            # 6. Composite the clean character back onto the CURRENT sheet
+            from collections import Counter
+            current_arr = np.array(current_sheet_img)
+            h_arr, w_arr = current_arr.shape[0], current_arr.shape[1]
+            inset = 10
+            sample_points = [
+                current_arr[inset, inset], current_arr[inset, w_arr-1-inset], 
+                current_arr[h_arr-1-inset, inset], current_arr[h_arr-1-inset, w_arr-1-inset],
+                current_arr[inset, w_arr//2], current_arr[h_arr-1-inset, w_arr//2],
+                current_arr[h_arr//2, inset], current_arr[h_arr//2, w_arr-1-inset]
+            ]
+            point_tuples = [tuple(p) for p in sample_points]
+            avg_bg = Counter(point_tuples).most_common(1)[0][0]
+            
+            if sum(avg_bg) < 300: 
+                avg_bg = (255, 255, 255)
+                
+            clean_bg = current_sheet_img.copy()
+            wipe_mask = mask_img.point(lambda p: 255 if p > 128 else 0)
+            
+            # SAFEGUARD: Ensure mask matches the background size
+            if wipe_mask.size != current_sheet_img.size:
+                wipe_mask = wipe_mask.resize(current_sheet_img.size, Image.Resampling.NEAREST)
+                
+            bg_fill = Image.new("RGB", current_sheet_img.size, avg_bg)
+            clean_bg.paste(bg_fill, (0, 0), wipe_mask)
+            
+            if image_no_bg.mode != 'RGBA':
+                image_no_bg = image_no_bg.convert('RGBA')
+                
+            char_alpha = image_no_bg.getchannel('A')
+            
+            # SAFEGUARD: Ensure the foreground elements match the background size
+            if char_alpha.size != wipe_mask.size:
+                char_alpha = char_alpha.resize(wipe_mask.size, Image.Resampling.NEAREST)
+            if image_no_bg.size != current_sheet_img.size:
+                image_no_bg = image_no_bg.resize(current_sheet_img.size, Image.Resampling.LANCZOS)
+                
+            combined_mask = Image.new("L", current_sheet_img.size, 0)
+            combined_mask.paste(char_alpha, (0, 0), wipe_mask)
+            
+            final_image = clean_bg.copy()
+            final_image.paste(image_no_bg, (0, 0), combined_mask)
+            
+            filename = f"corrected_{uuid.uuid4().hex[:8]}.png"
+            filepath = os.path.join(project_dir, filename)
+            final_image.save(filepath)
+            
+            urls.append(f"/output_saves/{req.project_id}/{filename}")
+            
+        # Update metadata to point to the LAST generated sheet as the current one
+        if os.path.exists(meta_path) and urls:
             try:
                 with open(meta_path, "r") as f:
                     meta = json.load(f)
-                meta["image_url"] = f"/output_saves/{req.project_id}/{filename}"
+                meta["image_url"] = urls[-1]
                 meta["updated_at"] = time.time()
                 save_metadata_safe(meta_path, meta)
-                logger.info(f"  Updated project metadata with corrected sheet: {filename}")
             except Exception as e:
                 logger.error(f"  Failed to update metadata in correct_pose: {e}")
+                
+        # 7. Unload model
+        del pipe
+        if manager.device == "cuda":
+            torch.cuda.empty_cache()
+            gc.collect()
             
-        return {"status": "success", "url": f"/output_saves/{req.project_id}/{filename}"}
+        return {"status": "success", "urls": urls, "url": urls[-1] if urls else None}
     except HTTPException:
         # Re-raise HTTP exceptions so FastAPI handles them correctly (e.g. 400 Bad Request)
         raise
@@ -3187,6 +3305,127 @@ async def generate_directional_poses(req: DirectionalPoseRequest):
         
     except Exception as e:
         logger.error(f"Error generating directional pose: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ─── Kitbashing & Cleanup ──────────────────────────────────────────────
+
+class SavePoseSelectionsRequest(BaseModel):
+    selections: dict  # mapping of full URLs to their label e.g., "Front"
+
+@app.post("/project/{project_id}/save-selections")
+async def save_pose_selections(project_id: str, req: SavePoseSelectionsRequest):
+    project_dir = os.path.join("Output_Saves", project_id)
+    meta_path = os.path.join(project_dir, "metadata.json")
+    if not os.path.exists(meta_path):
+        raise HTTPException(status_code=404, detail="Project not found")
+        
+    with open(meta_path, "r") as f:
+        meta = json.load(f)
+    meta["pose_selections"] = req.selections
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+    return {"status": "success"}
+
+class CompoundAndCleanRequest(BaseModel):
+    project_id: str
+    selected_slices: dict # mapping of label -> URL e.g., {"Front": "url1", "3/4 Front": "url2", ...}
+
+import shutil
+
+@app.post("/compound-and-clean")
+async def compound_and_clean(req: CompoundAndCleanRequest):
+    project_id = req.project_id
+    project_dir = os.path.join("Output_Saves", project_id)
+    if not os.path.exists(project_dir):
+         raise HTTPException(status_code=404, detail="Project not found")
+    
+    unused_dir = os.path.join(project_dir, "unused")
+    os.makedirs(unused_dir, exist_ok=True)
+    
+    slices_dir = os.path.join(project_dir, "slices")
+    
+    try:
+        # Load the 5 images
+        pose_order = ["Front", "3/4 Front", "Side", "3/4 Back", "Back"]
+        images = []
+        max_h = 0
+        w_total = 0
+        
+        kept_basenames = []
+        
+        for pose in pose_order:
+            url = req.selected_slices.get(pose)
+            if not url:
+                raise HTTPException(status_code=400, detail=f"Missing {pose} slice")
+            
+            img_path = resolve_image_path(url)
+            if not os.path.exists(img_path):
+                raise HTTPException(status_code=404, detail=f"Slice not found at {img_path}")
+            
+            kept_basenames.append(os.path.basename(img_path))
+            
+            img = Image.open(img_path).convert("RGBA")
+            images.append(img)
+            max_h = max(max_h, img.height)
+            w_total += img.width
+            
+        # Stitch them. Align to bottom.
+        sheet = Image.new("RGBA", (w_total, max_h), (0, 0, 0, 0))
+        current_x = 0
+        for img in images:
+            y_offset = max_h - img.height
+            sheet.paste(img, (current_x, y_offset), img)
+            current_x += img.width
+            
+        compounded_filename = f"{project_id}_compounded.png"
+        compounded_path = os.path.join(project_dir, compounded_filename)
+        
+        # Paste over white background for the turnaround sheet (for Unification pass later)
+        bg = Image.new("RGB", sheet.size, (255, 255, 255))
+        bg.paste(sheet, (0, 0), sheet)
+        bg.save(compounded_path)
+        
+        # Clean: move unused slices
+        if os.path.exists(slices_dir):
+            for fname in os.listdir(slices_dir):
+                if fname not in kept_basenames and fname.endswith(".png"):
+                    src = os.path.join(slices_dir, fname)
+                    dst = os.path.join(unused_dir, fname)
+                    shutil.move(src, dst)
+                    
+        # Clean: move extra turnaround sheets
+        kept_sheets = [f"{project_id}_turnaround.png", f"{project_id}_turnaround_ORIGINAL.png", compounded_filename]
+        
+        for fname in os.listdir(project_dir):
+            if fname.endswith(".png") and "turnaround" in fname and fname not in kept_sheets:
+                src = os.path.join(project_dir, fname)
+                dst = os.path.join(unused_dir, fname)
+                shutil.move(src, dst)
+                
+        # Update metadata
+        meta_path = os.path.join(project_dir, "metadata.json")
+        if os.path.exists(meta_path):
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+            
+            new_versions = []
+            for pose in pose_order:
+                url = req.selected_slices.get(pose)
+                new_versions.append([url])
+                
+            meta["all_slice_versions"] = new_versions
+            meta["compounded_url"] = f"/output_saves/{project_id}/{compounded_filename}"
+            meta["is_compounded"] = True
+            
+            with open(meta_path, "w") as f:
+                json.dump(meta, f, indent=2)
+                
+        return {"status": "success", "compounded_url": f"/output_saves/{project_id}/{compounded_filename}"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error compounding: {e}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
