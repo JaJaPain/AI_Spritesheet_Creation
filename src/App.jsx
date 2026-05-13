@@ -887,7 +887,7 @@ Continue?`;
     }
   }
 
-  const handleSlice = async () => {
+  const handleSlice = async (overrideForce = false) => {
     if (!turnaroundUrl) {
       alert("No turnaround image to slice!");
       return;
@@ -904,7 +904,7 @@ Continue?`;
           project_id: activeProjectId,
           remover_type: removerType,
           alpha_matting: alphaMatting,
-          force_reslice: forceReslice,
+          force_reslice: overrideForce || forceReslice,
           foreground_threshold: removalSensitivity,
           background_threshold: Math.max(0, removalSensitivity - 230)
         }),
@@ -2605,11 +2605,20 @@ Flat opaque green background #2E8B57.`;
                      <button 
                         className="btn-primary" 
                         style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: 'linear-gradient(to right, #8b5cf6, #d946ef)' }} 
-                        onClick={handleSlice}
+                        onClick={() => handleSlice(false)}
                         disabled={slicing}
                      >
                        {slicing ? <Loader2 size={18} className="animate-spin" /> : <Wand2 size={18} />}
-                       {slicing ? 'Slicing...' : 'Save & Slice Poses'}
+                       {slicing ? 'Slicing...' : 'Save & Slice'}
+                     </button>
+                     <button 
+                        className="btn-secondary" 
+                        style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', borderColor: '#ef4444', color: '#ef4444' }} 
+                        onClick={() => handleSlice(true)}
+                        disabled={slicing}
+                     >
+                       <RefreshCw size={18} />
+                       Force Slice
                      </button>
                   </div>
               )}

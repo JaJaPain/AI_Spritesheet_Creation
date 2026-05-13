@@ -46,8 +46,8 @@ async def forge_video(
     image: UploadFile = File(None),
     image_url: str = Form(None),
     prompt: str = Form(...),
-    num_frames: int = Form(41),
-    steps: int = Form(25),
+    num_frames: int = Form(65),
+    steps: int = Form(30),
     seed: int = Form(-1),
     character_id: str = Form("unknown"),
     view_id: str = Form("side_view")
@@ -206,8 +206,8 @@ def run_batch_worker(image_path, animations, character_id, view_id):
             if seed == -1:
                 seed = rand_mod.randint(0, 2**32 - 1)
             workflow["9"]["inputs"]["seed"] = seed
-            workflow["9"]["inputs"]["steps"] = anim.get("steps", 25)
-            workflow["8"]["inputs"]["num_frames"] = anim.get("num_frames", 41)
+            workflow["9"]["inputs"]["steps"] = anim.get("steps", 30)
+            workflow["8"]["inputs"]["num_frames"] = anim.get("num_frames", 65)
             workflow["6"]["inputs"]["positive_prompt"] = anim["prompt"]
             
             print(f"[BATCH {i+1}/{len(animations)}] Generating: {anim['display_name']}")
