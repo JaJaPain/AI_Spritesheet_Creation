@@ -122,7 +122,8 @@ async def forge_video(
         # Override the text prompt
         workflow["6"]["inputs"]["positive_prompt"] = prompt
         
-        print(f"Requesting Wan 2.1 generation for: {prompt} (Seed: {seed})")
+        print(f"Requesting Wan 2.1 generation (Seed: {seed}, Steps: {steps}, Frames: {num_frames})")
+        print(f"Prompt ({len(prompt)} chars): {prompt[:200]}...")
         video_path = wrapper.run_workflow(workflow)
         
         if video_path:
