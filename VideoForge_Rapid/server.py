@@ -91,7 +91,7 @@ async def forge_video(
         img = Image.open(temp_path).convert("RGBA")
         target_w = 832
         target_h = 480
-        bright_green = (0, 255, 0, 255)
+        bright_green = (46, 139, 87, 255)  # #2E8B57 chroma green matching prompt
         
         w, h = img.size
         scale = min(target_w / w, target_h / h) * 0.85
@@ -291,9 +291,9 @@ async def start_batch(
     img = Image.open(temp_path).convert("RGBA")
     target_w = 832
     target_h = 480
-    sea_green = (0, 250, 154, 255)
+    sea_green = (46, 139, 87, 255)  # #2E8B57 chroma green matching prompt
     w, h = img.size
-    scale = min(target_w / w, target_h / h)
+    scale = min(target_w / w, target_h / h) * 0.85
     new_w, new_h = int(w * scale), int(h * scale)
     img_resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
     canvas = Image.new("RGBA", (target_w, target_h), sea_green)

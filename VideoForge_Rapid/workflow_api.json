@@ -1,4 +1,4 @@
-﻿{
+{
   "1": {
     "inputs": {
       "model": "wan2.1-i2v-14b-720p-Q4_K_M.gguf",
@@ -47,7 +47,7 @@
       "positive_prompt": "Preserve exact character identity, design, proportions, colors, textures, materials, clothing details, silhouette, and pixel readability throughout all frames.\n\nGenerate a side-view 2D game sprite walk cycle animation. Character facing right. Create strong exaggerated walking motion with clear alternating leg movement and visible arm swings. Full stride treadmill-style walking cycle. Feet visibly lift and extend forward during each step. Arms swing opposite to legs in natural animation timing. Strong pose transitions between frames. Dynamic movement with high motion amplitude.\n\nCharacter remains perfectly centered in frame at all times. Fixed side camera. No camera movement, zoom, rotation, or perspective change. No drifting. No body warping. No extra limbs. No pose collapse.\n\nGenerate clean sequential animation frames only. Fluid continuous looping motion suitable for sprite sheet extraction and game animation. Consistent anatomy and proportions across all frames.\n\nMaintain original color palette exactly. Flat sprite-style rendering. Uniform lighting. No relighting between frames.\n\nBackground must remain a perfectly flat opaque chroma green background #2E8B57 with zero variation or artifacts. Background must not animate, flicker, gradient, glow, shift color, or change brightness.\n\nNo color grading. No cinematic lighting. No bloom. No haze. No purple tint. No magenta tint. No stylization. No motion blur. No depth of field. No film grain. No shadows changing between frames. No atmospheric effects.\n\nPrimary request: generate a fluid looping walk cycle with smooth animation timing and readable keyframe motion.",
       "negative_prompt": "blurry, out of focus, bad anatomy, extra limbs, morphing, deformed, distorted, flickering background, color shift, bloom, haze, purple tint, magenta, motion blur, depth of field, film grain, camera movement, zoom, drift, warping, pose collapse",
       "force_offload": true,
-      "use_disk_cache": false,
+      "use_negative": false,
       "device": "cpu",
       "t5": ["2", 0]
     },
@@ -93,7 +93,6 @@
       "shift": 5,
       "seed": 42,
       "force_offload": true,
-      "sampler_name": "dpm++",
       "scheduler": "dpm++",
       "riflex_freq_index": 0,
       "denoise_strength": 1,
@@ -140,9 +139,7 @@
     "inputs": {
       "blocks_to_swap": 20,
       "offload_img_emb": false,
-      "offload_txt_emb": false,
-      "offload_to_cpu": true,
-      "extra_offload_percentage": 0
+      "offload_txt_emb": false
     },
     "class_type": "WanVideoBlockSwap"
   }
