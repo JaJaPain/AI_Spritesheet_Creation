@@ -141,7 +141,7 @@ async def forge_video(
             progress_state["status"] = "Success"
             progress_state["progress"] = 100
             progress_state["latest_video"] = final_filename
-            return {"status": "success", "video_url": f"/outputs/{final_filename}"}
+            return {"status": "success", "video_url": f"/outputs/{final_filename}", "seed": seed}
         else:
             raise Exception("ComfyUI failed to generate video")
 

@@ -767,9 +767,11 @@ function App() {
   const [batchStatus, setBatchStatus] = useState({ running: false, total: 0, completed: 0, current_name: '', results: [] })
   const [editingAnim, setEditingAnim] = useState(null)
   const [animDuration, setAnimDuration] = useState(65) // 25=1.5s, 49=3s, 65=4s, 97=6s
-  const durationOptions = [{ frames: 25, label: '1.5s' }, { frames: 49, label: '3s' }, { frames: 65, label: '4s' }, { frames: 97, label: '6s' }]
+  const durationOptions = [{ frames: 25, label: '1.5s', tip: '25 frames — fast test, minimal motion' }, { frames: 49, label: '3s', tip: '49 frames — short cycle, decent motion' }, { frames: 65, label: '4s', tip: '65 frames — optimal for full walk cycles (recommended)' }, { frames: 97, label: '6s', tip: '97 frames — extended animation, higher VRAM use' }]
   const [animQuality, setAnimQuality] = useState(30)
-  const qualityOptions = [{ steps: 10, label: 'Draft' }, { steps: 20, label: 'Standard' }, { steps: 30, label: 'High' }]
+  const qualityOptions = [{ steps: 10, label: 'Draft', tip: '10 denoising steps — fast but may have lighting artifacts' }, { steps: 20, label: 'Standard', tip: '20 denoising steps — decent quality, moderate speed' }, { steps: 30, label: 'High', tip: '30 denoising steps — best quality, cleanest output (recommended)' }]
+  const [animSeed, setAnimSeed] = useState(-1)
+  const [activeSeed, setActiveSeed] = useState(null) // the resolved seed shown during/after generation
 
   // Load preset list
   const loadPresetList = async () => {
@@ -894,6 +896,9 @@ function App() {
     if (!selectedVideoSlice || !videoPrompt) return;
     setVideoStage('generating');
     setVideoUrl(null);
+    // Resolve seed for display: if -1, generate a random one client-side for display
+    const resolvedSeed = animSeed === -1 ? Math.floor(Math.random() * 1000000) : animSeed;
+    setActiveSeed(resolvedSeed);
     
     try {
       const formData = new FormData();
@@ -919,6 +924,7 @@ function App() {
       formData.append('prompt', videoPrompt);
       formData.append('num_frames', animDuration);
       formData.append('steps', animQuality);
+      formData.append('seed', resolvedSeed);
       formData.append('character_id', activeProjectId || 'unknown');
       formData.append('view_id', selectedPresetId || 'side_view');
       
@@ -931,6 +937,7 @@ function App() {
         // The rapid forge returns a JSON with a video_url, classic returns a blob
         if (rapidEngineReady) {
           const data = await response.json();
+          if (data.seed) setActiveSeed(data.seed);
           // We need to fetch the blob from the rapid server's output
           const videoRes = await fetch(`${activeApi}${data.video_url}`);
           const blob = await videoRes.blob();
@@ -2675,23 +2682,39 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
               </div>
 
               {/* Duration & Quality Toggles */}
-              <div style={{ display: 'flex', gap: '1rem', marginBottom: '1.5rem' }}>
+              <div style={{ display: 'flex', gap: '1rem', marginBottom: '0.75rem' }}>
                 <div style={{ display: 'flex', gap: '0', background: 'rgba(255,255,255,0.03)', borderRadius: '10px', padding: '4px', border: '1px solid rgba(255,255,255,0.06)', flex: 1 }}>
-                  <span style={{ padding: '0.4rem 0.6rem', fontSize: '0.65rem', color: '#555', fontWeight: 'bold' }}>⏱</span>
+                  <span style={{ padding: '0.4rem 0.6rem', fontSize: '0.65rem', color: '#555', fontWeight: 'bold' }} title="Animation duration — more frames = longer clip but slower generation">⏱</span>
                   {durationOptions.map(opt => (
-                    <button key={opt.frames} onClick={() => setAnimDuration(opt.frames)} style={{ flex: 1, padding: '0.4rem', borderRadius: '8px', border: 'none', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.75rem', background: animDuration === opt.frames ? 'linear-gradient(to right, #10b981, #059669)' : 'transparent', color: animDuration === opt.frames ? '#fff' : '#666', transition: 'all 0.2s' }}>
+                    <button key={opt.frames} onClick={() => setAnimDuration(opt.frames)} title={opt.tip} style={{ flex: 1, padding: '0.4rem', borderRadius: '8px', border: 'none', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.75rem', background: animDuration === opt.frames ? 'linear-gradient(to right, #10b981, #059669)' : 'transparent', color: animDuration === opt.frames ? '#fff' : '#666', transition: 'all 0.2s' }}>
                       {opt.label}
                     </button>
                   ))}
                 </div>
                 <div style={{ display: 'flex', gap: '0', background: 'rgba(255,255,255,0.03)', borderRadius: '10px', padding: '4px', border: '1px solid rgba(255,255,255,0.06)', flex: 1 }}>
-                  <span style={{ padding: '0.4rem 0.6rem', fontSize: '0.65rem', color: '#555', fontWeight: 'bold' }}>✨</span>
+                  <span style={{ padding: '0.4rem 0.6rem', fontSize: '0.65rem', color: '#555', fontWeight: 'bold' }} title="Denoising quality — more steps = cleaner output but slower generation">✨</span>
                   {qualityOptions.map(opt => (
-                    <button key={opt.steps} onClick={() => setAnimQuality(opt.steps)} style={{ flex: 1, padding: '0.4rem', borderRadius: '8px', border: 'none', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.75rem', background: animQuality === opt.steps ? 'linear-gradient(to right, #8b5cf6, #6366f1)' : 'transparent', color: animQuality === opt.steps ? '#fff' : '#666', transition: 'all 0.2s' }}>
+                    <button key={opt.steps} onClick={() => setAnimQuality(opt.steps)} title={opt.tip} style={{ flex: 1, padding: '0.4rem', borderRadius: '8px', border: 'none', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.75rem', background: animQuality === opt.steps ? 'linear-gradient(to right, #8b5cf6, #6366f1)' : 'transparent', color: animQuality === opt.steps ? '#fff' : '#666', transition: 'all 0.2s' }}>
                       {opt.label}
                     </button>
                   ))}
                 </div>
+              </div>
+              {/* Seed Input */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '1.5rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: 'rgba(255,255,255,0.03)', borderRadius: '10px', padding: '4px 10px', border: '1px solid rgba(255,255,255,0.06)', flex: 1 }}>
+                  <span style={{ fontSize: '0.65rem', color: '#555', fontWeight: 'bold' }} title="Seed controls randomness. Use -1 for random, or enter a specific number to reproduce a generation.">🎲</span>
+                  <input
+                    type="number"
+                    value={animSeed}
+                    onChange={(e) => setAnimSeed(parseInt(e.target.value) || -1)}
+                    title="Seed controls randomness. Use -1 for random, or enter a specific number to reproduce a generation."
+                    style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: '#ccc', fontSize: '0.75rem', fontFamily: 'monospace', padding: '0.3rem 0' }}
+                    disabled={videoStage === 'generating'}
+                  />
+                  <span style={{ fontSize: '0.6rem', color: '#444' }}>{animSeed === -1 ? 'Random' : 'Fixed'}</span>
+                </div>
+                {activeSeed !== null && <span style={{ fontSize: '0.65rem', color: '#10b981', fontFamily: 'monospace' }} title="The actual seed used in the last generation">Last: {activeSeed}</span>}
               </div>
 
               {!batchMode ? (
