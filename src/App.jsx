@@ -1,7 +1,327 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { Sparkles, Wand2, Play, Download, Settings, Image as ImageIcon, Loader2, ArrowLeft, RefreshCw, Save, Upload, X, Check, FolderOpen, HelpCircle, Trash2, ChevronLeft, ChevronRight, Video, Zap } from 'lucide-react'
+import { Sparkles, Wand2, Play, Download, Settings, Image as ImageIcon, Loader2, ArrowLeft, RefreshCw, Save, Upload, X, Check, FolderOpen, HelpCircle, Trash2, ChevronLeft, ChevronRight, Video, Zap, Eraser, Droplet, Minus, Plus, RotateCcw } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 
+
+function SliceCleanupEditor({ imageUrl, onSave, onCancel, apiBase }) {
+  const canvasRef = useRef(null);
+  const containerRef = useRef(null);
+  const [isDrawing, setIsDrawing] = useState(false);
+  const [brushSize, setBrushSize] = useState(20);
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [undoStack, setUndoStack] = useState([]);
+  const [isPanning, setIsPanning] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [tool, setTool] = useState('eraser'); // 'eraser' or 'smudge'
+  const [smudgeStrength, setSmudgeStrength] = useState(0.5);
+  const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+  const lastDrawPos = useRef(null);
+  const lastPanPos = useRef({ x: 0, y: 0 });
+
+  // Load image into canvas
+  useEffect(() => {
+    if (!imageUrl) return;
+    setIsLoading(true);
+    const busterUrl = `${imageUrl}${imageUrl.includes('?') ? '&' : '?'}cb=${Date.now()}`;
+    fetch(busterUrl)
+      .then(r => r.blob())
+      .then(blob => {
+        const objectUrl = URL.createObjectURL(blob);
+        const img = new Image();
+        img.onload = () => {
+          const canvas = canvasRef.current;
+          if (!canvas) return;
+          canvas.width = img.width;
+          canvas.height = img.height;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0);
+          saveState();
+          // Auto-fit zoom
+          const container = containerRef.current;
+          if (container) {
+            const hRatio = (container.clientHeight * 0.8) / img.height;
+            const wRatio = (container.clientWidth * 0.8) / img.width;
+            setZoom(Math.min(hRatio, wRatio, 3));
+          }
+          setIsLoading(false);
+          URL.revokeObjectURL(objectUrl);
+        };
+        img.src = objectUrl;
+      })
+      .catch(() => setIsLoading(false));
+  }, [imageUrl]);
+
+  const saveState = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    setUndoStack(prev => [...prev.slice(-29), canvas.toDataURL()]);
+  };
+
+  const undo = () => {
+    if (undoStack.length <= 1) return;
+    const newStack = [...undoStack];
+    newStack.pop();
+    const prevState = newStack[newStack.length - 1];
+    const img = new Image();
+    img.src = prevState;
+    img.onload = () => {
+      const ctx = canvasRef.current.getContext('2d');
+      ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+      ctx.drawImage(img, 0, 0);
+      setUndoStack(newStack);
+    };
+  };
+
+  const getMousePos = (e) => {
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    return { x: (e.clientX - rect.left) / zoom, y: (e.clientY - rect.top) / zoom };
+  };
+
+  const drawErase = (x, y) => {
+    const ctx = canvasRef.current.getContext('2d');
+    ctx.save();
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.beginPath();
+    ctx.arc(x, y, (brushSize / 2) / zoom, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  };
+
+  const smudge = (x, y) => {
+    if (!lastDrawPos.current) return;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    const px = lastDrawPos.current.x;
+    const py = lastDrawPos.current.y;
+    const size = brushSize / zoom;
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(x, y, size / 2, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.globalAlpha = smudgeStrength;
+    ctx.drawImage(canvas, px - size/2, py - size/2, size, size, x - size/2, y - size/2, size, size);
+    ctx.restore();
+  };
+
+  const handleDehalo = async () => {
+    setIsProcessing(true);
+    try {
+      const dataUrl = canvasRef.current.toDataURL();
+      const formData = new FormData();
+      formData.append('image_data', dataUrl);
+      const res = await fetch(`${apiBase}/dehalo`, { method: 'POST', body: formData });
+      const data = await res.json();
+      const img = new Image();
+      img.src = data.image_data;
+      img.onload = () => {
+        const ctx = canvasRef.current.getContext('2d');
+        ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+        ctx.drawImage(img, 0, 0);
+        saveState();
+        setIsProcessing(false);
+      };
+    } catch (err) {
+      console.error("Dehalo failed", err);
+      setIsProcessing(false);
+    }
+  };
+
+  const onMouseDown = (e) => {
+    if (isLoading) return;
+    if (e.button === 1 || (e.button === 0 && e.altKey)) {
+      setIsPanning(true);
+      lastPanPos.current = { x: e.clientX, y: e.clientY };
+      return;
+    }
+    setIsDrawing(true);
+    const pos = getMousePos(e);
+    lastDrawPos.current = pos;
+    if (tool === 'eraser') drawErase(pos.x, pos.y);
+  };
+
+  const onMouseMove = (e) => {
+    const pos = getMousePos(e);
+    setMousePos(pos);
+    if (isPanning) {
+      const dx = e.clientX - lastPanPos.current.x;
+      const dy = e.clientY - lastPanPos.current.y;
+      setPan(prev => ({ x: prev.x + dx, y: prev.y + dy }));
+      lastPanPos.current = { x: e.clientX, y: e.clientY };
+      return;
+    }
+    if (!isDrawing) return;
+    if (tool === 'eraser') drawErase(pos.x, pos.y);
+    else if (tool === 'smudge') smudge(pos.x, pos.y);
+    lastDrawPos.current = pos;
+  };
+
+  const onMouseUp = () => {
+    if (isDrawing) saveState();
+    setIsDrawing(false);
+    setIsPanning(false);
+    lastDrawPos.current = null;
+  };
+
+  const onWheel = (e) => {
+    e.preventDefault();
+    const delta = e.deltaY > 0 ? 0.9 : 1.1;
+    setZoom(prev => Math.min(Math.max(prev * delta, 0.1), 20));
+  };
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handler = (e) => {
+      if (e.ctrlKey && e.key === 'z') { e.preventDefault(); undo(); }
+      if (e.key === '[') setBrushSize(prev => Math.max(prev - 2, 1));
+      if (e.key === ']') setBrushSize(prev => Math.min(prev + 2, 200));
+      if (e.key === 'e') setTool('eraser');
+      if (e.key === 's' && !e.ctrlKey) setTool('smudge');
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [undoStack]);
+
+  // Wheel handler
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const h = (e) => { e.preventDefault(); onWheel(e); };
+    el.addEventListener('wheel', h, { passive: false });
+    return () => el.removeEventListener('wheel', h);
+  }, []);
+
+  const handleSave = () => {
+    onSave(canvasRef.current.toDataURL());
+  };
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: '#050505', zIndex: 1000, display: 'flex', flexDirection: 'column' }}
+      onContextMenu={(e) => e.preventDefault()}
+    >
+      {/* Header Toolbar */}
+      <header style={{ 
+        padding: '0.8rem 2rem', borderBottom: '1px solid rgba(255,255,255,0.1)', 
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        background: 'rgba(15,15,25,0.95)', backdropFilter: 'blur(12px)'
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+          <Eraser size={22} color="var(--accent-primary)" />
+          <h3 style={{ margin: 0 }}>Slice <span className="gradient-text">Cleanup</span></h3>
+        </div>
+        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+          {/* Tool Selector */}
+          <div style={{ display: 'flex', background: 'rgba(255,255,255,0.05)', borderRadius: '0.6rem', padding: '0.25rem', gap: '0.3rem' }}>
+            <button onClick={() => setTool('eraser')} title="Eraser (E)"
+              style={{ background: tool === 'eraser' ? 'var(--accent-primary)' : 'transparent', border: 'none', color: 'white', padding: '0.4rem 0.6rem', borderRadius: '0.4rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.8rem' }}>
+              <Eraser size={16} /> Eraser
+            </button>
+            <button onClick={() => setTool('smudge')} title="Smudge (S)"
+              style={{ background: tool === 'smudge' ? 'var(--accent-primary)' : 'transparent', border: 'none', color: 'white', padding: '0.4rem 0.6rem', borderRadius: '0.4rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.8rem' }}>
+              <Droplet size={16} /> Smudge
+            </button>
+          </div>
+
+          <div style={{ width: 1, height: '1.5rem', background: 'rgba(255,255,255,0.1)' }} />
+
+          {/* Dehalo */}
+          <button onClick={handleDehalo} disabled={isLoading || isProcessing}
+            className="btn-secondary"
+            style={{ padding: '0.4rem 0.8rem', fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+            {isProcessing ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+            De-Halo (2px)
+          </button>
+
+          {/* Undo */}
+          <button onClick={undo} disabled={undoStack.length <= 1}
+            className="btn-secondary"
+            style={{ padding: '0.4rem 0.8rem', fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+            <RotateCcw size={14} /> Undo
+          </button>
+
+          <div style={{ width: 1, height: '1.5rem', background: 'rgba(255,255,255,0.1)' }} />
+
+          {/* Save & Cancel */}
+          <button onClick={handleSave} disabled={isLoading}
+            style={{ padding: '0.4rem 1rem', fontSize: '0.8rem', background: 'linear-gradient(to right, #10b981, #059669)', border: 'none', color: 'white', borderRadius: '8px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.3rem', fontWeight: 'bold' }}>
+            <Save size={16} /> Save & Return
+          </button>
+          <button onClick={onCancel}
+            className="btn-secondary"
+            style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem', borderColor: '#ef4444', color: '#ef4444', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+            <X size={16} /> Cancel
+          </button>
+        </div>
+      </header>
+
+      {/* Canvas Workspace */}
+      <div ref={containerRef}
+        style={{ flex: 1, position: 'relative', overflow: 'hidden', cursor: isPanning ? 'grabbing' : 'crosshair', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+        onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp} onMouseLeave={onMouseUp}
+      >
+        <div style={{
+          transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+          transformOrigin: 'center',
+          transition: isPanning ? 'none' : 'transform 0.1s ease-out',
+          position: 'relative'
+        }}>
+          <canvas ref={canvasRef} style={{ 
+            background: 'repeating-conic-gradient(#1e293b 0% 25%, #0f172a 0% 50%) 50% / 20px 20px',
+            boxShadow: '0 0 80px rgba(0,0,0,0.8)',
+            imageRendering: 'pixelated',
+            display: 'block'
+          }} />
+          {/* Brush cursor */}
+          <svg style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', overflow: 'visible' }}>
+            {!isPanning && (
+              <circle cx={mousePos.x} cy={mousePos.y} r={(brushSize / 2) / zoom} fill="none" stroke="rgba(255,255,255,0.5)" strokeWidth={1 / zoom} />
+            )}
+          </svg>
+        </div>
+
+        {isLoading && (
+          <div style={{ position: 'absolute', display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--accent-primary)' }}>
+            <Loader2 size={24} className="animate-spin" /> Loading...
+          </div>
+        )}
+      </div>
+
+      {/* Bottom Tool Bar */}
+      <div style={{
+        position: 'absolute', bottom: '1.5rem', left: '50%', transform: 'translateX(-50%)',
+        background: 'rgba(30, 41, 59, 0.9)', backdropFilter: 'blur(12px)',
+        padding: '0.8rem 2rem', borderRadius: '1rem', border: '1px solid rgba(255,255,255,0.1)',
+        display: 'flex', alignItems: 'center', gap: '2rem', zIndex: 1100,
+        boxShadow: '0 10px 25px rgba(0,0,0,0.5)'
+      }}>
+        <div>
+          <label style={{ fontSize: '0.7rem', display: 'block', marginBottom: '0.4rem', color: '#888' }}>Brush Size: {brushSize}px</label>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <Minus size={14} onClick={() => setBrushSize(prev => Math.max(prev - 5, 2))} style={{ cursor: 'pointer', color: '#888' }} />
+            <input type="range" min="1" max="200" value={brushSize} onChange={(e) => setBrushSize(parseInt(e.target.value))} style={{ width: '120px' }} />
+            <Plus size={14} onClick={() => setBrushSize(prev => Math.min(prev + 5, 200))} style={{ cursor: 'pointer', color: '#888' }} />
+          </div>
+        </div>
+        {tool === 'smudge' && (
+          <>
+            <div style={{ width: 1, height: '30px', background: 'rgba(255,255,255,0.1)' }} />
+            <div>
+              <label style={{ fontSize: '0.7rem', display: 'block', marginBottom: '0.4rem', color: '#888' }}>Smudge Strength: {Math.round(smudgeStrength * 100)}%</label>
+              <input type="range" min="0.05" max="1" step="0.05" value={smudgeStrength} onChange={(e) => setSmudgeStrength(parseFloat(e.target.value))} style={{ width: '120px' }} />
+            </div>
+          </>
+        )}
+        <div style={{ width: 1, height: '30px', background: 'rgba(255,255,255,0.1)' }} />
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontSize: '0.7rem', color: '#888' }}>Zoom: {Math.round(zoom * 100)}%</div>
+          <div style={{ fontSize: '0.6rem', color: '#555' }}>Wheel to Zoom | Mid-Click to Pan</div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function LimbMasker({ imageUrl, onSave, onCancel, title, initialMask }) {
   const canvasRef = useRef(null);
@@ -412,7 +732,7 @@ function App() {
   const [selectedVersionIndices, setSelectedVersionIndices] = useState([0, 0, 0, 0, 0])
   const [poseSelections, setPoseSelections] = useState({}) // { "card_0_0": { label: "Front", url: "..." } }
   const [slicing, setSlicing] = useState(false)
-  
+  const [cleanupSlice, setCleanupSlice] = useState(null) // { index, url } when editing a slice
 
   
   // Surgery & Correction State
@@ -2161,6 +2481,17 @@ Continue?`;
 
                   return (
                     <div key={i} style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                      <button 
+                        className="btn-secondary"
+                        onClick={() => setCleanupSlice({ index: i, url })}
+                        style={{ 
+                          padding: '0.35rem 0.6rem', fontSize: '0.7rem', width: '100%',
+                          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.3rem',
+                          borderColor: 'var(--accent-primary)', color: 'var(--accent-primary)'
+                        }}
+                      >
+                        <Eraser size={12} /> Clean Up
+                      </button>
                       <div className="glass-card" style={{ padding: '0', overflow: 'hidden', height: '250px', background: 'rgba(255,255,255,0.02)', position: 'relative' }}>
                         <div style={{ 
                           height: '100%', 
@@ -2967,6 +3298,37 @@ Flat opaque green background #2E8B57.`;
         />
       )}
       
+      {/* Slice Cleanup Editor */}
+      {cleanupSlice && (
+        <SliceCleanupEditor
+          imageUrl={cleanupSlice.url}
+          apiBase={apiBase}
+          onCancel={() => setCleanupSlice(null)}
+          onSave={async (dataUrl) => {
+            try {
+              const res = await fetch(`${apiBase}/save-slice-edit`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  project_id: activeProjectId,
+                  slice_url: cleanupSlice.url,
+                  image_data: dataUrl
+                })
+              });
+              const data = await res.json();
+              if (data.status === 'success') {
+                // Update the slicedUrls with a cache buster to force refresh
+                const updatedUrl = `${cleanupSlice.url.split('?')[0]}?t=${Date.now()}`;
+                setSlicedUrls(prev => prev.map((u, i) => i === cleanupSlice.index ? updatedUrl : u));
+              }
+            } catch (err) {
+              console.error("Failed to save slice edit:", err);
+            }
+            setCleanupSlice(null);
+          }}
+        />
+      )}
+
       {/* Load Project Modal */}
       <AnimatePresence>
         {isLoadModalOpen && (

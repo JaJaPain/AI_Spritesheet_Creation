@@ -11,7 +11,7 @@ import shutil
 import base64
 import io
 from typing import Optional, List
-from fastapi import FastAPI, Body, HTTPException, Request, File, UploadFile, BackgroundTasks
+from fastapi import FastAPI, Body, HTTPException, Request, File, UploadFile, BackgroundTasks, Form
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.concurrency import run_in_threadpool
@@ -1551,6 +1551,69 @@ async def reset_project(req: dict):
         return {"status": "success"}
     except Exception as e:
         logger.error(f"Error resetting project {pid}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ─── Slice Cleanup Tools ───────────────────────────────────────────────
+
+@app.post("/dehalo")
+async def dehalo_image(image_data: str = Form(...)):
+    """Remove 2px of semi-transparent halo fringe around sprites by eroding the alpha channel."""
+    import cv2
+    
+    # Remove data URL header if present
+    if "," in image_data:
+        image_data = image_data.split(",")[1]
+    
+    img_bytes = base64.b64decode(image_data)
+    nparr = np.frombuffer(img_bytes, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_UNCHANGED)
+
+    if img is None:
+        raise HTTPException(status_code=400, detail="Invalid image data")
+
+    if img.shape[2] < 4:
+        return {"image_data": f"data:image/png;base64,{image_data}"}
+
+    # Extract and erode alpha channel
+    alpha = img[:, :, 3]
+    kernel = np.ones((3, 3), np.uint8)
+    eroded_alpha = cv2.erode(alpha, kernel, iterations=2)
+    img[:, :, 3] = eroded_alpha
+    
+    _, buffer = cv2.imencode(".png", img)
+    encoded_image = base64.b64encode(buffer).decode("utf-8")
+    
+    return {"image_data": f"data:image/png;base64,{encoded_image}"}
+
+
+class SaveSliceEditRequest(BaseModel):
+    project_id: str
+    slice_url: str   # The URL of the slice being edited
+    image_data: str  # Base64 PNG data
+
+@app.post("/save-slice-edit")
+async def save_slice_edit(req: SaveSliceEditRequest):
+    """Save a manually edited slice image back to disk."""
+    try:
+        image_data = req.image_data
+        if "," in image_data:
+            image_data = image_data.split(",")[1]
+        
+        # Resolve original file path from URL
+        file_path = resolve_image_path(req.slice_url)
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail=f"Original slice not found: {file_path}")
+        
+        img_bytes = base64.b64decode(image_data)
+        with open(file_path, "wb") as f:
+            f.write(img_bytes)
+        
+        logger.info(f"Saved edited slice: {file_path}")
+        return {"status": "success", "url": req.slice_url}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error saving slice edit: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
