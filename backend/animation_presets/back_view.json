@@ -4,22 +4,22 @@
     {
       "id": "walk_away",
       "display_name": "Walk Away",
-      "prompt": "Back-view game sprite walk cycle. Character facing away from camera. Walking forward motion, centered in frame on treadmill.",
-      "num_frames": 25,
+      "prompt": "Preserve exact character identity, design, proportions, colors, textures, materials, clothing details, silhouette, and pixel readability throughout all frames.\n\nGenerate a back-view 2D game sprite walk cycle animation. Character facing away from camera. Create strong exaggerated walking motion with clear alternating leg movement and visible arm swings. Full stride treadmill-style walking cycle. Feet visibly lift and extend forward during each step. Arms swing opposite to legs in natural animation timing. Strong pose transitions between frames. Dynamic movement with high motion amplitude.\n\nCharacter remains perfectly centered in frame at all times. Fixed camera. No camera movement, zoom, rotation, or perspective change. No drifting. No body warping. No extra limbs. No pose collapse.\n\nGenerate clean sequential animation frames only. Fluid continuous looping motion suitable for sprite sheet extraction and game animation. Consistent anatomy and proportions across all frames.\n\nMaintain original color palette exactly. Flat sprite-style rendering. Uniform lighting. No relighting between frames.\n\nBackground must remain a perfectly flat opaque chroma green background #2E8B57 with zero variation or artifacts. Background must not animate, flicker, gradient, glow, shift color, or change brightness.\n\nNo color grading. No cinematic lighting. No bloom. No haze. No purple tint. No magenta tint. No stylization. No motion blur. No depth of field. No film grain. No shadows changing between frames. No atmospheric effects.\n\nPrimary request: generate a fluid looping walk cycle from the back view with smooth animation timing.",
+      "num_frames": 65,
       "seed": -1
     },
     {
       "id": "run_away",
       "display_name": "Run Away",
-      "prompt": "Back-view game sprite running animation. Character facing away from camera. Fast running forward, centered in frame.",
-      "num_frames": 25,
+      "prompt": "Preserve exact character identity, design, proportions, colors, textures, materials, clothing details, silhouette, and pixel readability throughout all frames.\n\nGenerate a back-view 2D game sprite running animation. Character facing away from camera. Fast explosive running motion with exaggerated leg stride and pumping arms. Full sprint treadmill-style running cycle. Knees lift high. Arms drive forward and back.\n\nCharacter remains perfectly centered in frame at all times. Fixed camera. No camera movement, zoom, rotation, or perspective change. No drifting. No body warping. No extra limbs. No pose collapse.\n\nGenerate clean sequential animation frames only. Fluid continuous looping motion suitable for sprite sheet extraction and game animation. Consistent anatomy and proportions across all frames.\n\nMaintain original color palette exactly. Flat sprite-style rendering. Uniform lighting. No relighting between frames.\n\nBackground must remain a perfectly flat opaque chroma green background #2E8B57 with zero variation or artifacts. Background must not animate, flicker, gradient, glow, shift color, or change brightness.\n\nNo color grading. No cinematic lighting. No bloom. No haze. No purple tint. No magenta tint. No stylization. No motion blur. No depth of field. No film grain. No shadows changing between frames. No atmospheric effects.\n\nPrimary request: generate a fluid looping run cycle from the back view with fast dynamic motion.",
+      "num_frames": 65,
       "seed": -1
     },
     {
       "id": "idle_back",
       "display_name": "Idle Breathing",
-      "prompt": "Back-view game sprite idle standing animation. Subtle breathing motion. Character facing away from camera, stationary.",
-      "num_frames": 25,
+      "prompt": "Preserve exact character identity, design, proportions, colors, textures, materials, clothing details, silhouette, and pixel readability throughout all frames.\n\nGenerate a back-view 2D game sprite idle standing animation. Character facing away from camera. Subtle chest breathing with gentle rise and fall. Very slight body sway. Minimal but visible living motion.\n\nCharacter remains perfectly centered in frame at all times. Fixed camera. No camera movement, zoom, rotation, or perspective change. No drifting. No body warping. No extra limbs. No pose collapse.\n\nGenerate clean sequential animation frames only. Fluid continuous looping motion suitable for sprite sheet extraction and game animation. Consistent anatomy and proportions across all frames.\n\nMaintain original color palette exactly. Flat sprite-style rendering. Uniform lighting. No relighting between frames.\n\nBackground must remain a perfectly flat opaque chroma green background #2E8B57 with zero variation or artifacts. Background must not animate, flicker, gradient, glow, shift color, or change brightness.\n\nNo color grading. No cinematic lighting. No bloom. No haze. No purple tint. No magenta tint. No stylization. No motion blur. No depth of field. No film grain. No shadows changing between frames. No atmospheric effects.\n\nPrimary request: generate a subtle looping idle breathing animation from the back view.",
+      "num_frames": 65,
       "seed": -1
     }
   ]

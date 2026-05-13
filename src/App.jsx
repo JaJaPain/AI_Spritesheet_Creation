@@ -2525,12 +2525,21 @@ Continue?`;
                           }}
                         onClick={async () => {
                           setSelectedVideoSlice(slicedUrls[i]);
-                          const templatePrompt = `Image 1 role: identity anchor. Preserve exact character colors and materials.
-Side-view game sprite walk cycle. Character facing right. Character remains centered in frame as if walking on treadmill.
-Generate clean animation frames only. Maintain original color palette. 
-No color grading. No cinematic lighting. No bloom. No purple tint. No stylization. No blur.
-Primary request: create 24-frame fluid walking sequence.
-Flat opaque green background #2E8B57.`;
+                          const templatePrompt = `Preserve exact character identity, design, proportions, colors, textures, materials, clothing details, silhouette, and pixel readability throughout all frames.
+
+Generate a side-view 2D game sprite walk cycle animation. Character facing right. Create strong exaggerated walking motion with clear alternating leg movement and visible arm swings. Full stride treadmill-style walking cycle. Feet visibly lift and extend forward during each step. Arms swing opposite to legs in natural animation timing. Strong pose transitions between frames. Dynamic movement with high motion amplitude.
+
+Character remains perfectly centered in frame at all times. Fixed side camera. No camera movement, zoom, rotation, or perspective change. No drifting. No body warping. No extra limbs. No pose collapse.
+
+Generate clean sequential animation frames only. Fluid continuous looping motion suitable for sprite sheet extraction and game animation. Consistent anatomy and proportions across all frames.
+
+Maintain original color palette exactly. Flat sprite-style rendering. Uniform lighting. No relighting between frames.
+
+Background must remain a perfectly flat opaque chroma green background #2E8B57 with zero variation or artifacts. Background must not animate, flicker, gradient, glow, shift color, or change brightness.
+
+No color grading. No cinematic lighting. No bloom. No haze. No purple tint. No magenta tint. No stylization. No motion blur. No depth of field. No film grain. No shadows changing between frames. No atmospheric effects.
+
+Primary request: generate a fluid looping walk cycle with smooth animation timing and readable keyframe motion.`;
                           setVideoPrompt(templatePrompt);
                           setStage('video-forge');
                           // Trigger auto-start/warmup on the main backend

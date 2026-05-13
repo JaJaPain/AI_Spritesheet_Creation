@@ -4,29 +4,29 @@
     {
       "id": "idle_front",
       "display_name": "Idle Breathing",
-      "prompt": "Front-facing game sprite idle animation. Subtle chest breathing and gentle sway. Character facing the camera, stationary.",
-      "num_frames": 25,
+      "prompt": "Preserve exact character identity, design, proportions, colors, textures, materials, clothing details, silhouette, and pixel readability throughout all frames.\n\nGenerate a front-facing 2D game sprite idle standing animation. Character facing the camera. Subtle chest breathing with gentle rise and fall. Very slight body sway. Minimal but visible living motion. Character maintains standing pose throughout.\n\nCharacter remains perfectly centered in frame at all times. Fixed camera. No camera movement, zoom, rotation, or perspective change. No drifting. No body warping. No extra limbs. No pose collapse.\n\nGenerate clean sequential animation frames only. Fluid continuous looping motion suitable for sprite sheet extraction and game animation. Consistent anatomy and proportions across all frames.\n\nMaintain original color palette exactly. Flat sprite-style rendering. Uniform lighting. No relighting between frames.\n\nBackground must remain a perfectly flat opaque chroma green background #2E8B57 with zero variation or artifacts. Background must not animate, flicker, gradient, glow, shift color, or change brightness.\n\nNo color grading. No cinematic lighting. No bloom. No haze. No purple tint. No magenta tint. No stylization. No motion blur. No depth of field. No film grain. No shadows changing between frames. No atmospheric effects.\n\nPrimary request: generate a subtle looping idle breathing animation with gentle body sway.",
+      "num_frames": 65,
       "seed": -1
     },
     {
       "id": "wave",
       "display_name": "Wave",
-      "prompt": "Front-facing game sprite waving hand animation. Character facing the camera. One arm raises and waves side to side.",
-      "num_frames": 25,
+      "prompt": "Preserve exact character identity, design, proportions, colors, textures, materials, clothing details, silhouette, and pixel readability throughout all frames.\n\nGenerate a front-facing 2D game sprite waving animation. Character facing the camera. One arm raises and waves side to side in a friendly greeting gesture. Clear arm movement with visible hand motion.\n\nCharacter remains perfectly centered in frame at all times. Fixed camera. No camera movement, zoom, rotation, or perspective change. No drifting. No body warping. No extra limbs. No pose collapse.\n\nGenerate clean sequential animation frames only. Fluid continuous looping motion suitable for sprite sheet extraction and game animation. Consistent anatomy and proportions across all frames.\n\nMaintain original color palette exactly. Flat sprite-style rendering. Uniform lighting. No relighting between frames.\n\nBackground must remain a perfectly flat opaque chroma green background #2E8B57 with zero variation or artifacts. Background must not animate, flicker, gradient, glow, shift color, or change brightness.\n\nNo color grading. No cinematic lighting. No bloom. No haze. No purple tint. No magenta tint. No stylization. No motion blur. No depth of field. No film grain. No shadows changing between frames. No atmospheric effects.\n\nPrimary request: generate a fluid looping wave animation with clear arm and hand movement.",
+      "num_frames": 65,
       "seed": -1
     },
     {
       "id": "cast_spell",
       "display_name": "Cast Spell",
-      "prompt": "Front-facing game sprite magic casting animation. Character facing the camera. Arms raise, magical gesture, hands glow.",
-      "num_frames": 25,
+      "prompt": "Preserve exact character identity, design, proportions, colors, textures, materials, clothing details, silhouette, and pixel readability throughout all frames.\n\nGenerate a front-facing 2D game sprite magic casting animation. Character facing the camera. Arms raise in a dramatic magical gesture, hands extend forward with casting motion. Clear windup, cast, and recovery phases.\n\nCharacter remains perfectly centered in frame at all times. Fixed camera. No camera movement, zoom, rotation, or perspective change. No drifting. No body warping. No extra limbs. No pose collapse.\n\nGenerate clean sequential animation frames only. Fluid continuous looping motion suitable for sprite sheet extraction and game animation. Consistent anatomy and proportions across all frames.\n\nMaintain original color palette exactly. Flat sprite-style rendering. Uniform lighting. No relighting between frames.\n\nBackground must remain a perfectly flat opaque chroma green background #2E8B57 with zero variation or artifacts. Background must not animate, flicker, gradient, glow, shift color, or change brightness.\n\nNo color grading. No cinematic lighting. No bloom. No haze. No purple tint. No magenta tint. No stylization. No motion blur. No depth of field. No film grain. No shadows changing between frames. No atmospheric effects.\n\nPrimary request: generate a fluid looping spell casting animation with dramatic arm gestures.",
+      "num_frames": 65,
       "seed": -1
     },
     {
       "id": "celebrate",
       "display_name": "Celebrate",
-      "prompt": "Front-facing game sprite celebration animation. Character facing the camera. Fist pump or victory pose.",
-      "num_frames": 25,
+      "prompt": "Preserve exact character identity, design, proportions, colors, textures, materials, clothing details, silhouette, and pixel readability throughout all frames.\n\nGenerate a front-facing 2D game sprite celebration animation. Character facing the camera. Fist pump victory pose with arms raised triumphantly. Energetic celebratory motion.\n\nCharacter remains perfectly centered in frame at all times. Fixed camera. No camera movement, zoom, rotation, or perspective change. No drifting. No body warping. No extra limbs. No pose collapse.\n\nGenerate clean sequential animation frames only. Fluid continuous looping motion suitable for sprite sheet extraction and game animation. Consistent anatomy and proportions across all frames.\n\nMaintain original color palette exactly. Flat sprite-style rendering. Uniform lighting. No relighting between frames.\n\nBackground must remain a perfectly flat opaque chroma green background #2E8B57 with zero variation or artifacts. Background must not animate, flicker, gradient, glow, shift color, or change brightness.\n\nNo color grading. No cinematic lighting. No bloom. No haze. No purple tint. No magenta tint. No stylization. No motion blur. No depth of field. No film grain. No shadows changing between frames. No atmospheric effects.\n\nPrimary request: generate a fluid looping celebration animation with energetic victory pose.",
+      "num_frames": 65,
       "seed": -1
     }
   ]
