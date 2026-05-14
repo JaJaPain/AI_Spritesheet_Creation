@@ -772,6 +772,7 @@ function App() {
   const qualityOptions = [{ steps: 10, label: 'Draft', tip: '10 denoising steps — fast but may have lighting artifacts' }, { steps: 20, label: 'Standard', tip: '20 denoising steps — decent quality, moderate speed' }, { steps: 30, label: 'High', tip: '30 denoising steps — best quality, cleanest output (recommended)' }]
   const [animSeed, setAnimSeed] = useState(-1)
   const [activeSeed, setActiveSeed] = useState(null) // the resolved seed shown during/after generation
+  const [batchRuns, setBatchRuns] = useState({}) // per-animation run count, e.g. { walk_right: 4 }
 
   // Load preset list
   const loadPresetList = async () => {
@@ -825,14 +826,22 @@ function App() {
       formData.append('image_url', selectedVideoSlice);
     }
     
-    const withDuration = selected.map(a => ({ ...a, num_frames: animDuration, steps: animQuality }));
-    formData.append('animations_json', JSON.stringify(withDuration));
+    // Expand animations by their run count (e.g., walk_right x4 = 4 entries with unique seeds)
+    const expanded = [];
+    selected.forEach(a => {
+      const runs = batchRuns[a.id] || 1;
+      for (let i = 0; i < runs; i++) {
+        expanded.push({ ...a, num_frames: animDuration, steps: animQuality, seed: Math.floor(Math.random() * 1000000) });
+      }
+    });
+    formData.append('animations_json', JSON.stringify(expanded));
     formData.append('character_id', activeProjectId || 'unknown');
     formData.append('view_id', selectedPresetId);
     
     const r = await fetch(`${activeApi}/batch`, { method: 'POST', body: formData });
     if (r.ok) {
-      setBatchStatus({ running: true, total: selected.length, completed: 0, current_name: '', results: [] });
+      const totalRuns = selected.reduce((sum, a) => sum + (batchRuns[a.id] || 1), 0);
+      setBatchStatus({ running: true, total: totalRuns, completed: 0, current_name: '', results: [] });
     } else {
       const err = await r.json();
       alert(`Batch failed: ${err.detail}`);
@@ -2848,9 +2857,13 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
                             </div>
                           ) : (
                             <>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', background: 'rgba(255,255,255,0.04)', borderRadius: '6px', padding: '2px 4px', border: '1px solid rgba(255,255,255,0.08)' }} title="Number of times to run this animation with different seeds">
+                                <span style={{ fontSize: '0.6rem', color: '#555' }}>×</span>
+                                <input type="number" min={1} max={20} value={batchRuns[anim.id] || 1} onChange={e => setBatchRuns(prev => ({ ...prev, [anim.id]: Math.max(1, Math.min(20, parseInt(e.target.value) || 1)) }))} style={{ width: '28px', background: 'transparent', border: 'none', outline: 'none', color: batchRuns[anim.id] > 1 ? '#f59e0b' : '#888', fontSize: '0.75rem', fontWeight: 'bold', fontFamily: 'monospace', textAlign: 'center', padding: 0 }} />
+                              </div>
                               <div style={{ flex: 1 }}>
                                 <div style={{ fontWeight: 'bold', fontSize: '0.8rem', color: '#e0e0e0' }}>{anim.display_name}</div>
-                                <div style={{ fontSize: '0.7rem', color: '#666', marginTop: '2px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '280px' }}>{anim.prompt}</div>
+                                <div style={{ fontSize: '0.7rem', color: '#666', marginTop: '2px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '240px' }}>{anim.prompt}</div>
                               </div>
                               <button onClick={() => setEditingAnim(anim.id)} style={{ padding: '2px 6px', background: 'none', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '4px', color: '#888', cursor: 'pointer', fontSize: '0.7rem' }}>✏️</button>
                               <button onClick={() => {
@@ -2866,15 +2879,26 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
                   </div>
 
                   {/* Add Animation + Actions */}
-                  <button className="btn-secondary" style={{ fontSize: '0.8rem' }} onClick={() => {
-                    const name = prompt('Animation name (e.g., "Sword Slash")');
+                  <button className="btn-secondary" style={{ fontSize: '0.8rem' }} onClick={async () => {
+                    const name = window.prompt('Animation name (e.g., "Sword Slash")');
                     if (!name) return;
                     const id = name.toLowerCase().replace(/\s+/g, '_');
-                    const newAnim = { id, display_name: name, prompt: '', num_frames: 25, seed: -1 };
+                    const templatePrompt = videoPrompt || 'Side-view game sprite animation. Character facing right. Flat opaque green background #2E8B57.';
+                    const newAnim = { id, display_name: name, prompt: templatePrompt, num_frames: animDuration, seed: -1 };
                     const updated = { ...currentPreset, animations: [...(currentPreset?.animations || []), newAnim] };
                     setCurrentPreset(updated);
                     setBatchChecked(prev => ({ ...prev, [id]: true }));
+                    setBatchRuns(prev => ({ ...prev, [id]: 1 }));
                     setEditingAnim(id);
+                    // Auto-save to backend
+                    try {
+                      await fetch(`${apiBase}/api/presets/${selectedPresetId}`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(updated)
+                      });
+                      loadPresetList();
+                    } catch(e) { console.error('Failed to save new animation:', e); }
                   }}>+ Add Animation</button>
 
                   <div style={{ display: 'flex', gap: '0.5rem' }}>
@@ -2886,7 +2910,7 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
                       disabled={!videoEngineReady || batchStatus.running || !(currentPreset?.animations || []).some(a => batchChecked[a.id])}
                     >
                       {batchStatus.running ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
-                      {batchStatus.running ? `Running ${batchStatus.completed}/${batchStatus.total}...` : `Run Batch (${Object.values(batchChecked).filter(Boolean).length})`}
+                      {batchStatus.running ? `Running ${batchStatus.completed}/${batchStatus.total}...` : `Run Batch (${(currentPreset?.animations || []).filter(a => batchChecked[a.id]).reduce((sum, a) => sum + (batchRuns[a.id] || 1), 0)} runs)`}
                     </button>
                   </div>
                 </div>
