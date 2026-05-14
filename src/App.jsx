@@ -752,6 +752,8 @@ function App() {
   const [videoStage, setVideoStage] = useState('idle') // idle, generating, done
   const [videoUrl, setVideoUrl] = useState(null)
   const [videoPrompt, setVideoPrompt] = useState('')
+  const DEFAULT_NEGATIVE_PROMPT = 'blurry, out of focus, bad anatomy, extra limbs, morphing, deformed, distorted, flickering background, color shift, bloom, haze, purple tint, magenta, motion blur, depth of field, film grain, camera movement, zoom, drift, warping, pose collapse'
+  const [videoNegativePrompt, setVideoNegativePrompt] = useState(DEFAULT_NEGATIVE_PROMPT)
   const [selectedVideoSlice, setSelectedVideoSlice] = useState(null)
   const [videoHeartbeat, setVideoHeartbeat] = useState({ status: 'Offline', progress: 0 })
   const [videoEngineReady, setVideoEngineReady] = useState(false)
@@ -831,7 +833,7 @@ function App() {
     selected.forEach(a => {
       const runs = batchRuns[a.id] || 1;
       for (let i = 0; i < runs; i++) {
-        expanded.push({ ...a, num_frames: animDuration, steps: animQuality, seed: Math.floor(Math.random() * 1000000) });
+        expanded.push({ ...a, num_frames: animDuration, steps: animQuality, seed: Math.floor(Math.random() * 1000000), negative_prompt: a.negative_prompt || videoNegativePrompt });
       }
     });
     formData.append('animations_json', JSON.stringify(expanded));
@@ -931,6 +933,7 @@ function App() {
       }
       
       formData.append('prompt', videoPrompt);
+      formData.append('negative_prompt', videoNegativePrompt);
       formData.append('num_frames', animDuration);
       formData.append('steps', animQuality);
       formData.append('seed', resolvedSeed);
@@ -2755,6 +2758,16 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
                       disabled={videoStage === 'generating'}
                     />
                   </div>
+                  <div style={{ textAlign: 'left' }}>
+                    <label style={{ fontSize: '0.7rem', color: '#ef4444', fontWeight: 'bold', textTransform: 'uppercase', marginBottom: '0.3rem', display: 'block' }}>Negative Prompt</label>
+                    <textarea 
+                      placeholder="Things to avoid in generation..."
+                      value={videoNegativePrompt}
+                      onChange={(e) => setVideoNegativePrompt(e.target.value)}
+                      style={{ height: '50px', resize: 'none', fontSize: '0.75rem', opacity: 0.8 }}
+                      disabled={videoStage === 'generating'}
+                    />
+                  </div>
 
                   <div style={{ display: 'flex', gap: '1rem' }}>
                     <button className="btn-secondary" onClick={() => setStage('slicing')} disabled={videoStage === 'generating'}>
@@ -2842,7 +2855,12 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
                                 const updated = { ...currentPreset };
                                 updated.animations[idx].prompt = e.target.value;
                                 setCurrentPreset(updated);
-                              }} style={{ padding: '0.3rem', borderRadius: '4px', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.15)', color: '#fff', fontSize: '0.75rem', height: '60px', resize: 'none' }} />
+                              }} placeholder="Positive prompt..." style={{ padding: '0.3rem', borderRadius: '4px', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.15)', color: '#fff', fontSize: '0.75rem', height: '50px', resize: 'none' }} />
+                              <textarea value={anim.negative_prompt || videoNegativePrompt} onChange={e => {
+                                const updated = { ...currentPreset };
+                                updated.animations[idx].negative_prompt = e.target.value;
+                                setCurrentPreset(updated);
+                              }} placeholder="Negative prompt..." style={{ padding: '0.3rem', borderRadius: '4px', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(239,68,68,0.2)', color: '#ef4444', fontSize: '0.65rem', height: '35px', resize: 'none', opacity: 0.7 }} />
                               <div style={{ display: 'flex', gap: '0.3rem' }}>
                                 <span style={{ fontSize: '0.7rem', color: '#888' }}>Frames:</span>
                                 <input type="number" value={anim.num_frames} onChange={e => {

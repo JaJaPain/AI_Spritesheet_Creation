@@ -46,6 +46,7 @@ async def forge_video(
     image: UploadFile = File(None),
     image_url: str = Form(None),
     prompt: str = Form(...),
+    negative_prompt: str = Form(""),
     num_frames: int = Form(65),
     steps: int = Form(30),
     seed: int = Form(-1),
@@ -121,6 +122,8 @@ async def forge_video(
         
         # Override the text prompt
         workflow["6"]["inputs"]["positive_prompt"] = prompt
+        if negative_prompt:
+            workflow["6"]["inputs"]["negative_prompt"] = negative_prompt
         
         print(f"Requesting Wan 2.1 generation (Seed: {seed}, Steps: {steps}, Frames: {num_frames})")
         print(f"Prompt ({len(prompt)} chars): {prompt[:200]}...")
@@ -143,7 +146,8 @@ async def forge_video(
                 mf.write(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
                 mf.write(f"Character: {character_id}\n")
                 mf.write(f"View: {view_id}\n")
-                mf.write(f"\n--- Prompt ---\n{prompt}\n")
+                mf.write(f"\n--- Positive Prompt ---\n{prompt}\n")
+                mf.write(f"\n--- Negative Prompt ---\n{negative_prompt or '(using workflow default)'}\n")
             
             # Also keep a copy in outputs for the video URL response
             out_path = os.path.join(OUTPUT_DIR, final_filename)
@@ -221,6 +225,9 @@ def run_batch_worker(image_path, animations, character_id, view_id):
             workflow["9"]["inputs"]["steps"] = anim.get("steps", 30)
             workflow["8"]["inputs"]["num_frames"] = anim.get("num_frames", 65)
             workflow["6"]["inputs"]["positive_prompt"] = anim["prompt"]
+            neg_prompt = anim.get("negative_prompt", "")
+            if neg_prompt:
+                workflow["6"]["inputs"]["negative_prompt"] = neg_prompt
             
             print(f"[BATCH {i+1}/{len(animations)}] Generating: {anim['display_name']}")
             video_path = wrapper.run_workflow(workflow)
@@ -240,7 +247,8 @@ def run_batch_worker(image_path, animations, character_id, view_id):
                     mf.write(f"Animation: {anim['display_name']}\n")
                     mf.write(f"Character: {character_id}\n")
                     mf.write(f"View: {view_id}\n")
-                    mf.write(f"\n--- Prompt ---\n{anim['prompt']}\n")
+                    mf.write(f"\n--- Positive Prompt ---\n{anim['prompt']}\n")
+                    mf.write(f"\n--- Negative Prompt ---\n{neg_prompt or '(using workflow default)'}\n")
                 
                 duration = round(time.time() - start_time, 1)
                 batch_state["results"].append({
