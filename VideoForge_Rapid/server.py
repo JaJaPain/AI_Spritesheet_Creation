@@ -134,6 +134,17 @@ async def forge_video(
             final_path = os.path.join(anim_dir, final_filename)
             shutil.copy(video_path, final_path)
             
+            # Save metadata text file alongside video
+            meta_path = final_path.replace('.mp4', '_meta.txt')
+            with open(meta_path, 'w') as mf:
+                mf.write(f"Seed: {seed}\n")
+                mf.write(f"Steps: {steps}\n")
+                mf.write(f"Frames: {num_frames}\n")
+                mf.write(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                mf.write(f"Character: {character_id}\n")
+                mf.write(f"View: {view_id}\n")
+                mf.write(f"\n--- Prompt ---\n{prompt}\n")
+            
             # Also keep a copy in outputs for the video URL response
             out_path = os.path.join(OUTPUT_DIR, final_filename)
             shutil.copy(video_path, out_path)
@@ -215,9 +226,21 @@ def run_batch_worker(image_path, animations, character_id, view_id):
             video_path = wrapper.run_workflow(workflow)
             
             if video_path:
-                final_filename = f"{anim['id']}.mp4"
+                final_filename = f"{anim['id']}_{seed}.mp4"
                 final_path = os.path.join(batch_output_dir, final_filename)
                 shutil.copy(video_path, final_path)
+                
+                # Save metadata text file alongside video
+                meta_path = final_path.replace('.mp4', '_meta.txt')
+                with open(meta_path, 'w') as mf:
+                    mf.write(f"Seed: {seed}\n")
+                    mf.write(f"Steps: {anim.get('steps', 30)}\n")
+                    mf.write(f"Frames: {anim.get('num_frames', 65)}\n")
+                    mf.write(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    mf.write(f"Animation: {anim['display_name']}\n")
+                    mf.write(f"Character: {character_id}\n")
+                    mf.write(f"View: {view_id}\n")
+                    mf.write(f"\n--- Prompt ---\n{anim['prompt']}\n")
                 
                 duration = round(time.time() - start_time, 1)
                 batch_state["results"].append({
@@ -226,9 +249,10 @@ def run_batch_worker(image_path, animations, character_id, view_id):
                     "status": "success",
                     "video_path": final_path,
                     "video_url": f"/api/project-files/{character_id}/animations/{view_id}/{final_filename}",
-                    "duration": duration
+                    "duration": duration,
+                    "seed": seed
                 })
-                print(f"[BATCH {i+1}/{len(animations)}] ✓ {anim['display_name']} ({duration}s)")
+                print(f"[BATCH {i+1}/{len(animations)}] ✓ {anim['display_name']} seed={seed} ({duration}s)")
             else:
                 batch_state["results"].append({
                     "name": anim["display_name"],
