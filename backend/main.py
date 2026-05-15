@@ -18,7 +18,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from PIL import Image
+from PIL import Image, ImageDraw
 import numpy as np
 import cv2
 import mediapipe as mp
@@ -99,7 +99,7 @@ def get_next_project_id():
     existing = [d for d in os.listdir("Output_Saves") if d.startswith("A") and d[1:].isdigit()]
     if not existing:
         return "A00000"
-    
+
     ids = [int(d[1:]) for d in existing]
     next_num = max(ids) + 1
     return f"A{next_num:05d}"
@@ -115,7 +115,7 @@ def resolve_image_path(url: str) -> str:
     """
     if not url:
         return ""
-        
+
     # Handle Data URLs
     if url.startswith("data:image"):
         import base64
@@ -135,14 +135,14 @@ def resolve_image_path(url: str) -> str:
     # Strip base URL and query strings (?t=...) if provided
     if "http" in url:
         url = "/" + "/".join(url.split("/")[3:])
-    
+
     if "?" in url:
         url = url.split("?")[0]
-    
+
     # Resolve local paths
     # Handle /output/, /output_saves/, and /saves/
     path = url.replace("/output_saves/", "Output_Saves/").replace("/output/", "output/").replace("/saves/", "saves/").lstrip("/")
-    
+
     # If path doesn't exist, try common locations as fallback
     if not os.path.exists(path):
         name = os.path.basename(url)
@@ -150,8 +150,111 @@ def resolve_image_path(url: str) -> str:
             fallback = os.path.join(loc, name)
             if os.path.exists(fallback):
                 return fallback
-                
+
     return path
+
+POSE_ORDER = ["Front", "3/4 Front", "Side", "3/4 Back", "Back"]
+CENTER_POSE_INDEX = 2
+
+def paste_pose_centered(sheet: Image.Image, pose: Image.Image, slot_index: int, slot_w: int, canvas_h: int):
+    """Paste a transparent pose image into a white sheet slot, bottom aligned."""
+    pose_rgba = pose.convert("RGBA")
+    bbox = pose_rgba.getbbox()
+    if bbox:
+        pose_rgba = pose_rgba.crop(bbox)
+
+    max_w = max(1, int(slot_w * 0.86))
+    max_h = max(1, int(canvas_h * 0.88))
+    scale = min(max_w / pose_rgba.width, max_h / pose_rgba.height)
+    new_size = (max(1, int(pose_rgba.width * scale)), max(1, int(pose_rgba.height * scale)))
+    pose_rgba = pose_rgba.resize(new_size, Image.Resampling.LANCZOS)
+
+    x = slot_index * slot_w + (slot_w - pose_rgba.width) // 2
+    y = canvas_h - pose_rgba.height - max(10, int(canvas_h * 0.05))
+    sheet.paste(pose_rgba, (x, y), pose_rgba)
+
+def isolate_primary_sprite(image: Image.Image) -> Image.Image:
+    """Keep the largest useful foreground component from a transparent image."""
+    sprite = image.convert("RGBA")
+    alpha = np.array(sprite.getchannel("A"))
+    binary = (alpha > 10).astype(np.uint8)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
+    if num_labels <= 1:
+        return sprite
+
+    h, w = binary.shape
+    min_area = max(64, int(w * h * 0.002))
+    best_label = None
+    best_score = -1
+    center_x = w / 2
+    for label in range(1, num_labels):
+        x, y, bw, bh, area = stats[label]
+        if area < min_area or bw < 12 or bh < 24:
+            continue
+        component_center = x + (bw / 2)
+        center_bonus = max(0, 1 - abs(component_center - center_x) / max(1, center_x))
+        score = area * (1 + center_bonus)
+        if score > best_score:
+            best_score = score
+            best_label = label
+
+    if best_label is None:
+        return sprite
+
+    keep = labels == best_label
+    data = np.array(sprite)
+    data[..., 3][~keep] = 0
+    return Image.fromarray(data)
+
+def load_selected_pose_image(meta: dict, pose_index: int) -> Optional[Image.Image]:
+    versions = meta.get("all_slice_versions", [])
+    selected = meta.get("selected_indices", [])
+    if pose_index >= len(versions) or not versions[pose_index]:
+        return None
+
+    selected_index = 0
+    if pose_index < len(selected):
+        selected_index = max(0, min(selected[pose_index], len(versions[pose_index]) - 1))
+
+    pose_path = resolve_image_path(versions[pose_index][selected_index])
+    if not os.path.exists(pose_path):
+        return None
+
+    return Image.open(pose_path).convert("RGBA")
+
+def build_centered_pose_context(sheet_img: Image.Image, meta: dict, target_index: int):
+    """
+    Build the old kitbash reference layout: target pose in the center, two selected
+    reference poses on each side, and a mask covering only the center slot.
+    """
+    if target_index < 0 or target_index >= len(POSE_ORDER):
+        return sheet_img, None
+
+    selected_poses = [load_selected_pose_image(meta, i) for i in range(len(POSE_ORDER))]
+    if selected_poses[target_index] is None:
+        return sheet_img, None
+
+    w, h = sheet_img.size
+    slot_w = w // len(POSE_ORDER)
+    context = Image.new("RGB", (w, h), (255, 255, 255))
+    layout = [
+        (target_index - 2) % len(POSE_ORDER),
+        (target_index - 1) % len(POSE_ORDER),
+        target_index,
+        (target_index + 1) % len(POSE_ORDER),
+        (target_index + 2) % len(POSE_ORDER),
+    ]
+
+    for slot_index, pose_index in enumerate(layout):
+        pose_img = selected_poses[pose_index]
+        if pose_img is not None:
+            paste_pose_centered(context, pose_img, slot_index, slot_w, h)
+
+    mask = Image.new("L", (w, h), 0)
+    draw = ImageDraw.Draw(mask)
+    draw.rectangle([CENTER_POSE_INDEX * slot_w, 0, (CENTER_POSE_INDEX + 1) * slot_w, h], fill=255)
+    logger.info(f"  Built centered kitbash context for {POSE_ORDER[target_index]}: layout={layout}")
+    return context, mask
 
 def save_metadata_safe(meta_path, data, retries=5, delay=0.5):
     """
@@ -164,14 +267,14 @@ def save_metadata_safe(meta_path, data, retries=5, delay=0.5):
             # 1. Write to temporary file
             with open(temp_path, "w") as f:
                 json.dump(data, f, indent=2)
-            
+
             # 2. Move temp to target
             if os.path.exists(meta_path):
                 try:
                     os.remove(meta_path)
                 except:
                     pass # May be locked, let rename try anyway
-            
+
             os.rename(temp_path, meta_path)
             return True
         except Exception as e:
@@ -193,15 +296,15 @@ async def upload_turnaround(file: UploadFile = File(...)):
         pid = get_next_project_id()
         project_dir = os.path.join("Output_Saves", pid)
         os.makedirs(project_dir, exist_ok=True)
-        
+
         file_path = os.path.join(project_dir, f"{pid}_turnaround.png")
         with open(file_path, "wb") as f:
             content = await file.read()
             f.write(content)
-            
+
         # Also save as ORIGINAL
         shutil.copy2(file_path, os.path.join(project_dir, f"{pid}_turnaround_ORIGINAL.png"))
-        
+
         # Create metadata
         metadata = {
             "id": pid,
@@ -214,7 +317,7 @@ async def upload_turnaround(file: UploadFile = File(...)):
         }
         with open(os.path.join(project_dir, "metadata.json"), "w") as f:
             json.dump(metadata, f, indent=2)
-            
+
         return {"status": "success", "project_id": pid, "image_url": metadata["image_url"]}
     except Exception as e:
         logger.error(f"Error uploading turnaround: {e}")
@@ -249,25 +352,52 @@ class ModelManager:
         gc.collect()
         logger.info("GPU Memory cleared for Video Forge.")
 
+    def load_gemma4_e4b(self):
+        """Load Gemma 4 E4B vision model for temporary pose labeling."""
+        key = "gemma4_e4b"
+        if key in self.pipelines:
+            return self.pipelines[key]
+
+        self.unload_all()
+        model_id = os.getenv("GEMMA4_E4B_MODEL_ID", "google/gemma-4-E4B-it")
+        logger.info(f"Loading Gemma pose classifier: {model_id}")
+
+        from transformers import AutoProcessor, AutoModelForImageTextToText
+
+        dtype = torch.bfloat16 if self.device == "cuda" else torch.float32
+        processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+        model = AutoModelForImageTextToText.from_pretrained(
+            model_id,
+            torch_dtype=dtype,
+            device_map="auto" if self.device == "cuda" else None,
+            trust_remote_code=True
+        )
+        if self.device != "cuda":
+            model.to(self.device)
+
+        self.pipelines[key] = {"processor": processor, "model": model, "model_id": model_id}
+        logger.info("Gemma pose classifier loaded.")
+        return self.pipelines[key]
+
     def load_sdxl(self, controlnet_type="canny"):
         """Load SDXL + ControlNet pipeline.
-        
+
         SDXL is 3.5B params — runs natively on 16GB in fp16:
         - UNet: ~5GB (fp16)
         - ControlNet: ~2.5GB (fp16)
         - CLIP + VAE: ~1GB (fp16)
         - Total: ~8.5GB → fits with room to spare
-        
+
         Args:
             controlnet_type: 'canny' or 'pose'
         """
         key = f"sdxl_{controlnet_type}"
         if key in self.pipelines:
             return self.pipelines[key]
-        
+
         self.unload_all()
         logger.info(f"Loading SDXL + ControlNet ({controlnet_type})...")
-        
+
         try:
             # Load the appropriate ControlNet
             if controlnet_type == "canny":
@@ -282,9 +412,9 @@ class ModelManager:
                     "thibaud/controlnet-openpose-sdxl-1.0",
                     torch_dtype=torch.float16
                 )
-            
+
             logger.info(f"  ControlNet ({controlnet_type}) loaded.")
-            
+
             # Load SDXL base pipeline
             pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
                 "stabilityai/stable-diffusion-xl-base-1.0",
@@ -293,7 +423,7 @@ class ModelManager:
                 variant="fp16",
                 use_safetensors=True
             )
-            
+
             # For pose pipeline, add IP-Adapter for character consistency
             if controlnet_type == "pose":
                 logger.info("  Loading IP-Adapter Plus for character consistency...")
@@ -311,12 +441,12 @@ class ModelManager:
                 )
                 pipe.set_ip_adapter_scale(0.8)
                 logger.info("  IP-Adapter Plus loaded with scale 0.8.")
-            
+
             # Use automatic model offloading — each component moves to GPU only when
             # needed and back to CPU after. Keeps peak VRAM much lower than loading
             # everything to GPU at once. Critical for 16GB cards at 1024x1024.
             pipe.enable_model_cpu_offload()
-            
+
             self.pipelines[key] = pipe
             logger.info(f"  SDXL + {controlnet_type} ControlNet loaded successfully!")
             return pipe
@@ -330,17 +460,17 @@ class ModelManager:
         key = "flux_fill"
         if key in self.pipelines:
             return self.pipelines[key]
-        
+
         self.unload_all()
         logger.info("Loading FLUX.1-Fill-dev for surgery...")
-        
+
         try:
             nf4_config = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_quant_type="nf4",
                 bnb_4bit_compute_dtype=torch.bfloat16
             )
-            
+
             # Load Transformer in 4-bit
             transformer = FluxTransformer2DModel.from_pretrained(
                 "black-forest-labs/FLUX.1-Fill-dev",
@@ -348,7 +478,7 @@ class ModelManager:
                 quantization_config=nf4_config,
                 torch_dtype=torch.bfloat16
             )
-            
+
             # Load T5 in 4-bit to save VRAM and prevent device mismatch
             from transformers import T5EncoderModel
             text_encoder_2 = T5EncoderModel.from_pretrained(
@@ -357,19 +487,19 @@ class ModelManager:
                 quantization_config=nf4_config,
                 torch_dtype=torch.bfloat16
             )
-            
+
             pipe = FluxFillPipeline.from_pretrained(
                 "black-forest-labs/FLUX.1-Fill-dev",
                 transformer=transformer,
                 text_encoder_2=text_encoder_2,
                 torch_dtype=torch.bfloat16
             )
-            
+
             # Explicitly move to cuda before offloading to ensure hooks are initialized on the right device
             pipe.to("cuda")
             pipe.enable_model_cpu_offload()
             pipe.vae.enable_tiling()
-            
+
             """
             # Load the turnaround LoRA if it exists (for style consistency)
             lora_path = os.path.join("loras", "turnaround.safetensors")
@@ -377,7 +507,7 @@ class ModelManager:
                 pipe.load_lora_weights(lora_path)
                 logger.info("  LoRA loaded for style consistency in Fill pipeline.")
             """
-                
+
             self.pipelines[key] = pipe
             return pipe
         except Exception as e:
@@ -387,28 +517,28 @@ class ModelManager:
 
     def describe_anchor(self, image_path: str) -> str:
         """Use BLIP to generate a detailed description of the anchor image.
-        
+
         Loads the model, describes, then fully unloads to free VRAM for SDXL.
         """
         from transformers import BlipProcessor, BlipForConditionalGeneration
-        
+
         logger.info("Loading BLIP-large for anchor description...")
-        
+
         # Unload any existing models first
         self.unload_all()
-        
+
         model_id = "Salesforce/blip-image-captioning-large"
-        
+
         try:
             processor = BlipProcessor.from_pretrained(model_id)
             model = BlipForConditionalGeneration.from_pretrained(
                 model_id,
                 torch_dtype=torch.float16
             ).to("cuda")
-            
+
             # Load and process the anchor image
             image = Image.open(image_path).convert("RGB")
-            
+
             captions = []
             prompts = [
                 "this is a character with",
@@ -419,14 +549,14 @@ class ModelManager:
                 "the character's accessories include",
                 "the art style is",
             ]
-            
+
             for starter in prompts:
                 inputs = processor(images=image, text=starter, return_tensors="pt").to("cuda", torch.float16)
                 with torch.no_grad():
                     output = model.generate(**inputs, max_new_tokens=60)
                 caption = processor.decode(output[0], skip_special_tokens=True)
                 captions.append(caption)
-            
+
             # Deduplicate: remove repeated phrases across captions
             seen = set()
             unique_parts = []
@@ -436,10 +566,10 @@ class ModelManager:
                 if normalized not in seen:
                     seen.add(normalized)
                     unique_parts.append(cap.strip())
-            
+
             combined = ". ".join(unique_parts)
             logger.info(f"  BLIP captions: {combined}")
-            
+
             # Fully unload BLIP
             del model
             del processor
@@ -448,9 +578,9 @@ class ModelManager:
                 torch.cuda.ipc_collect()
             gc.collect()
             logger.info("  BLIP unloaded. VRAM freed for SDXL.")
-            
+
             return combined
-            
+
         except Exception as e:
             logger.error(f"BLIP description failed: {e}")
             logger.error(traceback.format_exc())
@@ -461,61 +591,61 @@ class ModelManager:
 
     def quality_check_variants(self, image_paths: list) -> list:
         """Check variant quality using BLIP captioning + pixel analysis.
-        
+
         Returns list of booleans (True=pass).
         """
         from transformers import BlipProcessor, BlipForConditionalGeneration
-        
+
         logger.info(f"Quality checking {len(image_paths)} variants...")
-        
+
         model_id = "Salesforce/blip-image-captioning-large"
-        
+
         try:
             processor = BlipProcessor.from_pretrained(model_id)
             model = BlipForConditionalGeneration.from_pretrained(
                 model_id,
                 torch_dtype=torch.float16
             ).to("cuda")
-            
+
             results = []
-            
+
             for idx, img_path in enumerate(image_paths):
                 image = Image.open(img_path).convert("RGBA")
                 passed = True
                 reasons = []
-                
+
                 # Check 1: Image isn't mostly empty (sliver/artifact detection)
                 # Count non-transparent pixels
                 alpha = np.array(image)[:, :, 3]
                 non_transparent = np.sum(alpha > 20)
                 total_pixels = alpha.shape[0] * alpha.shape[1]
                 fill_ratio = non_transparent / total_pixels
-                
+
                 if fill_ratio < 0.05:
                     passed = False
                     reasons.append(f"Too empty: {fill_ratio:.1%} fill")
                 elif fill_ratio > 0.85:
                     passed = False
                     reasons.append(f"Background not removed: {fill_ratio:.1%} fill")
-                
+
                 # Check 2: Character isn't too narrow (sliver detection)
                 col_has_content = np.any(alpha > 20, axis=0)
                 content_width = np.sum(col_has_content)
                 width_ratio = content_width / alpha.shape[1]
-                
+
                 if width_ratio < 0.15:
                     passed = False
                     reasons.append(f"Too narrow: {width_ratio:.1%} width")
-                
+
                 # Check 3: Character isn't too short (cut-off detection)
                 row_has_content = np.any(alpha > 20, axis=1)
                 content_height = np.sum(row_has_content)
                 height_ratio = content_height / alpha.shape[0]
-                
+
                 if height_ratio < 0.4:
                     passed = False
                     reasons.append(f"Too short: {height_ratio:.1%} height")
-                
+
                 # Check 4: Multiple characters detection via gap analysis
                 # Look for large transparent gaps in the middle of content
                 if passed and col_has_content.any():
@@ -525,7 +655,7 @@ class ModelManager:
                     if max_gap > alpha.shape[1] * 0.15:
                         passed = False
                         reasons.append(f"Multiple figures detected (gap: {max_gap}px)")
-                
+
                 # Check 5: Aspect ratio — a standing character is ALWAYS taller than wide
                 # A single human sprite has an aspect ratio around 0.35 - 0.45
                 # Multiple side-by-side characters make the content wider than 0.55
@@ -534,7 +664,7 @@ class ModelManager:
                     if aspect > 0.55:
                         passed = False
                         reasons.append(f"Too wide for single character (aspect: {aspect:.2f})")
-                
+
                 # Check 6: Arm detection via zone width comparison
                 # Arms at sides make the torso zone wider than the leg zone
                 if passed:
@@ -543,51 +673,51 @@ class ModelManager:
                         top_row = content_rows[0]
                         bot_row = content_rows[-1]
                         char_height = bot_row - top_row
-                        
+
                         # Torso/arm zone: 25-50% of character height
                         torso_start = top_row + int(char_height * 0.25)
                         torso_end = top_row + int(char_height * 0.50)
                         torso_zone = alpha[torso_start:torso_end, :]
                         torso_width = np.sum(np.any(torso_zone > 20, axis=0))
-                        
+
                         # Leg zone: 65-85% of character height
                         leg_start = top_row + int(char_height * 0.65)
                         leg_end = top_row + int(char_height * 0.85)
                         leg_zone = alpha[leg_start:leg_end, :]
                         leg_width = np.sum(np.any(leg_zone > 20, axis=0))
-                        
+
                         if leg_width > 0:
                             arm_ratio = torso_width / leg_width
                             logger.info(f"    Arm check: torso={torso_width}px, legs={leg_width}px, ratio={arm_ratio:.2f}")
                             if arm_ratio < 1.25:
                                 passed = False
                                 reasons.append(f"Missing arms (torso/leg ratio: {arm_ratio:.2f})")
-                
+
                 # Check 6: BLIP caption sanity checks
                 # Composite onto solid background so BLIP sees it like a game would render it
                 if passed:
                     bg = Image.new("RGBA", image.size, (200, 200, 200, 255))
                     bg.paste(image, (0, 0), image)
                     rgb_image = bg.convert("RGB")
-                    
+
                     # 6a: Multi-character check
                     inputs = processor(images=rgb_image, text="how many people", return_tensors="pt").to("cuda", torch.float16)
                     with torch.no_grad():
                         output = model.generate(**inputs, max_new_tokens=30)
                     caption = processor.decode(output[0], skip_special_tokens=True).strip().lower()
-                    
+
                     multi_words = ["two people", "three people", "two characters", "group", "couple", "pair"]
                     if any(w in caption for w in multi_words):
                         passed = False
                         reasons.append(f"BLIP multi-char: {caption}")
-                
+
                 # 6b: Face check — reject blank/featureless heads
                 if passed:
                     inputs = processor(images=rgb_image, text="the character's face has", return_tensors="pt").to("cuda", torch.float16)
                     with torch.no_grad():
                         output = model.generate(**inputs, max_new_tokens=30)
                     face_caption = processor.decode(output[0], skip_special_tokens=True).strip().lower()
-                    
+
                     face_words = ["eyes", "eye", "mouth", "face", "smile", "nose", "expression"]
                     has_face = any(w in face_caption for w in face_words)
                     if not has_face:
@@ -600,19 +730,19 @@ class ModelManager:
                     with torch.no_grad():
                         output = model.generate(**inputs, max_new_tokens=30)
                     bg_caption = processor.decode(output[0], skip_special_tokens=True).strip().lower()
-                    
+
                     bg_words = ["tree", "room", "wall", "landscape", "floor", "building", "scenery", "forest", "city", "street", "furniture"]
                     if any(w in bg_caption for w in bg_words):
                         passed = False
                         reasons.append(f"Background elements detected: {bg_caption}")
-                
+
                 if passed:
                     logger.info(f"  Variant {idx+1}: PASSED (fill:{fill_ratio:.0%} w:{width_ratio:.0%} h:{height_ratio:.0%})")
                 else:
                     logger.info(f"  Variant {idx+1}: FAILED - {'; '.join(reasons)}")
-                
+
                 results.append(passed)
-            
+
             # Unload BLIP
             del model
             del processor
@@ -621,9 +751,9 @@ class ModelManager:
                 torch.cuda.ipc_collect()
             gc.collect()
             logger.info("  Quality checker unloaded.")
-            
+
             return results
-            
+
         except Exception as e:
             logger.error(f"Quality check failed: {e}")
             logger.error(traceback.format_exc())
@@ -671,23 +801,23 @@ class VideoForgeOrchestrator:
                 if s.connect_ex(('localhost', port)) != 0:
                     break
             port += 1
-            
+
         logger.info(f"Auto-Start: Selected port {port}. Resolving paths...")
-        
+
         # Resolve path to VideoCreation directory (relative to this script in /backend)
         try:
             creation_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "VideoCreation"))
             bat_path = os.path.join(creation_dir, "run_everything.bat")
-            
+
             if not os.path.exists(bat_path):
                 logger.error(f"CRITICAL: Could not find Video Forge .bat at {bat_path}")
                 return None
 
             # Get the current main backend port
             main_port = str(port_global if 'port_global' in globals() else 8000)
-            
+
             logger.info(f"Launching Video Forge: {bat_path} on port {port} (Main App on {main_port})")
-            
+
             # PRIORITY: Launch RAPID Forge if available
             rapid_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "VideoForge_Rapid"))
             if os.path.exists(rapid_dir):
@@ -709,7 +839,7 @@ class VideoForgeOrchestrator:
                 )
                 self.active_url = f"http://localhost:{port}"
                 logger.info(f"Background Process Spawned. Waiting for discovery at {self.active_url}...")
-            
+
             # Polling wait for readiness
             for i in range(60): # Wait up to 60 seconds
                 time.sleep(1)
@@ -718,10 +848,10 @@ class VideoForgeOrchestrator:
                     return self.active_url
                 if i % 5 == 0 and i > 0:
                     logger.info(f"Warmup in progress... ({i}s/60s elapsed)")
-            
+
             logger.warning("Warmup timed out, but process is still running. Discovery might happen later.")
-            return self.active_url 
-            
+            return self.active_url
+
         except Exception as inner_e:
             logger.error(f"Internal Orchestrator Error: {inner_e}")
             import traceback
@@ -736,15 +866,15 @@ async def warmup_video_forge(background_tasks: BackgroundTasks):
     """Tells the main backend to prepare and launch the Video Forge engine."""
     logger.info("Warmup request received from frontend. Offloading to background task.")
     manager.vram_handoff() # Free GPU memory
-    
+
     # Check if already discovered before launching background task
     if orchestrator.active_url:
         return {"status": "success", "message": "Engine already active.", "url": orchestrator.active_url}
-    
+
     # Quick check if it's already running but we haven't noticed
     if orchestrator.discover():
         return {"status": "success", "message": "Engine discovered.", "url": orchestrator.active_url}
-    
+
     background_tasks.add_task(orchestrator.start)
     # Return the expected URL so the frontend can start polling it
     return {"status": "success", "message": "Warmup sequence initiated in background.", "url": "http://localhost:8002"}
@@ -768,18 +898,18 @@ async def describe_anchor(
     try:
         # Resolve image path
         name = os.path.basename(image_url)
-        
+
         # Determine if this is a temporary anchor or a permanently saved one
         if "/saves/" in image_url:
             image_path = os.path.join("saves", name)
         else:
             image_path = os.path.join("output", name)
-        
+
         if not os.path.exists(image_path):
             raise HTTPException(status_code=404, detail=f"Anchor image not found at {image_path}")
-        
+
         caption = manager.describe_anchor(image_path)
-        
+
         return {"status": "success", "description": caption}
     except HTTPException:
         raise
@@ -800,7 +930,7 @@ async def generate_anchor(
         template_path = f"templates/{template_id}.png"
         if not os.path.exists(template_path):
             template_path = "templates/default.png"
-        
+
         use_controlnet = False
         control_image = None
         if os.path.exists(template_path):
@@ -812,34 +942,34 @@ async def generate_anchor(
             logger.info(f"  Using template Canny edges from: {template_path}")
         else:
             logger.info("  No template found, generating without ControlNet guidance")
-        
+
         full_prompt = f"{prompt}, high quality, detailed face, visible eyes, highly detailed, concept art, game sprite, solid bright green background, full body, front facing, neutral standing pose, arms visible at sides"
-        
+
         # Track which slots still need a good variant
         # Each slot: { 'url': str, 'filepath': str, 'passed': bool }
         slots = [None] * num_variants
         max_retries = 5
-        
+
         # Load SDXL once — keep it loaded alongside BLIP (9GB + 1.5GB = fits in 16GB)
         pipe = manager.load_sdxl("canny")
-        
+
         for attempt in range(max_retries):
             # Figure out which slots need generation
             slots_to_generate = [i for i in range(num_variants) if slots[i] is None or not slots[i]['passed']]
-            
+
             if not slots_to_generate:
                 logger.info("All variants passed quality check!")
                 break
-            
+
             logger.info(f"Quality gate attempt {attempt+1}/{max_retries}: generating {len(slots_to_generate)} variant(s)...")
-            
+
             for i in slots_to_generate:
                 logger.info(f"  Generating variant for slot {i+1}/{num_variants}...")
-                
+
                 if manager.device == "cuda":
                     torch.cuda.empty_cache()
                     gc.collect()
-                
+
                 gen_kwargs = {
                     "prompt": full_prompt,
                     "negative_prompt": "flat colors, vector art, clip art, silhouette, thick outline, faceless, blank face, missing eyes, missing mouth, blurry, low quality, deformed, ugly, bad anatomy, extra limbs, cape, cloak, flowing fabric, wings",
@@ -849,44 +979,44 @@ async def generate_anchor(
                     "width": 512,
                     "generator": torch.Generator(device="cpu").manual_seed(random.randint(0, 2**32 - 1))
                 }
-                
+
                 if use_controlnet:
                     gen_kwargs["image"] = control_image
                     gen_kwargs["controlnet_conditioning_scale"] = 0.3
-                
+
                 image = pipe(**gen_kwargs).images[0]
-                
+
                 logger.info(f"  Removing background for variant {i+1}...")
                 image = remove(image, session=rembg_session)
-                
+
                 filename = f"anchor_{uuid.uuid4()}.png"
                 filepath = os.path.join("output", filename)
                 image.save(filepath)
-                
+
                 # Save the slice
                 if req.project_id:
                     save_path = os.path.join(project_dir, filename)
                     isolated.save(save_path)
                     logger.info(f"    Saved slice {i+1} to {save_path}")
-            
+
                 slots[i] = {'url': f"/output/{filename}", 'filepath': filepath, 'passed': False}
-            
+
             # Quality check WITHOUT unloading SDXL — both fit in VRAM at 512x512
-            
+
             # Run BLIP VQA quality check on all pending variants
             paths_to_check = [slots[i]['filepath'] for i in slots_to_generate]
             results = manager.quality_check_variants(paths_to_check)
-            
+
             for idx, slot_idx in enumerate(slots_to_generate):
                 slots[slot_idx]['passed'] = results[idx]
-            
+
             passed_count = sum(1 for s in slots if s and s['passed'])
             logger.info(f"  Quality gate: {passed_count}/{num_variants} passed")
-            
+
             # If all passed or last attempt, break
             if passed_count == num_variants:
                 break
-        
+
         # Return all variants (passed or not on final attempt)
         urls = [s['url'] for s in slots if s]
         return {"status": "success", "urls": urls}
@@ -905,31 +1035,31 @@ async def save_anchor(
     try:
         anchor_name = os.path.basename(image_url)
         source_img_path = os.path.join("output", anchor_name)
-        
+
         if not os.path.exists(source_img_path):
             raise HTTPException(status_code=404, detail="Anchor image not found")
-            
+
         timestamp = int(time.time())
         save_id = f"save_{timestamp}"
-        
+
         # Copy image to permanent saves folder
         ext = os.path.splitext(anchor_name)[1]
         dest_img_name = f"{save_id}{ext}"
         dest_img_path = os.path.join("saves", dest_img_name)
         shutil.copy2(source_img_path, dest_img_path)
-        
+
         # Save metadata
         save_data = {
             "id": save_id,
-            "image_url": f"/saves/{dest_img_name}", 
+            "image_url": f"/saves/{dest_img_name}",
             "prompt": prompt,
             "timestamp": timestamp
         }
-        
+
         save_json_path = os.path.join("saves", f"{save_id}.json")
         with open(save_json_path, "w") as f:
             json.dump(save_data, f)
-            
+
         logger.info(f"Saved project: {save_id} with prompt: {prompt[:50]}...")
         return {"status": "success", "save_id": save_id}
     except Exception as e:
@@ -950,7 +1080,7 @@ async def list_saves():
                         saves.append(data)
                     except Exception as e:
                         logger.error(f"Error reading save {filename}: {e}")
-                        
+
         # Sort newest first
         saves.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
         return {"status": "success", "saves": saves}
@@ -969,21 +1099,21 @@ async def animate_openpose(
     """Generate a walk cycle using FLUX + ControlNet-Union Pose mode."""
     try:
         logger.info(f"SDXL walk cycle requested for {image_url} ({num_frames} frames)")
-        
+
         session_id = str(uuid.uuid4())[:8]
-        
+
         # Step 1: Load pre-made skeleton images
         logger.info("Step 1/3: Loading pre-made walk cycle skeletons...")
         skeleton_dir = os.path.join("output", "ref_skeletons")
         skeleton_urls = []
-        
+
         available = sorted([f for f in os.listdir(skeleton_dir) if f.startswith("walk_front_")])
         if len(available) > num_frames:
             step = len(available) / num_frames
             selected = [available[int(i * step)] for i in range(num_frames)]
         else:
             selected = available
-        
+
         # Copy skeletons to session folder for redo tracking
         for i, skel_file in enumerate(selected):
             src = os.path.join(skeleton_dir, skel_file)
@@ -991,34 +1121,34 @@ async def animate_openpose(
             dst = os.path.join("output", dst_name)
             Image.open(src).save(dst)
             skeleton_urls.append(f"/output/{dst_name}")
-        
+
         logger.info(f"  Using {len(selected)} skeleton frames from pre-made set.")
-        
+
         # Step 2: Load SDXL + OpenPose ControlNet and generate
         logger.info("Step 2/3: Loading SDXL + OpenPose ControlNet...")
         pipe = manager.load_sdxl("pose")
-        
+
         # Load anchor image (used in prompt description, not IP-Adapter)
         anchor_name = os.path.basename(image_url)
         if "/saves/" in image_url:
             anchor_path = os.path.join("saves", anchor_name)
         else:
             anchor_path = os.path.join("output", anchor_name)
-            
+
         if not os.path.exists(anchor_path):
             raise HTTPException(status_code=404, detail=f"Anchor image not found at {anchor_path}")
         logger.info(f"  Anchor image: {anchor_path}")
-        
+
         # Base prompt includes user prompt + base styling
         base_prompt = f"{prompt}, game sprite, full body, solid bright green background, consistent character design, arms visible"
-        
+
         seed = 42
         frame_urls = []
         generated_frames = []
-        
+
         for i in range(len(selected)):
             logger.info(f"  Generating frame {i+1}/{len(selected)}...")
-            
+
             # Map the 12 frames to specific physical descriptions to reinforce the ControlNet
             # 0-5: Left leg forward cycle. 6-11: Right leg forward cycle.
             pose_prompts = [
@@ -1035,24 +1165,24 @@ async def animate_openpose(
                 "left leg lifting, pushing up",                           # 10: Up R (early)
                 "left leg high, reaching forward"                         # 11: Up R (late)
             ]
-            
+
             # Use the specific pose description for this frame, fallback if out of bounds
             frame_pose = pose_prompts[i] if i < len(pose_prompts) else "walking pose"
-            
+
             # Put the critical pose information at the FRONT of the prompt so it isn't truncated
             frame_specific_prompt = f"{frame_pose}, walking pose, front-facing, facing the viewer, {base_prompt}"
-            
+
             # Load OpenPose skeleton directly
             skel_img = load_image(os.path.join("output", f"skel_{session_id}_{i}.png"))
             skeleton = skel_img.convert("RGB").resize((1024, 1024))
-            
+
             if manager.device == "cuda":
                 torch.cuda.empty_cache()
                 gc.collect()
-            
+
             # Use SoftEdge ControlNet + IP-Adapter (anchor as reference)
             anchor_image = load_image(anchor_path).resize((1024, 1024))
-            
+
             def do_sdxl():
                 return pipe(
                     prompt=frame_specific_prompt,
@@ -1066,11 +1196,11 @@ async def animate_openpose(
                     width=1024,
                     generator=torch.Generator(device="cpu").manual_seed(seed)
                 ).images[0]
-                
+
             image = await run_in_threadpool(do_sdxl)
             image = remove(image, session=rembg_session)
             generated_frames.append(image)
-        
+
         # Post-processing: Align all frames to consistent center
         logger.info("  Aligning frames...")
         max_w, max_h = 0, 0
@@ -1087,26 +1217,26 @@ async def animate_openpose(
                 bboxes.append((0, 0, img.width, img.height))
                 max_w = max(max_w, img.width)
                 max_h = max(max_h, img.height)
-        
+
         # Add padding
         pad = 10
         canvas_w = max_w + pad * 2
         canvas_h = max_h + pad * 2
-        
+
         for i, (img, bbox) in enumerate(zip(generated_frames, bboxes)):
             cropped = img.crop(bbox)
             aligned = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
             x = (canvas_w - cropped.width) // 2
             y = canvas_h - cropped.height - pad  # Anchor to bottom (feet alignment)
             aligned.paste(cropped, (x, y), cropped)
-            
+
             frame_filename = f"frame_{session_id}_{i}.png"
             frame_path = os.path.join("output", frame_filename)
             aligned.save(frame_path)
             frame_urls.append(f"/output/{frame_filename}")
-        
+
         logger.info("Step 3/3: All frames generated.")
-        
+
         return {
             "status": "success",
             "session_id": session_id,
@@ -1132,35 +1262,35 @@ async def regenerate_frame(
     """Regenerate a single frame using SDXL + SoftEdge ControlNet."""
     try:
         logger.info(f"Regenerating frame {frame_index} for session {session_id}")
-        
+
         pipe = manager.load_sdxl("pose")
-        
+
         # Load OpenPose skeleton directly
         skel_name = os.path.basename(skeleton_url)
         skel_img = load_image(os.path.join("output", skel_name))
         skeleton = skel_img.convert("RGB").resize((1024, 1024))
-        
+
         # Put critical pose info at the FRONT
         full_prompt = f"walking pose, front-facing, facing the viewer, {prompt}, game sprite, full body, solid bright green background, consistent character design, arms visible"
-        
+
         if manager.device == "cuda":
             torch.cuda.empty_cache()
             gc.collect()
-        
+
         seed = random.randint(0, 2**32 - 1)
         logger.info(f"  Using seed {seed}")
-        
+
         # Use ControlNet + IP-Adapter (anchor as reference)
         anchor_name_ref = os.path.basename(anchor_url)
         if "/saves/" in anchor_url:
             anchor_path_ref = os.path.join("saves", anchor_name_ref)
         else:
             anchor_path_ref = os.path.join("output", anchor_name_ref)
-            
+
         if not os.path.exists(anchor_path_ref):
              raise HTTPException(status_code=404, detail=f"Anchor image not found at {anchor_path_ref}")
         anchor_image = load_image(anchor_path_ref).resize((1024, 1024))
-        
+
         image = pipe(
             prompt=full_prompt,
             negative_prompt="blurry, low quality, deformed, ugly, bad anatomy, extra limbs, cape, cloak, flowing fabric, wings, rear view, back view, from behind, turned away",
@@ -1173,13 +1303,13 @@ async def regenerate_frame(
             width=1024,
             generator=torch.Generator(device="cpu").manual_seed(seed)
         ).images[0]
-        
+
         image = remove(image, session=rembg_session)
-        
+
         # Post-processing: Match the same crop/align logic as walk cycle generation
         frame_filename = f"frame_{session_id}_{frame_index}.png"
         frame_path = os.path.join("output", frame_filename)
-        
+
         # Get target canvas size from existing frame
         if os.path.exists(frame_path):
             existing = Image.open(frame_path)
@@ -1187,14 +1317,14 @@ async def regenerate_frame(
             existing.close()
         else:
             canvas_w, canvas_h = 512, 512
-        
+
         # Crop to bounding box (remove transparent border)
         bbox = image.getbbox()
         if bbox:
             cropped = image.crop(bbox)
         else:
             cropped = image
-        
+
         # Center on canvas, anchor feet to bottom (same as walk cycle)
         # REMOVED the artificial stretching logic that was breaking scale and placement!
         pad = 10
@@ -1202,10 +1332,10 @@ async def regenerate_frame(
         x = (canvas_w - cropped.width) // 2
         y = canvas_h - cropped.height - pad  # Feet alignment
         aligned.paste(cropped, (x, y), cropped)
-        
+
         aligned.save(frame_path)
         logger.info(f"  Frame {frame_index} regenerated and aligned ({canvas_w}x{canvas_h}): {frame_path}")
-        
+
         return {"status": "success", "url": f"/output/{frame_filename}"}
     except Exception as e:
         logger.error(f"Error regenerating frame: {e}")
@@ -1228,23 +1358,23 @@ async def generate_turnaround(req: TurnaroundRequest):
     """Isolated FLUX experiment to generate a 5-point turnaround sheet."""
     try:
         logger.info(f"Generating experimental FLUX turnaround for session {req.session_id}")
-        
+
         # 1. Unload SDXL to free VRAM
         manager.unload_all()
         if manager.device == "cuda":
             torch.cuda.empty_cache()
             gc.collect()
-            
+
         # 3. Load FLUX Text-to-Image Pipeline with 4-bit Quantization
         logger.info("Loading FLUX.1-dev for Turnaround generation...")
-        
+
         # Load the massive 24GB transformer in 4-bit precision to fit in 16GB VRAM
         nf4_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
             bnb_4bit_compute_dtype=torch.bfloat16
         )
-        
+
         logger.info("  Loading 4-bit Transformer...")
         transformer = FluxTransformer2DModel.from_pretrained(
             "black-forest-labs/FLUX.1-dev",
@@ -1252,44 +1382,44 @@ async def generate_turnaround(req: TurnaroundRequest):
             quantization_config=nf4_config,
             torch_dtype=torch.bfloat16
         )
-        
+
         logger.info("  Loading Pipeline...")
         if req.use_img2img:
             flux_pipe = FluxImg2ImgPipeline.from_pretrained(
-                "black-forest-labs/FLUX.1-dev", 
+                "black-forest-labs/FLUX.1-dev",
                 transformer=transformer,
                 torch_dtype=torch.bfloat16
             )
         else:
             flux_pipe = FluxPipeline.from_pretrained(
-                "black-forest-labs/FLUX.1-dev", 
+                "black-forest-labs/FLUX.1-dev",
                 transformer=transformer,
                 torch_dtype=torch.bfloat16
             )
-        
+
         # Enable offloading and VAE optimizations to fit in 16GB VRAM
         flux_pipe.enable_model_cpu_offload()
         flux_pipe.vae.enable_tiling()
         flux_pipe.vae.enable_slicing()
-        
+
         # 4. Load the LoRA
         lora_path = os.path.join("loras", "turnaround.safetensors")
         if not os.path.exists(lora_path):
              raise HTTPException(status_code=400, detail="Turnaround LoRA not found.")
-        
+
         flux_pipe.load_lora_weights(lora_path)
         logger.info("LoRA loaded successfully.")
-        
+
         # 5. Inference
         tech_prefix = "character turnaround sheet, 5 views: front view, side view, back view, front-quarter view, back-quarter view. no shadows, same proportions, consistent detailing, white background"
         prompt_text = f"{tech_prefix}, {req.prompt}"
-        
+
         logger.info(f"Starting FLUX generation (in threadpool)...")
         last_image_url = None
         last_project_id = None
-        
+
         # Determine number of variants to generate
-        num_to_gen = max(1, min(req.num_variants, 200)) 
+        num_to_gen = max(1, min(req.num_variants, 200))
         logger.info(f"Generating {num_to_gen} variants...")
 
         for v_idx in range(num_to_gen):
@@ -1297,12 +1427,12 @@ async def generate_turnaround(req: TurnaroundRequest):
             pid = req.project_id if req.project_id else get_next_project_id()
             project_dir = os.path.join("Output_Saves", pid)
             os.makedirs(project_dir, exist_ok=True)
-            
+
             variant_success = False
             for attempt in range(max_attempts):
                 seed = random.randint(0, 2**32 - 1)
                 logger.info(f"Variant {v_idx+1}/{num_to_gen} | Attempt {attempt+1}/{max_attempts} | Seed: {seed}")
-                
+
                 def do_flux_seeded():
                     if req.use_img2img and req.project_id:
                         base_image_path = os.path.join("Output_Saves", req.project_id, f"{req.project_id}_turnaround_ORIGINAL.png")
@@ -1317,7 +1447,7 @@ async def generate_turnaround(req: TurnaroundRequest):
                                 generator=torch.Generator(device="cpu").manual_seed(seed),
                                 joint_attention_kwargs={"scale": 1.0}
                             ).images[0]
-                    
+
                     # Fallback to Text2Img (Requires standard FluxPipeline)
                     return flux_pipe(
                         prompt=prompt_text,
@@ -1330,18 +1460,18 @@ async def generate_turnaround(req: TurnaroundRequest):
                     ).images[0]
 
                 image = await run_in_threadpool(do_flux_seeded)
-                
+
                 # Save directly to the project folder
                 filename = f"{pid}_turnaround.png"
                 filepath = os.path.join(project_dir, filename)
                 image.save(filepath)
-                
+
                 # --- GOLDEN BACKUP ---
                 # Save a permanent backup that the system will never overwrite
                 backup_path = os.path.join(project_dir, f"{pid}_turnaround_ORIGINAL.png")
                 shutil.copy2(filepath, backup_path)
                 logger.info(f"  Golden Backup created: {backup_path}")
-                
+
                 # Save/Update metadata
                 meta_path = os.path.join(project_dir, "metadata.json")
                 if os.path.exists(meta_path):
@@ -1353,20 +1483,20 @@ async def generate_turnaround(req: TurnaroundRequest):
                 else:
                     with open(meta_path, "w") as f:
                         json.dump({"prompt": req.prompt, "id": pid, "seed": seed, "created_at": time.time(), "updated_at": time.time()}, f)
-                    
+
                 last_image_url = f"/output_saves/{pid}/{filename}"
                 last_project_id = pid
-                
+
                 if not req.enforce_white:
                     variant_success = True
                     break
-                    
+
                 # Check corners for white background
                 data = np.array(image)
                 corners = [data[0,0], data[0,-1], data[-1,0], data[-1,-1]]
                 avg_corner = np.mean(corners, axis=0)
-                is_white = np.mean(avg_corner[:3]) > 180 
-                
+                is_white = np.mean(avg_corner[:3]) > 180
+
                 if is_white:
                     logger.info(f"  Variant {v_idx+1} Validation Success.")
                     variant_success = True
@@ -1393,7 +1523,7 @@ async def generate_turnaround(req: TurnaroundRequest):
         if manager.device == "cuda":
             torch.cuda.empty_cache()
             gc.collect()
-            
+
         return {"status": "success", "url": last_image_url, "project_id": last_project_id, "batch_count": num_to_gen}
 
         # Unload FLUX after we are done
@@ -1401,9 +1531,9 @@ async def generate_turnaround(req: TurnaroundRequest):
         if manager.device == "cuda":
             torch.cuda.empty_cache()
             gc.collect()
-            
+
         return {"status": "success", "url": last_image_url, "project_id": last_project_id, "batch_count": num_to_gen}
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -1453,12 +1583,12 @@ async def list_projects():
         saves = []
         if not os.path.exists("Output_Saves"):
             return {"status": "success", "saves": []}
-            
+
         for d in os.listdir("Output_Saves"):
             folder_path = os.path.join("Output_Saves", d)
             if not os.path.isdir(folder_path):
                 continue
-                
+
             try:
                 meta_path = os.path.join(folder_path, "metadata.json")
                 if os.path.exists(meta_path):
@@ -1477,7 +1607,7 @@ async def list_projects():
                             logger.warning(f"  Skipping corrupted project folder {d}: Empty or invalid metadata.json")
             except Exception as fe:
                 logger.warning(f"  Skipping corrupted project folder {d}: {fe}")
-                    
+
         saves.sort(key=lambda x: x["timestamp"], reverse=True)
         return {"status": "success", "saves": saves}
     except Exception as e:
@@ -1505,14 +1635,14 @@ async def reset_project(req: dict):
         pid = req.get("project_id")
         project_dir = os.path.join("Output_Saves", pid)
         original_sheet = os.path.join(project_dir, f"{pid}_turnaround_ORIGINAL.png")
-        
+
         if not os.path.exists(original_sheet):
              # Fallback: if ORIGINAL doesn't exist, try the base turnaround.png
              original_sheet = os.path.join(project_dir, f"{pid}_turnaround.png")
-             
+
         if not os.path.exists(original_sheet):
              raise HTTPException(status_code=404, detail="Original turnaround image not found")
-        
+
         # 1. CACHE ESSENTIAL METADATA
         meta_path = os.path.join(project_dir, "metadata.json")
         core_meta = {}
@@ -1528,7 +1658,7 @@ async def reset_project(req: dict):
                 "updated_at": time.time(),
                 "image_url": f"/output_saves/{pid}/{pid}_turnaround.png"
             }
-        
+
         # 2. DELETE EVERYTHING ELSE
         # We delete all files and folders except the original sheet and metadata.json
         for f in os.listdir(project_dir):
@@ -1539,14 +1669,14 @@ async def reset_project(req: dict):
                     elif os.path.isdir(path): shutil.rmtree(path)
                 except Exception as de:
                     logger.warning(f"  Failed to delete {f} during reset: {de}")
-        
+
         # 3. RESTORE ORIGINAL SHEET
         shutil.copy2(original_sheet, os.path.join(project_dir, f"{pid}_turnaround.png"))
-        
+
         # 4. WRITE FRESH METADATA
         with open(meta_path, "w") as f:
             json.dump(core_meta, f)
-            
+
         logger.info(f"Project {pid} reset to factory state.")
         return {"status": "success"}
     except Exception as e:
@@ -1559,11 +1689,11 @@ async def reset_project(req: dict):
 async def dehalo_image(image_data: str = Form(...)):
     """Remove 2px of semi-transparent halo fringe around sprites by eroding the alpha channel."""
     import cv2
-    
+
     # Remove data URL header if present
     if "," in image_data:
         image_data = image_data.split(",")[1]
-    
+
     img_bytes = base64.b64decode(image_data)
     nparr = np.frombuffer(img_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_UNCHANGED)
@@ -1579,10 +1709,10 @@ async def dehalo_image(image_data: str = Form(...)):
     kernel = np.ones((3, 3), np.uint8)
     eroded_alpha = cv2.erode(alpha, kernel, iterations=2)
     img[:, :, 3] = eroded_alpha
-    
+
     _, buffer = cv2.imencode(".png", img)
     encoded_image = base64.b64encode(buffer).decode("utf-8")
-    
+
     return {"image_data": f"data:image/png;base64,{encoded_image}"}
 
 
@@ -1598,16 +1728,16 @@ async def save_slice_edit(req: SaveSliceEditRequest):
         image_data = req.image_data
         if "," in image_data:
             image_data = image_data.split(",")[1]
-        
+
         # Resolve original file path from URL
         file_path = resolve_image_path(req.slice_url)
         if not os.path.exists(file_path):
             raise HTTPException(status_code=404, detail=f"Original slice not found: {file_path}")
-        
+
         img_bytes = base64.b64decode(image_data)
         with open(file_path, "wb") as f:
             f.write(img_bytes)
-        
+
         logger.info(f"Saved edited slice: {file_path}")
         return {"status": "success", "url": req.slice_url}
     except HTTPException:
@@ -1623,13 +1753,13 @@ async def save_project(req: SaveProjectRequest):
         pid = req.project_id
         if not pid:
             pid = get_next_project_id()
-            
+
         project_dir = os.path.join("Output_Saves", pid)
         os.makedirs(project_dir, exist_ok=True)
-        
+
         target_filename = f"{pid}_turnaround.png"
         target_path = os.path.join(project_dir, target_filename)
-        
+
         source_path = resolve_image_path(req.image_url)
         if os.path.exists(source_path):
             # Retry to handle Windows file locking from concurrent operations
@@ -1644,21 +1774,21 @@ async def save_project(req: SaveProjectRequest):
                         logger.warning(f"Could not copy source after 5 attempts (file locked): {source_path}")
         else:
             logger.warning(f"Could not resolve source image for saving: {req.image_url}")
-                
+
         # Create metadata with version history
         metadata = {
-            "prompt": req.prompt, 
-            "id": pid, 
+            "prompt": req.prompt,
+            "id": pid,
             "updated_at": time.time(),
             "image_url": f"/output_saves/{pid}/{target_filename}",
             "all_slice_versions": req.all_slice_versions or [],
             "selected_indices": req.selected_indices or [0, 0, 0, 0, 0]
         }
-        
+
         # Robust Save
         meta_path = os.path.join(project_dir, "metadata.json")
         save_metadata_safe(meta_path, metadata)
-            
+
         return {"status": "success", "project_id": pid, "image_url": f"/output_saves/{pid}/{target_filename}"}
     except Exception as e:
         logger.error(f"Error saving project: {e}")
@@ -1674,16 +1804,16 @@ async def slice_turnaround(req: SliceRequest):
             pid = get_next_project_id()
             is_new_project = True
             logger.info(f"Auto-initializing project {pid} for slicing.")
-            
+
         # Determine output directory
         output_dir = os.path.join("Output_Saves", pid)
         os.makedirs(output_dir, exist_ok=True)
-            
+
         # Robust URL handling using helper
         sheet_path = resolve_image_path(req.image_url)
         if not os.path.exists(sheet_path):
             raise HTTPException(status_code=404, detail=f"Sheet not found at {sheet_path}")
-            
+
         # Determine if this is a corrected sheet to add a version suffix to slices
         source_name = os.path.basename(sheet_path)
         source_stem = os.path.splitext(source_name)[0]
@@ -1692,36 +1822,36 @@ async def slice_turnaround(req: SliceRequest):
             # Extract the unique hash from 'corrected_hash'
             version_suffix = "_" + source_stem.split("corrected_")[-1]
             logger.info(f"  Detected corrected sheet, using version suffix: {version_suffix}")
-            
+
         image = Image.open(sheet_path).convert("RGB")
         w, h = image.size
-        
+
         num_poses = 5
         slice_width = w / num_poses
-        
+
         sliced_urls = []
         logger.info(f"Slicing turnaround sheet ({w}x{h}) into {num_poses} poses for project {pid}...")
-        
+
         # Save a copy of the turnaround sheet to the project if it's not already there
         project_sheet_name = f"{pid}_turnaround.png"
         project_sheet_path = os.path.join(output_dir, project_sheet_name)
         if not os.path.exists(project_sheet_path):
             shutil.copy2(sheet_path, project_sheet_path)
-            
+
         # --- GOLDEN BACKUP ---
         # Ensure a permanent backup exists that will never be pivoted or overwritten
         backup_path = os.path.join(output_dir, f"{pid}_turnaround_ORIGINAL.png")
         if not os.path.exists(backup_path):
             shutil.copy2(project_sheet_path, backup_path)
             logger.info(f"  Golden Backup created for manual/existing turnaround: {backup_path}")
-            
+
         # Ensure metadata exists and is loaded early
         meta_path = os.path.join(output_dir, "metadata.json")
         meta = {}
         if os.path.exists(meta_path):
             with open(meta_path, "r") as f:
                 meta = json.load(f)
-        
+
         # Determine the relative URL for the sheet being sliced
         sheet_rel_url = req.image_url
         if not sheet_rel_url.startswith("/output_saves/"):
@@ -1731,10 +1861,10 @@ async def slice_turnaround(req: SliceRequest):
         meta["image_url"] = sheet_rel_url
         if "id" not in meta: meta["id"] = pid
         if "created_at" not in meta: meta["created_at"] = time.time()
-        
+
         save_metadata_safe(meta_path, meta)
 
-            
+
         # Smart Cache: Only reuse if files exist AND sheet hasn't changed AND we aren't forcing
         if not is_new_project and not getattr(req, 'force_reslice', False):
             if os.path.exists(output_dir):
@@ -1745,7 +1875,7 @@ async def slice_turnaround(req: SliceRequest):
                     if sheet_mtime < newest_slice:
                         logger.info(f"Reusing existing slices for project {pid}")
                         sliced_urls = [f"/output_saves/{pid}/{os.path.basename(f)}" for f in sorted(pose_files)]
-                        
+
                         # Ensure segments are in metadata even on cache hits
                         if os.path.exists(meta_path):
                             with open(meta_path, "r") as f:
@@ -1754,28 +1884,28 @@ async def slice_turnaround(req: SliceRequest):
                                 # We have to re-detect once to get segments for Quick Fix
                                 logger.info("  Cache hit but missing segments. Re-detecting segments...")
                                 # ... (we'll just let it fall through to detection if segments missing)
-                                pass 
+                                pass
                             else:
                                 return {
-                                    "status": "success", 
-                                    "urls": sliced_urls[:num_poses], 
+                                    "status": "success",
+                                    "urls": sliced_urls[:num_poses],
                                     "project_id": pid,
                                     "all_slice_versions": meta.get("all_slice_versions", []),
                                     "selected_indices": meta.get("selected_indices", [0,0,0,0,0])
                                 }
-            
+
         # 4. Character Isolation Strategy
         num_poses = req.num_poses or 5
-        
+
         # 4.1. Prepare mask for detection (ignore background)
         detection_img = image.convert("RGBA")
         data = np.array(detection_img)
         r, g, b = data[:, :, 0], data[:, :, 1], data[:, :, 2]
-        
+
         corners = [data[0,0], data[0,-1], data[-1,0], data[-1,-1]]
         avg_corner = np.mean(corners, axis=0)
         is_white_bg = np.mean(avg_corner[:3]) > 128
-        
+
         # Use a more sensitive threshold for gap detection
         if is_white_bg:
             detect_thresh = min(225, (req.foreground_threshold or 240) - 15)
@@ -1783,12 +1913,12 @@ async def slice_turnaround(req: SliceRequest):
         else:
             detect_thresh = max(30, (req.foreground_threshold or 15) + 15)
             mask = (r > detect_thresh) | (g > detect_thresh) | (b > detect_thresh)
-            
+
         # 4.2. Horizontal Projection
         projection = np.sum(mask, axis=0)
-        
+
         # 4.3. Find segments (islands of pixels)
-        min_pixels_in_col = 15 
+        min_pixels_in_col = 15
         in_segment = False
         start_x = 0
         temp_segments = []
@@ -1824,7 +1954,7 @@ async def slice_turnaround(req: SliceRequest):
 
         # 4.5. Refine segments (merge small gaps)
         refined = []
-        min_gap = 50 
+        min_gap = 20
         if segments:
             curr_s, curr_e = segments[0]
             for next_s, next_e in segments[1:]:
@@ -1834,41 +1964,55 @@ async def slice_turnaround(req: SliceRequest):
                     refined.append((curr_s, curr_e))
                     curr_s, curr_e = next_s, next_e
             refined.append((curr_s, curr_e))
-            
+
         refined = [s for s in refined if (s[1] - s[0]) > 40]
         num_detected_islands = len(refined)
 
-        # 5. DECISION LOGIC: 
+        # 5. DECISION LOGIC:
         # If this is a standard size AND we see 5 people OR it's already pivoted, use Fixed Grid.
         is_fixed_grid = False
         is_standard_width = (w == 1536 or w == 2560)
-        
+
         # Meta check for pivot status
         has_pivoted = False
+        saved_segments = []
         meta_path = os.path.join(output_dir, "metadata.json")
         if os.path.exists(meta_path):
             with open(meta_path, "r") as f:
                 meta = json.load(f)
-                has_pivoted = meta.get("image_url", "").endswith("_working.png") or len(meta.get("slice_segments", [])) == 5
-        
+                saved_segments = meta.get("slice_segments", [])
+                has_pivoted = meta.get("image_url", "").endswith("_working.png") or len(saved_segments) == 5
+
         pose_boxes = []
         slot_to_island = {}
         avg_island_width = 512
 
         if is_standard_width and (has_pivoted or num_detected_islands == 5):
-            logger.info(f"  BRANCH A (Surgical): Standard layout detected ({num_detected_islands} islands). Using Fixed Grid.")
+            logger.info(f"  BRANCH A (Surgical): Standard layout detected ({num_detected_islands} islands). Using masked hard-wall slices.")
             is_fixed_grid = True
-            col_w = 307 if w == 1536 else 512
-            # Override segments with perfectly aligned grid
-            segments = [[i * col_w, (i + 1) * col_w] for i in range(num_poses)]
-            pose_boxes = segments
+            if num_detected_islands == num_poses:
+                segments = [[int(s), int(e)] for s, e in refined]
+            elif len(saved_segments) == num_poses:
+                segments = [[int(s), int(e)] for s, e in saved_segments]
+            else:
+                col_w = w / num_poses
+                margin = int(col_w * 0.12)
+                segments = [[int(i * col_w + margin), int((i + 1) * col_w - margin)] for i in range(num_poses)]
+
+            pose_boxes = []
+            for i in range(num_poses):
+                s_curr, e_curr = segments[i]
+                start_x = 0 if i == 0 else (segments[i - 1][1] + s_curr) // 2
+                end_x = w if i == num_poses - 1 else (e_curr + segments[i + 1][0]) // 2
+                pose_boxes.append((max(0, int(start_x)), min(w, int(end_x))))
+
             slot_to_island = {i: i for i in range(num_poses)}
             refined = segments
-            avg_island_width = col_w
+            avg_island_width = np.mean([e - s for s, e in segments])
         else:
             # BRANCH B: DYNAMIC PATH
             logger.info(f"  BRANCH B (Dynamic): Irregular sheet detected ({num_detected_islands} islands). Using Smart Mapping.")
-            
+
             # BEST FIT MAPPING
             if 0 < num_detected_islands <= num_poses:
                 ideal_centers = [(i + 0.5) * (w / num_poses) for i in range(num_poses)]
@@ -1906,23 +2050,23 @@ async def slice_turnaround(req: SliceRequest):
                             right_neighbor_x = refined[slot_to_island[next_slot]][0]
                             break
                     center_x = (left_neighbor_x + right_neighbor_x) / 2
-                    crop_w = int(avg_island_width * 1.2) 
+                    crop_w = int(avg_island_width * 1.2)
                     pose_boxes.append((max(0, int(center_x - crop_w/2)), min(w, int(center_x + crop_w/2))))
-            
+
             logger.info(f"    Mapping complete: Assigned {len(slot_to_island)} islands. (Avg Width: {avg_island_width:.1f}px)")
 
         has_patched_image = False
         # Pass 1: Extraction and Auto-Isolation
         extracted_sprites = []
         max_sh = 0
-        
+
         for i in range(num_poses):
             x1, x2 = pose_boxes[i]
             # Define crop here so it's available as a fallback for all branches
             crop = image.crop((x1, 0, x2, h))
-            
+
             logger.info(f"  Pass 1: Extracting slice {i+1}/{num_poses} (x={x1} to {x2})...")
-            
+
             # If this is an empty slot, create a placeholder
             if len(refined) > 0 and i not in slot_to_island:
                 logger.info(f"    Slot {i+1} is empty, using reference from other slices.")
@@ -1930,37 +2074,37 @@ async def slice_turnaround(req: SliceRequest):
                 island_widths = [e - s for s, e in refined]
                 best_idx = np.argmax(island_widths)
                 s_ref, e_ref = refined[best_idx]
-                
+
                 # Crop the reference character from the original image
                 ref_crop_raw = image.crop((s_ref, 0, e_ref, h))
-                
+
                 # IMPORTANT: Remove background from the reference too, otherwise it brings its white box with it!
                 ref_crop = await run_in_threadpool(
-                    remove, 
-                    ref_crop_raw, 
+                    remove,
+                    ref_crop_raw,
                     session=rembg_session
                 )
-                
+
                 # Create a canvas for the empty slot (TRANSPARENT background)
                 no_bg = Image.new("RGBA", (int(w/num_poses), h), (0, 0, 0, 0))
-                
+
                 # Paste the reference into the center
                 rw, rh = ref_crop.size
                 paste_x = (no_bg.width - rw) // 2
                 no_bg.paste(ref_crop, (paste_x, 0), ref_crop)
-                
+
                 has_patched_image = True # Signal that we need to save a working turnaround
-                
+
                 logger.info(f"      Created transparent/isolated reference for empty slot {i+1}.")
             else:
                 # IMPORTANT: We crop from 'image' (the clean sheet), NOT 'working_image'
                 # (crop is already defined above)
-                
+
                 # --- SURGICAL OPTIMIZATION ---
                 # Only run expensive AI background removal if this is the target slice
                 # or if it's a global reslice (None).
                 is_target = (req.target_slice_index is None or req.target_slice_index == i)
-                
+
                 if not is_target:
                     # Non-target slice: Use simple removal for the stitched sheet to stay fast
                     no_bg = crop.convert("RGBA")
@@ -1985,8 +2129,8 @@ async def slice_turnaround(req: SliceRequest):
                 else:
                     # Use AI remover (rembg)
                     no_bg = await run_in_threadpool(
-                        remove, 
-                        crop, 
+                        remove,
+                        crop,
                         session=rembg_session,
                         alpha_matting=req.alpha_matting,
                         alpha_matting_foreground_threshold=req.foreground_threshold,
@@ -1997,52 +2141,66 @@ async def slice_turnaround(req: SliceRequest):
                 try:
                     # 1. Create a mask of the character vs background
                     iso_data = np.array(no_bg)
-                    r, g, b, a = iso_data.T
-                    
+                    r = iso_data[:, :, 0]
+                    g = iso_data[:, :, 1]
+                    b = iso_data[:, :, 2]
+                    a = iso_data[:, :, 3]
+
                     # Check if we already have transparency
                     has_alpha = np.max(a) > 0 and np.min(a) < 255
-                    
+
                     if has_alpha:
                         # Use existing alpha channel
-                        binary_mask = (a.T > 10).astype(np.uint8)
+                        binary_mask = (a > 10).astype(np.uint8)
                     else:
                         # No alpha? Detect background color from corners
                         corners = [iso_data[0,0], iso_data[0,-1], iso_data[-1,0], iso_data[-1,-1]]
                         avg_corner = np.mean(corners, axis=0)
                         is_white_bg = np.mean(avg_corner[:3]) > 128
-                        
+
                         # Use user threshold if available
                         thresh = req.foreground_threshold or (240 if is_white_bg else 15)
-                        
+
                         if is_white_bg:
                             # Character is not background (be sensitive)
-                            binary_mask = ((r.T < thresh) | (g.T < thresh) | (b.T < thresh)).astype(np.uint8)
+                            binary_mask = ((r < thresh) | (g < thresh) | (b < thresh)).astype(np.uint8)
                         else:
                             # Character is not background (be VERY sensitive for dark outfits)
-                            binary_mask = ((r.T > (thresh//2)) | (g.T > (thresh//2)) | (b.T > (thresh//2))).astype(np.uint8)
-                    
+                            binary_mask = ((r > (thresh//2)) | (g > (thresh//2)) | (b > (thresh//2))).astype(np.uint8)
+
                     # 2. Find all connected components (islands)
                     num_labels, labels = cv2.connectedComponents(binary_mask)
-                    
+
                     if num_labels > 1: # 0 is background, 1+ are islands
-                        # 3. Find the best island to keep
-                        center_x_val = no_bg.width // 2
-                        
-                        # Check which labels are present in the central 30% of the slice (tighter scan)
-                        start_scan = center_x_val - (no_bg.width // 6)
-                        end_scan = center_x_val + (no_bg.width // 6)
+                        # 3. Find the best island to keep. Prefer the detected pose span
+                        # inside this crop; this adapts to Flux outputs that drift or leave
+                        # neighbor fragments near the hard-wall edges.
+                        if i in slot_to_island and slot_to_island[i] < len(refined):
+                            s_global, e_global = refined[slot_to_island[i]]
+                            start_scan = int(max(0, s_global - x1))
+                            end_scan = int(min(no_bg.width, e_global - x1))
+                        else:
+                            center_x_val = no_bg.width // 2
+                            start_scan = int(center_x_val - (no_bg.width // 6))
+                            end_scan = int(center_x_val + (no_bg.width // 6))
+
+                        if end_scan <= start_scan:
+                            center_x_val = no_bg.width // 2
+                            start_scan = int(center_x_val - (no_bg.width // 6))
+                            end_scan = int(center_x_val + (no_bg.width // 6))
+
                         center_region = labels[:, int(max(0, start_scan)):int(min(no_bg.width, end_scan))]
-                        
+
                         # Get unique labels and their counts in the center
                         unique, counts = np.unique(center_region[center_region > 0], return_counts=True)
-                        
+
                         target_labels = []
                         if len(unique) > 0:
                             # Find the dominant label (the one with most pixels in center)
                             dominant_idx = np.argmax(counts)
                             dominant_label = unique[dominant_idx]
                             dominant_count = counts[dominant_idx]
-                            
+
                             # Keep any label that has at least 15% of the dominant label's presence in the center
                             # This catches detached limbs/accessories while still excluding neighbor bleed-in
                             threshold = dominant_count * 0.15
@@ -2054,24 +2212,24 @@ async def slice_turnaround(req: SliceRequest):
                             labels_list, island_counts = np.unique(labels[labels > 0], return_counts=True)
                             if len(labels_list) > 0:
                                 target_labels = [labels_list[np.argmax(island_counts)]]
-                                logger.info(f"    Center scan failed for slice {i+1}, falling back to largest island")                    
-                        
+                                logger.info(f"    Center scan failed for slice {i+1}, falling back to largest island")
+
                         if target_labels:
                             # Prepare final output data
                             if no_bg.mode != 'RGBA':
                                 no_bg = no_bg.convert('RGBA')
                                 iso_data = np.array(no_bg)
-                                
+
                             # Create a mask of all allowed labels
                             final_mask = np.isin(labels, target_labels)
-                            
+
                             # Set alpha to 0 for all pixels NOT in our target list
-                            iso_data[..., 3][~final_mask.T] = 0
+                            iso_data[..., 3][~final_mask] = 0
                             no_bg = Image.fromarray(iso_data)
                             logger.info(f"    Isolated character parts in slice {i+1} (Labels: {target_labels})")
                 except Exception as iso_err:
                     logger.warning(f"    Auto-isolation failed for slice {i+1}: {iso_err}")
-            
+
             bbox = no_bg.getbbox()
             # If nothing detected, or the image is too transparent
             is_empty = not bbox
@@ -2080,15 +2238,15 @@ async def slice_turnaround(req: SliceRequest):
                 bw, bh = bbox[2] - bbox[0], bbox[3] - bbox[1]
                 if bw < 20 or bh < 20:
                     is_empty = True
-            
+
             if is_empty:
                 logger.warning(f"    No character detected in slice {i+1}. Falling back to raw crop.")
                 no_bg = crop.convert("RGBA")
                 bbox = (0, 0, no_bg.width, no_bg.height)
-                
+
             character_sprite = no_bg.crop(bbox)
             extracted_sprites.append(character_sprite)
-            
+
             # Track max height for global normalization
             max_sh = max(max_sh, character_sprite.height)
 
@@ -2102,44 +2260,57 @@ async def slice_turnaround(req: SliceRequest):
             meta["global_max_height"] = max_sh
 
         logger.info(f"  Pass 2: Global Normalization, Saving, and Stitching (Master Height: {max_sh}px)...")
-        global_scale = 480 / max_sh if max_sh > 480 else 1.0
-        
-        # 5b. Create the "Perfect Stitched Sheet" canvas
-        working_image = Image.new("RGBA", (512 * num_poses, 512), (255, 255, 255, 255))
-        
+        pose_max_h = 480
+        pose_scale = pose_max_h / max_sh if max_sh > pose_max_h else 1.0
+
+        sheet_max_h = int(h * 0.9) if h > 512 else 480
+        sheet_scale = sheet_max_h / max_sh if max_sh > sheet_max_h else 1.0
+
+        # 5b. Create the "Perfect Stitched Sheet" canvas matching original dimensions
+        working_canvas_w = w
+        working_canvas_h = h
+        slot_w = int(w / num_poses)
+        working_image = Image.new("RGBA", (working_canvas_w, working_canvas_h), (255, 255, 255, 255))
+
         for i, character_sprite in enumerate(extracted_sprites):
             sw, sh = character_sprite.size
-            
-            # GOLDEN SCALE ENFORCEMENT: Ensure individual slices don't jitter relative to master height
-            local_scale = global_scale
+
+            # GOLDEN SCALE ENFORCEMENT
+            local_pose_scale = pose_scale
+            local_sheet_scale = sheet_scale
             is_target = (req.target_slice_index is None or req.target_slice_index == i)
-            
+
             # If the AI generated a taller sprite during a Quick Fix, scale it down to match the master height
             if is_target and req.target_slice_index is not None and sh > max_sh:
                 logger.info(f"    Target slice {i+1} is taller than Master ({sh}px vs {max_sh}px). Enforcing scale consistency.")
-                local_scale = global_scale * (max_sh / sh)
+                local_pose_scale = pose_scale * (max_sh / sh)
+                local_sheet_scale = sheet_scale * (max_sh / sh)
 
-            new_w, new_h = int(sw * local_scale), int(sh * local_scale)
-            resized = character_sprite.resize((new_w, new_h), Image.Resampling.LANCZOS)
-            
+            # Resize for Pose Canvas (512x512)
+            new_pw, new_ph = int(sw * local_pose_scale), int(sh * local_pose_scale)
+            resized_pose = character_sprite.resize((new_pw, new_ph), Image.Resampling.LANCZOS)
+
+            # Resize for Sheet Canvas
+            new_sw, new_sh = int(sw * local_sheet_scale), int(sh * local_sheet_scale)
+            resized_sheet = character_sprite.resize((new_sw, new_sh), Image.Resampling.LANCZOS)
+
             # 1. Save the individual normalized pose for rigging/display
             # SURGICAL VERSIONING: Only add a unique tag if this is the target slice
-            is_target = (req.target_slice_index is None or req.target_slice_index == i)
             v_tag = ""
-            
+
             if is_target:
                 if req.force_reslice:
-                    v_tag = f"_{int(time.time()) % 100000}"
+                    v_tag = version_suffix or f"_{uuid.uuid4().hex[:8]}"
                 out_name = f"{pid}_pose_{i}{v_tag}.png"
-                
+
                 canvas = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
-                cpaste_x = (512 - new_w) // 2
-                cpaste_y = 512 - new_h - 10
-                canvas.paste(resized, (cpaste_x, cpaste_y), resized)
-                
+                cpaste_x = (512 - new_pw) // 2
+                cpaste_y = 512 - new_ph - 10
+                canvas.paste(resized_pose, (cpaste_x, cpaste_y), resized_pose)
+
                 save_path = os.path.join(output_dir, out_name)
                 canvas.save(save_path)
-                
+
                 url_prefix = f"/output_saves/{pid}/"
                 new_url = f"{url_prefix}{out_name}"
                 sliced_urls.append(new_url)
@@ -2155,20 +2326,19 @@ async def slice_turnaround(req: SliceRequest):
                     out_name = f"{pid}_pose_{i}.png"
                     sliced_urls.append(f"/output_saves/{pid}/{out_name}")
 
-            
-            # 2. Paste into the "Perfect Stitched Sheet" slots (512px each)
-            slot_x = i * 512
-            paste_x = slot_x + (512 - new_w) // 2
-            paste_y = 512 - new_h - 10 # Anchor to bottom
-            working_image.paste(resized, (paste_x, paste_y), resized)
-            
+            # 2. Paste into the "Perfect Stitched Sheet" slots
+            slot_x = i * slot_w
+            paste_x = slot_x + (slot_w - new_sw) // 2
+            paste_y = working_canvas_h - new_sh - max(10, int(working_canvas_h * 0.05)) # Anchor to bottom
+            working_image.paste(resized_sheet, (paste_x, paste_y), resized_sheet)
+
             logger.info(f"    Processed slice {i+1} (Individual + Stitched).")
-        
+
         working_name = f"{pid}_turnaround_working.png"
         working_path = os.path.join(output_dir, working_name)
         working_image.convert("RGB").save(working_path) # Save as RGB for FLUX
         has_patched_image = True
-        
+
         logger.info(f"  Created Perfect Stitched Sheet for Surgical Studio: {working_name}")
 
         # 6. Finalize Metadata Updates
@@ -2181,31 +2351,32 @@ async def slice_turnaround(req: SliceRequest):
                 meta = meta_disk
             except Exception as e:
                 logger.warning(f"  Metadata merge failed: {e}")
-            
+
             # Identify if we should PIVOT (irregular count) or PRESERVE (5-person golden base)
             orig_segment_count = len(segments)
             if orig_segment_count == 5:
                 logger.info("  5-person sheet detected. Preserving ORIGINAL 'Golden Base' for quality.")
                 meta["is_pivoted"] = False
                 # We keep the original image_url, but we still update segments for hard-wall protection
-                meta["slice_segments"] = segments 
+                meta["slice_segments"] = segments
             else:
                 logger.info(f"  Irregular sheet ({orig_segment_count} poses) detected. PIVOTING to 5-slot stitched sheet for stability.")
                 meta["is_pivoted"] = True
                 meta["image_url"] = f"/output_saves/{pid}/{working_name}"
                 # Save the new fixed boundaries
-                meta["slice_segments"] = [[i*512 + 100, i*512 + 412] for i in range(num_poses)]
-                
+                margin = int(slot_w * 0.2)
+                meta["slice_segments"] = [[i * slot_w + margin, (i + 1) * slot_w - margin] for i in range(num_poses)]
+
                 # --- PIVOTED GOLDEN BASE ---
                 # Save a pristine copy of the white 5-slot sheet we just created
                 pivoted_backup = os.path.join(output_dir, f"{pid}_turnaround_PIVOTED.png")
                 if not os.path.exists(pivoted_backup):
                     shutil.copy2(working_path, pivoted_backup)
                     logger.info(f"  Pivoted Golden Base created for Branch 2: {pivoted_backup}")
-                
+
                 # Also copy the working sheet to the base turnaround name for safety in future loads
                 shutil.copy2(working_path, os.path.join(output_dir, f"{pid}_turnaround.png"))
-            
+
             # --- PERSISTENT VERSIONING ---
             # Maintain a list of all versions of each slice
             # SELF-HEALING: Ensure it's a list of the correct length
@@ -2213,18 +2384,18 @@ async def slice_turnaround(req: SliceRequest):
                 meta["all_slice_versions"] = [[] for _ in range(num_poses)]
             while len(meta["all_slice_versions"]) < num_poses:
                 meta["all_slice_versions"].append([])
-            
+
             # Append new versions to the history
             for i, url in enumerate(sliced_urls):
                 # SURGICAL METADATA: Only add to history if this is the target
                 if req.target_slice_index is not None and i != req.target_slice_index:
                     continue
-                    
+
                 if i < len(meta["all_slice_versions"]):
                     if url not in meta["all_slice_versions"][i]:
                         meta["all_slice_versions"][i].append(url)
 
-            
+
             # Update current selected indices to point to these new versions
             if req.target_slice_index is not None:
                 # SURGICAL INDEX UPDATE
@@ -2238,10 +2409,10 @@ async def slice_turnaround(req: SliceRequest):
             # --- CLEAR OLD STATE (Optional) ---
             # We ONLY clear rigs/anims if this is a BRAND NEW slice (no force_reslice)
             if not req.force_reslice:
-                meta["rigs"] = [] 
+                meta["rigs"] = []
                 if "limb_packs" in meta: meta["limb_packs"] = {}
                 if "animations" in meta: meta["animations"] = {}
-                
+
             save_metadata_safe(meta_path, meta)
             logger.info(f"  Project metadata finalized with persistent versioning.")
 
@@ -2265,30 +2436,30 @@ async def rig_poses(req: RigPosesRequest):
             from mediapipe.tasks import python
             from mediapipe.tasks.python import vision
             import urllib.request
-            
+
             # Modern MediaPipe Tasks API requires a model file
             model_path = "pose_landmarker.task"
             if not os.path.exists(model_path):
                 logger.info("Downloading MediaPipe Pose Landmarker model...")
                 model_url = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task"
                 urllib.request.urlretrieve(model_url, model_path)
-                
+
             base_options = python.BaseOptions(model_asset_path=model_path)
             options = vision.PoseLandmarkerOptions(
                 base_options=base_options,
                 running_mode=vision.RunningMode.IMAGE
             )
-            
+
             with vision.PoseLandmarker.create_from_options(options) as landmarker:
                 for i, url in enumerate(req.frame_urls):
                     img_path = resolve_image_path(url)
                     if not os.path.exists(img_path):
                         logger.warning(f"  Frame {i} not found at {img_path}")
                         continue
-                        
+
                     mp_image = mp.Image.create_from_file(img_path)
                     result = landmarker.detect(mp_image)
-                    
+
                     joints = {}
                     if result.pose_landmarks:
                         landmarks = result.pose_landmarks[0]
@@ -2301,19 +2472,19 @@ async def rig_poses(req: RigPosesRequest):
                         for name, idx in joint_map.items():
                             lm = landmarks[idx]
                             joints[name] = {"x": lm.x, "y": lm.y, "v": getattr(lm, 'presence', 1.0) * getattr(lm, 'visibility', 1.0)}
-                    
+
                     if not joints:
                         raise Exception("No joints detected by AI")
-                        
+
                     # Generate mesh for this pose
                     with Image.open(img_path).convert("RGBA") as img:
                         animator = AffineMeshAnimator(img, joints)
                         triangles = animator.triangles.tolist() # Convert to list for JSON
-                    
+
                     rig_data.append({
-                        "pose_index": i, 
-                        "url": url, 
-                        "joints": joints, 
+                        "pose_index": i,
+                        "url": url,
+                        "joints": joints,
                         "triangles": triangles,
                         "method": "ai"
                     })
@@ -2333,18 +2504,18 @@ async def rig_poses(req: RigPosesRequest):
                 }
                 # Use a dummy triangulation for fallback (simple grid)
                 rig_data.append({
-                    "pose_index": i, 
-                    "url": url, 
-                    "joints": fallback_joints, 
+                    "pose_index": i,
+                    "url": url,
+                    "joints": fallback_joints,
                     "triangles": [], # Empty for now
                     "method": "fallback"
                 })
-                
+
         # PERSIST RIGS TO METADATA AND CREATE STITCHED TURNAROUND
         if req.project_id:
             project_dir = os.path.join("Output_Saves", req.project_id)
             meta_path = os.path.join(project_dir, "metadata.json")
-            
+
             # 1. Stitch current 5 frames into a "final" turnaround sheet
             try:
                 frames = []
@@ -2357,7 +2528,7 @@ async def rig_poses(req: RigPosesRequest):
                         frames.append(img)
                         max_w = max(max_w, img.width)
                         max_h = max(max_h, img.height)
-                
+
                 if frames:
                     # Stitch them side-by-side
                     sheet = Image.new("RGBA", (max_w * len(frames), max_h), (0, 0, 0, 0))
@@ -2365,14 +2536,14 @@ async def rig_poses(req: RigPosesRequest):
                         x = i * max_w + (max_w - f.width) // 2
                         y = (max_h - f.height) // 2
                         sheet.paste(f, (x, y), f)
-                    
+
                     # Save as the "latest" turnaround for this project
                     # We'll use a specific name to indicate it's the rigged/final version
                     filename = f"{req.project_id}_turnaround_rigged.png"
                     filepath = os.path.join(project_dir, filename)
                     sheet.save(filepath)
                     logger.info(f"  Stitched final turnaround sheet created: {filename}")
-                    
+
                     # 2. Update metadata with rigs AND the new image_url
                     if os.path.exists(meta_path):
                         with open(meta_path, "r") as f:
@@ -2391,9 +2562,9 @@ async def rig_poses(req: RigPosesRequest):
                     meta["rigs"] = rig_data
                     with open(meta_path, "w") as f:
                         json.dump(meta, f)
-                
+
         return {"status": "success", "rigs": rig_data}
-        
+
     except Exception as e:
         logger.error(f"Critical error in rigging endpoint: {e}")
         logger.error(traceback.format_exc())
@@ -2413,18 +2584,18 @@ async def set_pose_label(req: SetPoseLabelRequest):
         meta_path = os.path.join(project_dir, "metadata.json")
         if not os.path.exists(meta_path):
              raise HTTPException(status_code=404, detail="Project metadata not found")
-        
+
         with open(meta_path, "r") as f:
             meta = json.load(f)
-            
+
         for rig in meta.get("rigs", []):
             if rig["pose_index"] == req.pose_index:
                 rig["label"] = req.label
                 break
-                
+
         with open(meta_path, "w") as f:
             json.dump(meta, f)
-            
+
         return {"status": "success", "label": req.label}
     except Exception as e:
         logger.error(f"Failed to set pose label: {e}")
@@ -2443,41 +2614,41 @@ async def extract_limbs(req: ExtractLimbsRequest):
         project_dir = os.path.join("Output_Saves", req.project_id)
         if not os.path.exists(project_dir):
             raise HTTPException(status_code=404, detail="Project not found")
-            
+
         # 1. Load target pose and joints
         # (Assuming we have a way to get joints for a specific pose)
         # For now, we'll look for saved metadata
         metadata_path = os.path.join(project_dir, "metadata.json")
         if not os.path.exists(metadata_path):
              raise HTTPException(status_code=404, detail="Metadata not found")
-             
+
         with open(metadata_path, "r") as f:
             metadata = json.load(f)
-            
+
         target_rig = next((r for r in metadata.get("rigs", []) if r["pose_index"] == req.pose_index), None)
         if not target_rig:
              raise HTTPException(status_code=404, detail="Rig not found for pose")
-             
+
         img_path = resolve_image_path(target_rig["url"])
         img = Image.open(img_path).convert("RGBA")
         animator = AffineMeshAnimator(img, target_rig["joints"])
         # 3. Industry Standard Advanced Segmentation
         logger.info("  Running Advanced Silhouette-Aware Segmentation...")
         limbs = animator.extract_limbs_advanced(overlap_padding=15)
-        
+
         # 3. Borrow limbs if needed
         # We check confidence 'v' of joints in the target rig
         # If back arm is occluded, borrow from source
         source_rig = next((r for r in metadata.get("rigs", []) if r["pose_index"] == req.source_pose_index), None)
-        
+
         if source_rig:
             src_img_path = resolve_image_path(source_rig["url"])
             src_img = Image.open(src_img_path).convert("RGBA")
-            
+
             for limb_name, joint_names in LIMB_HIERARCHY.items():
                 # Check if this limb is "bad" in the target
                 avg_v = sum(target_rig["joints"][j].get("v", 1.0) for j in joint_names if j in target_rig["joints"]) / len(joint_names)
-                
+
                 if avg_v < 0.6: # OCLLUDED! Borrow it
                     logger.info(f"Limb {limb_name} is occluded in pose {req.pose_index}. Borrowing from pose {req.source_pose_index}...")
                     borrowed = borrow_and_warp_limb(src_img, source_rig["joints"], target_rig["joints"], limb_name)
@@ -2488,15 +2659,15 @@ async def extract_limbs(req: ExtractLimbsRequest):
         folder_name = req.label if req.label else f"limbs_pose_{req.pose_index}"
         limb_pack_dir = os.path.join(project_dir, folder_name)
         os.makedirs(limb_pack_dir, exist_ok=True)
-        
+
         urls = {}
         for name, limb_img in limbs.items():
             filename = f"{name}.png"
             limb_img.save(os.path.join(limb_pack_dir, filename))
             urls[name] = f"/output_saves/{req.project_id}/{folder_name}/{filename}"
-            
+
         return {"status": "success", "limb_urls": urls, "folder": folder_name}
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -2519,14 +2690,14 @@ class GenerateAnimationRequest(BaseModel):
 async def generate_animation(req: GenerateAnimationRequest):
     try:
         logger.info(f"Generating {req.anim_type} animation for {req.frame_url}...")
-        
+
         img_path = resolve_image_path(req.frame_url)
         if not os.path.exists(img_path):
             raise HTTPException(status_code=404, detail="Frame not found")
-            
+
         img = Image.open(img_path).convert("RGBA")
         animator = AffineMeshAnimator(img, req.joints)
-        
+
         # Determine if we are doing layered animation
         frames = []
         if req.limb_pack:
@@ -2536,14 +2707,14 @@ async def generate_animation(req: GenerateAnimationRequest):
                 l_path = resolve_image_path(url)
                 if os.path.exists(l_path):
                     limb_images[name] = Image.open(l_path).convert("RGBA")
-            
+
             from animator import HierarchicalAnimator, create_animation_hierarchical
             h_animator = HierarchicalAnimator(limb_images, req.joints)
             frames = create_animation_hierarchical(
-                h_animator, 
-                anim_type=req.anim_type, 
-                stride=req.stride, 
-                bounce=req.bounce, 
+                h_animator,
+                anim_type=req.anim_type,
+                stride=req.stride,
+                bounce=req.bounce,
                 num_frames=req.num_frames,
                 direction="S" # Default to South/Front for now
             )
@@ -2559,25 +2730,25 @@ async def generate_animation(req: GenerateAnimationRequest):
                 frames = create_attack_cycle(animator, reach=req.stride, num_frames=req.num_frames)
             else:
                 frames = [img] * req.num_frames
-            
+
         # Save frames
         urls = []
         project_dir = os.path.join("Output_Saves", req.project_id) if req.project_id else "output"
         os.makedirs(project_dir, exist_ok=True)
-        
+
         anim_id = f"{req.anim_type}_{int(time.time())}"
         anim_subdir = os.path.join(project_dir, "animations", anim_id)
         os.makedirs(anim_subdir, exist_ok=True)
-        
+
         for i, f in enumerate(frames):
             filename = f"frame_{i:03d}.png"
             filepath = os.path.join(anim_subdir, filename)
             f.save(filepath)
-            
+
             # Relative URL
             rel_url = f"/output_saves/{req.project_id}/animations/{anim_id}/{filename}" if req.project_id else f"/output/{filename}"
             urls.append(rel_url)
-            
+
         return {"status": "success", "urls": urls, "anim_id": anim_id}
     except Exception as e:
         logger.error(f"Error generating animation: {e}")
@@ -2593,32 +2764,32 @@ async def build_character_index(req: BuildIndexRequest):
         project_dir = os.path.join("Output_Saves", req.project_id)
         if not os.path.exists(project_dir):
             raise HTTPException(status_code=404, detail="Project not found")
-            
+
         # Scan for animations
         anims_dir = os.path.join(project_dir, "animations")
         if not os.path.exists(anims_dir):
              return {"status": "success", "index": {"id": req.project_id, "animations": {}}}
-             
+
         index = {
             "id": req.project_id,
             "animations": {}
         }
-        
+
         # Each subfolder in animations/ is a sequence
         for anim_id in os.listdir(anims_dir):
             anim_path = os.path.join(anims_dir, anim_id)
             if not os.path.isdir(anim_path): continue
-            
+
             frames = sorted([f for f in os.listdir(anim_path) if f.endswith(".png")])
             index["animations"][anim_id] = {
                 "frames": [f"/output_saves/{req.project_id}/animations/{anim_id}/{f}" for f in frames]
             }
-            
+
         # Save index.json
         index_path = os.path.join(project_dir, "character_index.json")
         with open(index_path, "w") as f:
             json.dump(index, f, indent=2)
-            
+
         return {"status": "success", "index_url": f"/output_saves/{req.project_id}/character_index.json"}
     except Exception as e:
         logger.error(f"Error building character index: {e}")
@@ -2634,7 +2805,7 @@ async def stitch_frames(req: StitchFramesRequest):
     """Stitch individual frames into a final sprite sheet."""
     try:
         logger.info(f"Stitching {len(req.frame_urls)} frames into sprite sheet...")
-        
+
         frames = []
         max_w, max_h = 0, 0
         for url in req.frame_urls:
@@ -2642,7 +2813,7 @@ async def stitch_frames(req: StitchFramesRequest):
             if not os.path.exists(img_path):
                 logger.warning(f"  Frame not found at {img_path}")
                 continue
-                
+
             img = Image.open(img_path).convert("RGBA")
             bbox = img.getbbox()
             if bbox:
@@ -2654,7 +2825,7 @@ async def stitch_frames(req: StitchFramesRequest):
                 frames.append(img)
                 max_w = max(max_w, img.width)
                 max_h = max(max_h, img.height)
-        
+
         if not frames:
             raise HTTPException(status_code=400, detail="No valid frames to stitch")
 
@@ -2663,7 +2834,7 @@ async def stitch_frames(req: StitchFramesRequest):
             x = i * max_w + (max_w - f.width) // 2
             y = (max_h - f.height) // 2
             sheet.paste(f, (x, y), f)
-        
+
         filename = f"spritesheet_{uuid.uuid4()}.png"
         if req.project_id:
             filename = f"{req.project_id}_spritesheet.png"
@@ -2672,10 +2843,10 @@ async def stitch_frames(req: StitchFramesRequest):
             filepath = os.path.join(output_dir, filename)
         else:
             filepath = os.path.join("output", filename)
-            
+
         sheet.save(filepath)
         logger.info(f"Sprite sheet saved: {filepath}")
-        
+
         url_prefix = "/output/" if not req.project_id else f"/output_saves/{req.project_id}/"
         return {"status": "success", "url": f"{url_prefix}{filename}"}
     except Exception as e:
@@ -2698,7 +2869,7 @@ async def correct_pose(req: CorrectPoseRequest):
     """Surgically correct a specific pose on the turnaround sheet using FLUX Fill."""
     try:
         logger.info(f"Correcting pose on sheet {req.sheet_url} for project {req.project_id}")
-        
+
         # Resolve images
         def open_safe_rgb(path):
             img = Image.open(path)
@@ -2714,20 +2885,21 @@ async def correct_pose(req: CorrectPoseRequest):
         project_dir = os.path.join("Output_Saves", req.project_id)
         meta_path = os.path.join(project_dir, "metadata.json")
         is_pivoted = False
+        meta = {}
         if os.path.exists(meta_path):
             with open(meta_path, "r") as f:
                 meta = json.load(f)
                 is_pivoted = meta.get("is_pivoted", False)
-                
+
         original_sheet_path = os.path.join(project_dir, f"{req.project_id}_turnaround_ORIGINAL.png")
         pivoted_sheet_path = os.path.join(project_dir, f"{req.project_id}_turnaround_PIVOTED.png")
-        
+
         # Determine which "Golden Base" to use — this is the ONLY source of truth for dimensions
         golden_base_path = None
         logger.info(f"  Checking Golden Base paths:")
         logger.info(f"    ORIGINAL: {os.path.abspath(original_sheet_path)} (exists: {os.path.exists(original_sheet_path)})")
         logger.info(f"    PIVOTED:  {os.path.abspath(pivoted_sheet_path)} (exists: {os.path.exists(pivoted_sheet_path)})")
-        
+
         # Cascade: try PIVOTED first (if flagged), then ORIGINAL, then fallback
         if is_pivoted and os.path.exists(pivoted_sheet_path):
             golden_base_path = pivoted_sheet_path
@@ -2744,11 +2916,13 @@ async def correct_pose(req: CorrectPoseRequest):
                 logger.warning(f"  No Golden Base found! Falling back to req.sheet_url.")
             else:
                 raise HTTPException(status_code=404, detail=f"No valid sheet found. Checked: {os.path.abspath(original_sheet_path)}")
-            
+
         # Use the Golden Base for BOTH the FLUX Fill input AND the compositing target
         sheet_img = open_safe_rgb(golden_base_path)
+        centered_context_target_index = None
+        target_slice_bounds = None
         current_sheet_img = sheet_img  # They are the SAME image — no size mismatch possible
-        
+
         # Resolve mask
         mask_img = None
         meta_path = os.path.join(project_dir, "metadata.json")
@@ -2760,17 +2934,17 @@ async def correct_pose(req: CorrectPoseRequest):
                     with open(meta_path, "r") as f:
                         meta = json.load(f)
                     segments = meta.get("slice_segments", [])
-                
+
                 # FALLBACK: If segments missing or out of range, auto-detect from the sheet
                 if req.slice_index >= len(segments) or not segments:
                     logger.warning(f"  Slice index {req.slice_index} out of range or no segments. Auto-detecting character islands...")
-                    
+
                     # Detect character islands using column projection (same logic as slicer)
                     gray = np.array(sheet_img.convert("L"))
                     h_img, w_img = gray.shape
                     # For white bg: character pixels are darker than 240
                     col_mask = np.any(gray < 240, axis=0).astype(np.uint8)
-                    
+
                     # Find contiguous runs of non-background columns
                     detected_segments = []
                     in_char = False
@@ -2784,7 +2958,7 @@ async def correct_pose(req: CorrectPoseRequest):
                             in_char = False
                     if in_char:
                         detected_segments.append([start, w_img])
-                    
+
                     # Merge segments that are very close (< 15px gap = same character)
                     merged = []
                     for seg in detected_segments:
@@ -2794,19 +2968,19 @@ async def correct_pose(req: CorrectPoseRequest):
                             merged.append(list(seg))
                     segments = merged
                     logger.info(f"  Auto-detected {len(segments)} character islands: {segments}")
-                    
+
                     # Save them so we don't have to do this again
                     if os.path.exists(meta_path):
                         with open(meta_path, "r") as f:
                             meta = json.load(f)
                         meta["slice_segments"] = segments
                         save_metadata_safe(meta_path, meta)
-                    
+
                     # Final safety: if still out of range, clamp
                     if req.slice_index >= len(segments):
                         req.slice_index = len(segments) // 2
                         logger.warning(f"  Clamped slice_index to {req.slice_index}")
-                    
+
                     # Now use the Smart Hard Walls logic below
                     w, h = sheet_img.size
                     s_curr, e_curr = segments[req.slice_index]
@@ -2825,129 +2999,187 @@ async def correct_pose(req: CorrectPoseRequest):
                     # SMART HARD WALLS: Use midpoints between character islands
                     w, h = sheet_img.size
                     s_curr, e_curr = segments[req.slice_index]
-                    
+
                     # Left boundary: midpoint with previous character or 0
                     if req.slice_index > 0:
                         e_prev = segments[req.slice_index - 1][1]
                         start_x = (e_prev + s_curr) // 2
                     else:
                         start_x = 0
-                        
+
                     # Right boundary: midpoint with next character or edge
                     if req.slice_index < len(segments) - 1:
                         s_next = segments[req.slice_index + 1][0]
                         end_x = (e_curr + s_next) // 2
                     else:
                         end_x = w
-                    
+
                     logger.info(f"  Hard Walls calculated for slice {req.slice_index}: x={start_x}-{end_x} (Island: {s_curr}-{e_curr})")
 
-                # Create rectangular mask for this vertical slice strip
-                mask_img = Image.new("L", sheet_img.size, 0)
-                from PIL import ImageDraw
-                draw = ImageDraw.Draw(mask_img)
-                draw.rectangle([start_x, 0, end_x, sheet_img.height], fill=255)
-                
+                target_slice_bounds = (start_x, end_x)
+                context_img, context_mask = build_centered_pose_context(sheet_img, meta, req.slice_index)
+                if context_mask is not None:
+                    sheet_img = context_img
+                    mask_img = context_mask
+                    centered_context_target_index = req.slice_index
+                    logger.info(f"  Using centered kitbash mask for {POSE_ORDER[req.slice_index]} generation.")
+                else:
+                    # Create rectangular mask for this vertical slice strip
+                    mask_img = Image.new("L", sheet_img.size, 0)
+                    draw = ImageDraw.Draw(mask_img)
+                    draw.rectangle([start_x, 0, end_x, sheet_img.height], fill=255)
+
             except Exception as me:
                 logger.error(f"  Failed to generate surgical mask: {me}")
-        
+
         if mask_img is None:
             # Decode manual mask (Studio mode)
             if not req.mask_image:
                 raise HTTPException(status_code=400, detail="Either mask_image or slice_index must be provided")
             mask_data = base64.b64decode(req.mask_image.split(",")[-1])
             mask_img = Image.open(io.BytesIO(mask_data)).convert("L")
-        
+
         # 2. Get Metadata for style consistency
         anchor_prompt = ""
         if os.path.exists(meta_path):
             with open(meta_path, "r") as f:
                 meta = json.load(f)
                 anchor_prompt = meta.get("prompt", "")
-        
+
         # 3. Prepare Prompt
         style_ref = f", consistent character design, {anchor_prompt}" if anchor_prompt else ""
-        full_prompt = f"{req.target_rotation} view of the character, {req.prompt_override or ''}{style_ref}, flat 2d game asset, high resolution, white background"
-        
+        full_prompt = (
+            f"{req.target_rotation} view of the character, single full-body character only, "
+            f"one pose, same scale and height as the surrounding reference characters, centered in the masked column, "
+            f"no duplicate characters, no small character, no stacked bodies, {req.prompt_override or ''}"
+            f"{style_ref}, flat 2d game asset, high resolution, white background"
+        )
+
         # 4. Load FLUX Fill
         pipe = manager.load_flux_fill()
         urls = []
         for v in range(req.num_variants):
             seed = random.randint(0, 2**32 - 1)
             logger.info(f"  Generating variant {v+1}/{req.num_variants} with seed {seed}")
-            
+
             def do_fill_seeded():
                 return pipe(
                     prompt=full_prompt,
                     image=sheet_img,
                     mask_image=mask_img,
-                    num_inference_steps=50, 
+                    num_inference_steps=50,
                     guidance_scale=4.5,
                     width=sheet_img.width,
                     height=sheet_img.height,
                     generator=torch.Generator(device="cpu").manual_seed(seed)
                 ).images[0]
-                
+
             image = await run_in_threadpool(do_fill_seeded)
-            
+
+            if centered_context_target_index is not None and target_slice_bounds is not None:
+                logger.info("  Extracting generated center pose and compositing it back into the target column...")
+                slot_w = sheet_img.width // len(POSE_ORDER)
+                center_x1 = CENTER_POSE_INDEX * slot_w
+                center_x2 = (CENTER_POSE_INDEX + 1) * slot_w
+                center_crop = image.crop((center_x1, 0, center_x2, image.height))
+                center_no_bg = await run_in_threadpool(
+                    remove,
+                    center_crop,
+                    session=rembg_session
+                )
+
+                if center_no_bg.mode != "RGBA":
+                    center_no_bg = center_no_bg.convert("RGBA")
+                center_no_bg = isolate_primary_sprite(center_no_bg)
+                bbox = center_no_bg.getbbox()
+                if bbox:
+                    sprite = center_no_bg.crop(bbox)
+                else:
+                    sprite = center_no_bg
+
+                if current_sheet_img.width in (1536, 2560) and centered_context_target_index is not None:
+                    target_x1 = int(centered_context_target_index * current_sheet_img.width / len(POSE_ORDER))
+                    target_x2 = int((centered_context_target_index + 1) * current_sheet_img.width / len(POSE_ORDER))
+                else:
+                    target_x1, target_x2 = target_slice_bounds
+                target_w = max(1, target_x2 - target_x1)
+                max_w = max(1, int(target_w * 0.86))
+                max_h = max(1, int(current_sheet_img.height * 0.88))
+                scale = min(max_w / sprite.width, max_h / sprite.height)
+                new_size = (max(1, int(sprite.width * scale)), max(1, int(sprite.height * scale)))
+                sprite = sprite.resize(new_size, Image.Resampling.LANCZOS)
+
+                final_image = current_sheet_img.convert("RGBA")
+                draw = ImageDraw.Draw(final_image)
+                draw.rectangle([target_x1, 0, target_x2, current_sheet_img.height], fill=(255, 255, 255, 255))
+                paste_x = target_x1 + (target_w - sprite.width) // 2
+                paste_y = current_sheet_img.height - sprite.height - max(10, int(current_sheet_img.height * 0.05))
+                final_image.paste(sprite, (paste_x, paste_y), sprite)
+
+                filename = f"corrected_{uuid.uuid4().hex[:8]}.png"
+                filepath = os.path.join(project_dir, filename)
+                final_image.convert("RGB").save(filepath)
+                urls.append(f"/output_saves/{req.project_id}/{filename}")
+                continue
+
             # 5. Clean up the corrected area to prevent background artifacts
             logger.info("  Cleaning background of corrected pose...")
             image_no_bg = await run_in_threadpool(
-                remove, 
-                image, 
+                remove,
+                image,
                 session=rembg_session
             )
-            
+
             # 6. Composite the clean character back onto the CURRENT sheet
             from collections import Counter
             current_arr = np.array(current_sheet_img)
             h_arr, w_arr = current_arr.shape[0], current_arr.shape[1]
             inset = 10
             sample_points = [
-                current_arr[inset, inset], current_arr[inset, w_arr-1-inset], 
+                current_arr[inset, inset], current_arr[inset, w_arr-1-inset],
                 current_arr[h_arr-1-inset, inset], current_arr[h_arr-1-inset, w_arr-1-inset],
                 current_arr[inset, w_arr//2], current_arr[h_arr-1-inset, w_arr//2],
                 current_arr[h_arr//2, inset], current_arr[h_arr//2, w_arr-1-inset]
             ]
             point_tuples = [tuple(p) for p in sample_points]
             avg_bg = Counter(point_tuples).most_common(1)[0][0]
-            
-            if sum(avg_bg) < 300: 
+
+            if sum(avg_bg) < 300:
                 avg_bg = (255, 255, 255)
-                
+
             clean_bg = current_sheet_img.copy()
             wipe_mask = mask_img.point(lambda p: 255 if p > 128 else 0)
-            
+
             # SAFEGUARD: Ensure mask matches the background size
             if wipe_mask.size != current_sheet_img.size:
                 wipe_mask = wipe_mask.resize(current_sheet_img.size, Image.Resampling.NEAREST)
-                
+
             bg_fill = Image.new("RGB", current_sheet_img.size, avg_bg)
             clean_bg.paste(bg_fill, (0, 0), wipe_mask)
-            
+
             if image_no_bg.mode != 'RGBA':
                 image_no_bg = image_no_bg.convert('RGBA')
-                
+
             char_alpha = image_no_bg.getchannel('A')
-            
+
             # SAFEGUARD: Ensure the foreground elements match the background size
             if char_alpha.size != wipe_mask.size:
                 char_alpha = char_alpha.resize(wipe_mask.size, Image.Resampling.NEAREST)
             if image_no_bg.size != current_sheet_img.size:
                 image_no_bg = image_no_bg.resize(current_sheet_img.size, Image.Resampling.LANCZOS)
-                
+
             combined_mask = Image.new("L", current_sheet_img.size, 0)
             combined_mask.paste(char_alpha, (0, 0), wipe_mask)
-            
+
             final_image = clean_bg.copy()
             final_image.paste(image_no_bg, (0, 0), combined_mask)
-            
+
             filename = f"corrected_{uuid.uuid4().hex[:8]}.png"
             filepath = os.path.join(project_dir, filename)
             final_image.save(filepath)
-            
+
             urls.append(f"/output_saves/{req.project_id}/{filename}")
-            
+
         # Update metadata to point to the LAST generated sheet as the current one
         if os.path.exists(meta_path) and urls:
             try:
@@ -2958,13 +3190,13 @@ async def correct_pose(req: CorrectPoseRequest):
                 save_metadata_safe(meta_path, meta)
             except Exception as e:
                 logger.error(f"  Failed to update metadata in correct_pose: {e}")
-                
+
         # 7. Unload model
         del pipe
         if manager.device == "cuda":
             torch.cuda.empty_cache()
             gc.collect()
-            
+
         return {"status": "success", "urls": urls, "url": urls[-1] if urls else None}
     except HTTPException:
         # Re-raise HTTP exceptions so FastAPI handles them correctly (e.g. 400 Bad Request)
@@ -2973,7 +3205,7 @@ async def correct_pose(req: CorrectPoseRequest):
         logger.error(f"Error correcting pose: {e}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
-            
+
 class ExplodeLimbRequest(BaseModel):
     project_id: str
     limb_name: str # e.g. "left arm"
@@ -2985,16 +3217,16 @@ async def generate_isolated_limb(req: ExplodeLimbRequest):
     """Asset Exploder: Generate a brand new isolated limb for a character."""
     try:
         logger.info(f"Exploding limb '{req.limb_name}' for project {req.project_id}")
-        
+
         project_dir = os.path.join("Output_Saves", req.project_id)
         if not os.path.exists(project_dir):
             raise HTTPException(status_code=404, detail="Project not found")
-            
+
         # 1. Resolve Anchor Image
         anchor_url = req.anchor_url
         meta_path = os.path.join(project_dir, "metadata.json")
         anchor_prompt = ""
-        
+
         if os.path.exists(meta_path):
             with open(meta_path, "r") as f:
                 meta = json.load(f)
@@ -3014,13 +3246,13 @@ async def generate_isolated_limb(req: ExplodeLimbRequest):
         anchor_path = resolve_image_path(anchor_url)
         if not os.path.exists(anchor_path):
              raise HTTPException(status_code=404, detail=f"Anchor image not found at {anchor_path}")
-             
+
         anchor_img = Image.open(anchor_path).convert("RGB")
-        
+
         # 2. In-Place Reconstruction Canvas
         # Use Neutral Gray (128,128,128) to prevent background color bleed/washout
         canvas = Image.new("RGB", (1024, 1024), (128, 128, 128))
-        
+
         # Fit character into the center (Zoom in to 950px for max detail density)
         # Handle transparency by compositing onto neutral gray first
         anchor_rgba = Image.open(anchor_path).convert("RGBA")
@@ -3028,28 +3260,28 @@ async def generate_isolated_limb(req: ExplodeLimbRequest):
         scale = min(950 / a_w, 950 / a_h)
         new_w, new_h = int(a_w * scale), int(a_h * scale)
         anchor_scaled = anchor_rgba.resize((new_w, new_h), Image.Resampling.LANCZOS)
-        
+
         offset_x = (1024 - new_w) // 2
         offset_y = (1024 - new_h) // 2
-        
+
         # Composite onto a temporary gray background to avoid sharp edges
         temp_bg = Image.new("RGBA", anchor_scaled.size, (128, 128, 128, 255))
         temp_bg.paste(anchor_scaled, (0, 0), anchor_scaled)
         canvas.paste(temp_bg.convert("RGB"), (offset_x, offset_y))
-        
+
         # 3. Targeted Mask & Surgical Erasure
         mask_data = np.zeros((1024, 1024), dtype=np.uint8)
         canvas_arr = np.array(canvas)
-        
+
         # Find the rig for this anchor to get joint positions
         target_rig = next((r for r in meta.get("rigs", []) if r["url"] in anchor_url or anchor_url in r["url"]), None)
-        
+
         if target_rig:
             # ERASURE: Paint non-target limbs Neutral Gray to prevent context conflict
             for limb_name, joint_list in LIMB_HIERARCHY.items():
                 if limb_name.lower() == req.limb_name.lower():
                     continue # This is our target, don't erase!
-                
+
                 # Draw a thick gray line/polygon over the "other" limb
                 other_points = []
                 for jn in joint_list:
@@ -3058,7 +3290,7 @@ async def generate_isolated_limb(req: ExplodeLimbRequest):
                         px = int(j["x"] * new_w) + offset_x
                         py = int(j["y"] * new_h) + offset_y
                         other_points.append([px, py])
-                
+
                 if len(other_points) >= 2:
                     pts = np.array(other_points, np.int32)
                     # Use a thick line to ensure the limb is fully "deleted" from the context
@@ -3068,10 +3300,10 @@ async def generate_isolated_limb(req: ExplodeLimbRequest):
                     center = tuple(other_points[0])
                     # Draw a large circle to cover head/hair or hands
                     cv2.circle(canvas_arr, center, 85, (128, 128, 128), -1)
-            
+
             # Update canvas with erased parts
             canvas = Image.fromarray(canvas_arr)
-            
+
             # Define joint-based points for automatic fallback
             joint_names = LIMB_HIERARCHY.get(req.limb_name, [])
             points = []
@@ -3111,12 +3343,12 @@ async def generate_isolated_limb(req: ExplodeLimbRequest):
                 mask_data[256:768, 256:768] = 255
         else:
             mask_data[256:768, 256:768] = 255
-            
+
         mask_img = Image.fromarray(mask_data)
-        
+
         # 4. Refined Prompt (Strict Isolation & Directional Accuracy)
         style_ref = f"matching {anchor_prompt}" if anchor_prompt else "high quality character"
-        
+
         isolation = ""
         if "torso" in req.limb_name.lower():
             isolation = ", professional game asset, isolated character body, solid opaque skin and clothing, clean 2D sprite textures, no limbs, no face, no eyes, detached torso only, clean background"
@@ -3124,34 +3356,34 @@ async def generate_isolated_limb(req: ExplodeLimbRequest):
             isolation = ", professional game asset, isolated character limb, solid opaque textures, clean background, detached part"
 
         full_prompt = f"a professional game asset of a {req.limb_name}{isolation}, {style_ref}, vibrant bold colors, solid character textures, high contrast, sharp focus, masterpiece, high fidelity, neutral grey background"
-        
+
         # 5. Run FLUX Fill
         pipe = manager.load_flux_fill()
-        
+
         def do_explode():
             return pipe(
                 prompt=full_prompt,
-                image=canvas, 
+                image=canvas,
                 mask_image=mask_img,
-                num_inference_steps=50, 
+                num_inference_steps=50,
                 guidance_scale=5.0, # Higher guidance for more solid character colors
                 width=1024,
                 height=1024,
             ).images[0]
-            
+
         result = await run_in_threadpool(do_explode)
-        
+
         # 6. Surgical Extraction (Use the mask as Alpha)
         # Instead of AI background removal (rembg), which can be too aggressive,
         # we use the user's own mask to define the transparency.
-        
+
         # Convert mask_img to Alpha
         mask_alpha = mask_img.convert("L")
-        
+
         # Composite: Result pixels where mask is white, transparent elsewhere
         final_limb = Image.new("RGBA", (1024, 1024), (0, 0, 0, 0))
         final_limb.paste(result.convert("RGBA"), (0, 0), mask_alpha)
-        
+
         # Crop to the mask area
         if target_rig and len(points) >= 2:
             pts = np.array(points, np.int32)
@@ -3160,14 +3392,14 @@ async def generate_isolated_limb(req: ExplodeLimbRequest):
             crop_box = (max(0, x-pad), max(0, y-pad), min(1024, x+w+pad), min(1024, y+h+pad))
         else:
             crop_box = (128, 128, 896, 896)
-            
+
         final_limb = final_limb.crop(crop_box)
-        
+
         # Auto-crop to content
         bbox = final_limb.getbbox()
         if bbox:
             final_limb = final_limb.crop(bbox)
-        
+
         # Save
         clean_name = req.limb_name.replace(" ", "_").lower()
         filename = f"exploded_{clean_name}_{uuid.uuid4().hex[:4]}.png"
@@ -3175,7 +3407,7 @@ async def generate_isolated_limb(req: ExplodeLimbRequest):
         os.makedirs(save_dir, exist_ok=True)
         filepath = os.path.join(save_dir, filename)
         final_limb.save(filepath)
-        
+
         return {"status": "success", "url": f"/output_saves/{req.project_id}/exploded_limbs/{filename}", "limb_name": req.limb_name}
     except HTTPException:
         raise
@@ -3190,42 +3422,42 @@ async def complete_limb_socket(req: CompleteSocketRequest):
     """Industry Standard: Rounds out the joint area using Torso as a style anchor."""
     try:
         logger.info(f"Completing socket for {req.limb_name} with Torso context")
-        
+
         project_dir = os.path.join("Output_Saves", req.project_id)
         limb_path = resolve_image_path(req.limb_url)
         torso_path = resolve_image_path(req.torso_url)
-        
+
         if not os.path.exists(limb_path) or not os.path.exists(torso_path):
             raise HTTPException(status_code=404, detail="Required assets (limb or torso) missing")
-            
+
         # 1. Load Assets
         limb_img = Image.open(limb_path).convert("RGBA")
         torso_img = Image.open(torso_path).convert("RGBA")
-        
+
         # 2. Create 1024x1024 Contextual Canvas
         canvas_size = 1024
         canvas = Image.new("RGB", (canvas_size, canvas_size), (128, 128, 128))
-        
+
         # Position them relative to each other
         t_w, t_h = torso_img.size
         l_w, l_h = limb_img.size
         t_pos = (canvas_size // 2 - t_w // 2, canvas_size // 2 - t_h // 2)
         canvas.paste(torso_img, t_pos, torso_img)
-        
+
         # Paste Limb touching the torso
         l_pos = (t_pos[0] + t_w // 2 - l_w // 2, t_pos[1] + t_h // 2 - l_h // 2)
         canvas.paste(limb_img, l_pos, limb_img)
-        
+
         # 3. Targeted Mask (The "Socket")
         limb_alpha = np.array(limb_img)[:, :, 3]
         kernel = np.ones((150, 150), np.uint8)
         dilated = cv2.dilate(limb_alpha, kernel, iterations=1)
         socket_mask_local = (dilated > 0) & (limb_alpha == 0)
-        
+
         mask_full = Image.new("L", (canvas_size, canvas_size), 0)
         mask_local_img = Image.fromarray((socket_mask_local * 255).astype(np.uint8))
         mask_full.paste(mask_local_img, l_pos)
-        
+
         # 4. Refined Prompt
         meta_path = os.path.join(project_dir, "metadata.json")
         style = "character sprite"
@@ -3234,10 +3466,10 @@ async def complete_limb_socket(req: CompleteSocketRequest):
                 style = json.load(f).get("prompt", "character sprite")[:100]
 
         full_prompt = f"joint socket for {req.limb_name}, matching {style}, studio lighting, soft shadows, neutral studio background, game asset, high fidelity, 2d digital painting"
-        
+
         # 5. Run FLUX Fill
         pipe = manager.load_flux_fill()
-        
+
         def do_fill():
             return pipe(
                 prompt=full_prompt,
@@ -3248,21 +3480,21 @@ async def complete_limb_socket(req: CompleteSocketRequest):
                 width=1024,
                 height=1024,
             ).images[0]
-            
+
         result = await run_in_threadpool(do_fill)
-        
+
         # 6. Extraction
         crop_box = (l_pos[0] - 20, l_pos[1] - 20, l_pos[0] + l_w + 20, l_pos[1] + l_h + 20)
         final_limb_patch = result.crop(crop_box)
         final_no_bg = remove(final_limb_patch, session=rembg_session)
-        
+
         filename = f"fixed_{req.limb_name}_{uuid.uuid4().hex[:4]}.png"
         save_path = os.path.join(project_dir, "exploded_limbs", filename)
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         final_no_bg.save(save_path)
-        
+
         return {"status": "success", "url": f"/output_saves/{req.project_id}/exploded_limbs/{filename}"}
-        
+
     except Exception as e:
         logger.error(f"Socket completion failed: {e}")
         logger.error(traceback.format_exc())
@@ -3277,21 +3509,21 @@ async def generate_directional_poses(req: DirectionalPoseRequest):
     """Industry Standard: Interpolates 45-degree angles from cardinal views."""
     try:
         logger.info(f"Interpolating {req.target_direction} pose for project {req.project_id}")
-        
+
         project_dir = os.path.join("Output_Saves", req.project_id)
         meta_path = os.path.join(project_dir, "metadata.json")
         if not os.path.exists(meta_path):
              raise HTTPException(status_code=404, detail="Project metadata not found")
-             
+
         with open(meta_path, "r") as f:
             meta = json.load(f)
-            
+
         # cardinal views: Front=0, Side=2, Back=4
         rigs = meta.get("rigs", [])
         front = next((r["url"] for r in rigs if r["pose_index"] == 0), None)
         side = next((r["url"] for r in rigs if r["pose_index"] == 2), None)
         back = next((r["url"] for r in rigs if r["pose_index"] == 4), None)
-        
+
         # Determine references based on target
         ref1_url, ref2_url = None, None
         if req.target_direction == "SE":
@@ -3302,25 +3534,25 @@ async def generate_directional_poses(req: DirectionalPoseRequest):
             ref1_url, ref2_url = back, side
         elif req.target_direction == "NW":
             ref1_url, ref2_url = back, side
-            
+
         if not ref1_url or not ref2_url:
              raise HTTPException(status_code=400, detail="Missing cardinal views (Front/Side/Back) required for interpolation")
 
         # Load and resize refs
         ref1 = Image.open(resolve_image_path(ref1_url)).convert("RGB").resize((341, 512))
         ref2 = Image.open(resolve_image_path(ref2_url)).convert("RGB").resize((341, 512))
-        
+
         # Create triple-width canvas (1024px width total)
         # Layout: [Ref 1] [Ref 2] [Empty Space for Target]
         canvas = Image.new("RGB", (1024, 512), (255, 255, 255))
         canvas.paste(ref1, (0, 0))
         canvas.paste(ref2, (341, 0))
-        
+
         # Mask for the target area (rightmost 342px)
         mask_data = np.zeros((512, 1024), dtype=np.uint8)
         mask_data[:, 682:] = 255
         mask_img = Image.fromarray(mask_data)
-        
+
         # 3. Prompt
         dir_name = {
             "SE": "front-right three-quarter",
@@ -3328,12 +3560,12 @@ async def generate_directional_poses(req: DirectionalPoseRequest):
             "NE": "back-right three-quarter",
             "NW": "back-left three-quarter"
         }[req.target_direction]
-        
+
         full_prompt = f"a {dir_name} view of the character, matching character design, {meta.get('prompt', '')}, flat 2d game asset, high resolution, white background"
-        
+
         # 4. Run FLUX Fill
         pipe = manager.load_flux_fill()
-        
+
         def do_fill():
             return pipe(
                 prompt=full_prompt,
@@ -3344,28 +3576,28 @@ async def generate_directional_poses(req: DirectionalPoseRequest):
                 width=1024,
                 height=512,
             ).images[0]
-            
+
         result = await run_in_threadpool(do_fill)
-        
+
         # Crop target
         target_img = result.crop((682, 0, 1024, 512))
-        
+
         # Background removal
         target_no_bg = remove(target_img, session=rembg_session)
-        
+
         # Save
         filename = f"pose_{req.target_direction}_{uuid.uuid4().hex[:4]}.png"
         filepath = os.path.join(project_dir, filename)
         target_no_bg.save(filepath)
-        
+
         # Update metadata
         if "directional_poses" not in meta: meta["directional_poses"] = {}
         meta["directional_poses"][req.target_direction] = f"/output_saves/{req.project_id}/{filename}"
         with open(meta_path, "w") as f:
             json.dump(meta, f)
-            
+
         return {"status": "success", "url": meta["directional_poses"][req.target_direction]}
-        
+
     except Exception as e:
         logger.error(f"Error generating directional pose: {e}")
         logger.error(traceback.format_exc())
@@ -3382,13 +3614,135 @@ async def save_pose_selections(project_id: str, req: SavePoseSelectionsRequest):
     meta_path = os.path.join(project_dir, "metadata.json")
     if not os.path.exists(meta_path):
         raise HTTPException(status_code=404, detail="Project not found")
-        
+
     with open(meta_path, "r") as f:
         meta = json.load(f)
     meta["pose_selections"] = req.selections
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
     return {"status": "success"}
+
+class AutoLabelSlice(BaseModel):
+    card_id: str
+    url: str
+
+class AutoLabelRequest(BaseModel):
+    project_id: str
+    slices: List[AutoLabelSlice]
+
+def normalize_pose_label(raw_text: str) -> str:
+    text = (raw_text or "").strip().lower()
+    text = text.replace("_", " ").replace("-", " ")
+
+    if "unusable" in text or "unknown" in text or "bad" in text or "not usable" in text:
+        return "Unselected"
+    if "3/4 back" in text or "three quarter back" in text or "three-quarter back" in text or "quarter back" in text:
+        return "3/4 Back"
+    if "3/4 front" in text or "three quarter front" in text or "three-quarter front" in text or "quarter front" in text:
+        return "3/4 Front"
+    if "side" in text or "profile" in text:
+        return "Side"
+    if "back" in text or "rear" in text:
+        return "Back"
+    if "front" in text:
+        return "Front"
+    return "Unselected"
+
+def classify_pose_with_gemma(gemma_bundle: dict, image: Image.Image) -> tuple[str, str]:
+    processor = gemma_bundle["processor"]
+    model = gemma_bundle["model"]
+    prompt = (
+        "Classify this single character sprite pose. Reply with exactly one label only: "
+        "Front, 3/4 Front, Side, 3/4 Back, Back, or Unusable. "
+        "Use Unusable for cropped, split, partial, duplicated, malformed, or unclear sprites."
+    )
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image.convert("RGB")},
+                {"type": "text", "text": prompt},
+            ],
+        }
+    ]
+
+    inputs = processor.apply_chat_template(
+        messages,
+        add_generation_prompt=True,
+        tokenize=True,
+        return_dict=True,
+        return_tensors="pt"
+    )
+    device = getattr(model, "device", manager.device)
+    inputs = inputs.to(device)
+
+    with torch.no_grad():
+        generated = model.generate(**inputs, max_new_tokens=12, do_sample=False)
+
+    input_len = inputs["input_ids"].shape[-1]
+    generated_tokens = generated[0][input_len:]
+    raw = processor.decode(generated_tokens, skip_special_tokens=True).strip()
+    return normalize_pose_label(raw), raw
+
+@app.post("/project/{project_id}/auto-label-gemma4")
+async def auto_label_with_gemma4(project_id: str, req: AutoLabelRequest):
+    project_dir = os.path.join("Output_Saves", project_id)
+    meta_path = os.path.join(project_dir, "metadata.json")
+    if not os.path.exists(meta_path):
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        gemma = manager.load_gemma4_e4b()
+        decisions = []
+        selections = {}
+        used_labels = set()
+
+        for item in req.slices:
+            img_path = resolve_image_path(item.url)
+            if not os.path.exists(img_path):
+                decisions.append({
+                    "card_id": item.card_id,
+                    "url": item.url,
+                    "label": "Unselected",
+                    "raw": "missing file",
+                    "applied": False
+                })
+                continue
+
+            image = Image.open(img_path).convert("RGBA")
+            label, raw = await run_in_threadpool(classify_pose_with_gemma, gemma, image)
+            applied = False
+            applied_label = label
+            if label != "Unselected" and label not in used_labels:
+                selections[item.card_id] = {"label": label, "url": item.url}
+                used_labels.add(label)
+                applied = True
+            elif label != "Unselected":
+                applied_label = "Unselected"
+                raw = f"{raw} (duplicate {label}; left unselected)"
+
+            decisions.append({
+                "card_id": item.card_id,
+                "url": item.url,
+                "label": applied_label,
+                "raw": raw,
+                "applied": applied
+            })
+
+        with open(meta_path, "r") as f:
+            meta = json.load(f)
+        meta["pose_selections"] = selections
+        meta["gemma4_auto_label_decisions"] = decisions
+        meta["updated_at"] = time.time()
+        save_metadata_safe(meta_path, meta)
+
+        return {"status": "success", "selections": selections, "decisions": decisions}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error auto-labeling with Gemma 4: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
 
 class CompoundAndCleanRequest(BaseModel):
     project_id: str
@@ -3402,37 +3756,37 @@ async def compound_and_clean(req: CompoundAndCleanRequest):
     project_dir = os.path.join("Output_Saves", project_id)
     if not os.path.exists(project_dir):
          raise HTTPException(status_code=404, detail="Project not found")
-    
+
     unused_dir = os.path.join(project_dir, "unused")
     os.makedirs(unused_dir, exist_ok=True)
-    
+
     slices_dir = os.path.join(project_dir, "slices")
-    
+
     try:
         # Load the 5 images
         pose_order = ["Front", "3/4 Front", "Side", "3/4 Back", "Back"]
         images = []
         max_h = 0
         w_total = 0
-        
+
         kept_basenames = []
-        
+
         for pose in pose_order:
             url = req.selected_slices.get(pose)
             if not url:
                 raise HTTPException(status_code=400, detail=f"Missing {pose} slice")
-            
+
             img_path = resolve_image_path(url)
             if not os.path.exists(img_path):
                 raise HTTPException(status_code=404, detail=f"Slice not found at {img_path}")
-            
+
             kept_basenames.append(os.path.basename(img_path))
-            
+
             img = Image.open(img_path).convert("RGBA")
             images.append(img)
             max_h = max(max_h, img.height)
             w_total += img.width
-            
+
         # Stitch them. Align to bottom.
         sheet = Image.new("RGBA", (w_total, max_h), (0, 0, 0, 0))
         current_x = 0
@@ -3440,15 +3794,15 @@ async def compound_and_clean(req: CompoundAndCleanRequest):
             y_offset = max_h - img.height
             sheet.paste(img, (current_x, y_offset), img)
             current_x += img.width
-            
+
         compounded_filename = f"{project_id}_compounded.png"
         compounded_path = os.path.join(project_dir, compounded_filename)
-        
+
         # Paste over white background for the turnaround sheet (for Unification pass later)
         bg = Image.new("RGB", sheet.size, (255, 255, 255))
         bg.paste(sheet, (0, 0), sheet)
         bg.save(compounded_path)
-        
+
         # Clean: move unused slices
         if os.path.exists(slices_dir):
             for fname in os.listdir(slices_dir):
@@ -3456,34 +3810,34 @@ async def compound_and_clean(req: CompoundAndCleanRequest):
                     src = os.path.join(slices_dir, fname)
                     dst = os.path.join(unused_dir, fname)
                     shutil.move(src, dst)
-                    
+
         # Clean: move extra turnaround sheets
         kept_sheets = [f"{project_id}_turnaround.png", f"{project_id}_turnaround_ORIGINAL.png", compounded_filename]
-        
+
         for fname in os.listdir(project_dir):
             if fname.endswith(".png") and "turnaround" in fname and fname not in kept_sheets:
                 src = os.path.join(project_dir, fname)
                 dst = os.path.join(unused_dir, fname)
                 shutil.move(src, dst)
-                
+
         # Update metadata
         meta_path = os.path.join(project_dir, "metadata.json")
         if os.path.exists(meta_path):
             with open(meta_path, "r") as f:
                 meta = json.load(f)
-            
+
             new_versions = []
             for pose in pose_order:
                 url = req.selected_slices.get(pose)
                 new_versions.append([url])
-                
+
             meta["all_slice_versions"] = new_versions
             meta["compounded_url"] = f"/output_saves/{project_id}/{compounded_filename}"
             meta["is_compounded"] = True
-            
+
             with open(meta_path, "w") as f:
                 json.dump(meta, f, indent=2)
-                
+
         return {"status": "success", "compounded_url": f"/output_saves/{project_id}/{compounded_filename}"}
     except HTTPException:
         raise

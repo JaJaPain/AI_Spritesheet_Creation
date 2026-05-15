@@ -40,7 +40,9 @@ const SurgicalStudio = ({
   showGuides,
   setShowGuides,
   guidePos,
-  setGuidePos
+  setGuidePos,
+  whiteBg,
+  setWhiteBg
 }) => {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
@@ -530,6 +532,15 @@ const SurgicalStudio = ({
             <Move size={18} />
           </button>
 
+          <button 
+            className={`btn btn-outline ${whiteBg ? 'active' : ''}`} 
+            onClick={() => setWhiteBg(!whiteBg)} 
+            style={{ borderColor: whiteBg ? '#ffffff' : 'var(--border)', color: whiteBg ? '#ffffff' : 'var(--text-dim)', minWidth: 'auto' }}
+            title="Toggle White Background"
+          >
+            <Square size={18} fill={whiteBg ? '#ffffff' : 'none'} />
+          </button>
+
           <button className="btn btn-outline" onClick={handleDehalo} disabled={isLoading || isProcessing} style={{ borderColor: 'var(--primary)', color: 'var(--primary)' }}>
             {isProcessing ? <div className="loading-spinner" style={{ width: 14, height: 14 }}></div> : <Sparkles size={18} />}
             De-Halo (2px)
@@ -571,9 +582,10 @@ const SurgicalStudio = ({
         }}>
           <div className="canvas-container" style={{ opacity: isLoading ? 0 : 1, position: 'relative' }}>
             <canvas ref={canvasRef} style={{ 
-              background: 'repeating-conic-gradient(#1e293b 0% 25%, #0f172a 0% 50%) 50% / 20px 20px',
+              background: whiteBg ? '#ffffff' : 'repeating-conic-gradient(#1e293b 0% 25%, #0f172a 0% 50%) 50% / 20px 20px',
               boxShadow: '0 0 100px rgba(0,0,0,0.8)',
-              imageRendering: 'pixelated'
+              imageRendering: 'pixelated',
+              transition: 'background 0.2s ease'
             }} />
 
             {showGuides && (
@@ -818,6 +830,7 @@ function App() {
   const [bulkProgress, setBulkProgress] = useState({ current: 0, total: 0 });
   const [forceRerun, setForceRerun] = useState(false);
   const [imageSize, setImageSize] = useState({ w: 512, h: 512 }); // Natural size of frames
+  const [whiteBg, setWhiteBg] = useState(false); // Toggleable white background for contrast
 
   const fileInputRef = useRef(null);
   const saveTimeoutRef = useRef(null);
@@ -1076,6 +1089,7 @@ function App() {
       const res = await axios.post(`${API_BASE}/remove-bg`, formData);
       const busterUrl = `${res.data.processed_url}?t=${Date.now()}`;
       setBgRemovedFrames(prev => ({
+        ...prev,
         [frameName]: busterUrl
       }));
     } catch (err) {
@@ -1222,6 +1236,8 @@ function App() {
             setShowGuides={setShowGuides}
             guidePos={guidePos}
             setGuidePos={setGuidePos}
+            whiteBg={whiteBg}
+            setWhiteBg={setWhiteBg}
           />
         )}
       </AnimatePresence>
@@ -1287,7 +1303,7 @@ function App() {
         <div className="workspace" style={{ gridTemplateColumns: showPreview ? '1fr 350px' : '1fr' }}>
           <div className="main-content">
             {showPreview && (
-              <div className="glass-card preview-window" style={{ position: 'relative', marginBottom: '2rem' }}>
+              <div className="glass-card preview-window" style={{ position: 'relative', marginBottom: '2rem', background: whiteBg ? '#ffffff' : undefined, transition: 'background 0.2s ease' }}>
                 {/* Frame HUD Overlay */}
                 {currentPreviewFrame && (
                   <div 
@@ -1538,6 +1554,17 @@ function App() {
                     Reset Guide Position
                   </button>
                 )}
+                <div className="toggle-container" style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginTop: '1rem' }}>
+                  <input 
+                    type="checkbox" 
+                    id="whiteBg" 
+                    checked={whiteBg} 
+                    onChange={(e) => setWhiteBg(e.target.checked)}
+                  />
+                  <label htmlFor="whiteBg" style={{ textTransform: 'none', cursor: 'pointer' }}>
+                    White Background
+                  </label>
+                </div>
               </div>
             </div>
 
@@ -1654,16 +1681,30 @@ function App() {
                   style={{ marginTop: '1.5rem', textAlign: 'center' }}
                 >
                   <p style={{ fontSize: '0.8rem', marginBottom: '0.5rem' }}>Ready to Download!</p>
-                  <a 
-                    href={spritesheetUrl} 
-                    target="_blank" 
-                    rel="noreferrer" 
+                  <button 
                     className="btn btn-outline"
                     style={{ width: '100%', borderColor: 'var(--success)', color: 'var(--success)' }}
-                    download
+                    onClick={async () => {
+                      try {
+                        const response = await fetch(spritesheetUrl);
+                        const blob = await response.blob();
+                        const blobUrl = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = blobUrl;
+                        a.download = `spritesheet_${projectId || 'export'}.png`;
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        URL.revokeObjectURL(blobUrl);
+                      } catch (err) {
+                        console.error('Download failed:', err);
+                        // Fallback: open in new tab
+                        window.open(spritesheetUrl, '_blank');
+                      }
+                    }}
                   >
                     <Download size={18} /> Download Result
-                  </a>
+                  </button>
                 </motion.div>
               )}
             </div>

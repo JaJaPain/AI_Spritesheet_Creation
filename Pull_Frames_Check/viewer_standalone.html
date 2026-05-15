@@ -178,6 +178,11 @@
             <input type="range" id="col-input" min="1" max="16" value="8">
         </div>
 
+        <div class="control-group">
+            <label>Grid Rows: <span id="row-val">auto</span></label>
+            <input type="range" id="row-input" min="1" max="20" value="1">
+        </div>
+
         <div class="stats" id="stats">
             Awaiting 8-column spritesheet...
         </div>
@@ -191,9 +196,11 @@
 
     <script>
         let spriteUrl = null;
+        let imgRef = null; // Keep a reference to the loaded image
         let fps = 12;
         let columns = 8;
         let rows = 1;
+        let userSetRows = false; // Track if user manually set rows
         let frameW = 0;
         let frameH = 0;
         let totalFrames = 0;
@@ -204,6 +211,7 @@
         const fileInput = document.getElementById('file-input');
         const fpsInput = document.getElementById('fps-input');
         const colInput = document.getElementById('col-input');
+        const rowInput = document.getElementById('row-input');
         const grid = document.getElementById('grid');
         const stats = document.getElementById('stats');
 
@@ -223,6 +231,8 @@
                 const img = new Image();
                 img.onload = () => {
                     spriteUrl = event.target.result;
+                    imgRef = img;
+                    userSetRows = false; // Reset on new image load
                     processImage(img);
                 };
                 img.src = event.target.result;
@@ -230,11 +240,55 @@
             reader.readAsDataURL(file);
         });
 
+        function autoDetectRows(img) {
+            // Calculate cell width from columns
+            const cellW = img.width / columns;
+            
+            // Strategy: Try to find the row count that produces
+            // the best integer cell height from the image dimensions.
+            // Priority: exact divisors that give reasonable cell sizes.
+            let bestRows = 1;
+            let bestScore = Infinity;
+            
+            for (let r = 1; r <= 30; r++) {
+                const testH = img.height / r;
+                // Check if it divides evenly
+                const remainder = img.height % r;
+                if (remainder !== 0) continue;
+                
+                // Score based on how close the aspect ratio is to something reasonable
+                // Prefer cells that are roughly similar proportions to cellW
+                const aspectRatio = testH / cellW;
+                // Most sprite frames have aspect ratios between 0.3 and 3.0
+                if (aspectRatio < 0.1 || aspectRatio > 5.0) continue;
+                
+                // Prefer row counts that produce a reasonable total frame count
+                const totalF = columns * r;
+                if (totalF < 1) continue;
+                
+                // Score: prefer aspect ratios closer to 1 (square-ish), 
+                // but accept wider range
+                const score = Math.abs(Math.log(aspectRatio));
+                if (score < bestScore) {
+                    bestScore = score;
+                    bestRows = r;
+                }
+            }
+            
+            return bestRows;
+        }
+
         async function processImage(img) {
             frameW = img.width / columns;
-            // Use width as height for cells (standard for this project)
-            frameH = frameW; 
-            rows = Math.floor(img.height / frameH);
+            
+            // Auto-detect or use user-set rows
+            if (!userSetRows) {
+                rows = autoDetectRows(img);
+                rowInput.value = rows;
+                document.getElementById('row-val').textContent = rows;
+            }
+            
+            frameH = img.height / rows;
             totalFrames = columns * rows;
             
             // Detect non-empty frames
@@ -276,10 +330,49 @@
         colInput.addEventListener('input', (e) => {
             columns = parseInt(e.target.value);
             document.getElementById('col-val').textContent = columns;
-            if (spriteUrl) {
-                const img = new Image();
-                img.onload = () => processImage(img);
-                img.src = spriteUrl;
+            userSetRows = false; // Re-auto-detect rows when columns change
+            if (spriteUrl && imgRef) {
+                processImage(imgRef);
+            }
+        });
+
+        rowInput.addEventListener('input', (e) => {
+            rows = parseInt(e.target.value);
+            document.getElementById('row-val').textContent = rows;
+            userSetRows = true; // User explicitly set rows
+            if (spriteUrl && imgRef) {
+                frameW = imgRef.width / columns;
+                frameH = imgRef.height / rows;
+                totalFrames = columns * rows;
+                
+                // Re-scan for valid frames
+                validFrames = [];
+                const canvas = document.createElement('canvas');
+                canvas.width = frameW;
+                canvas.height = frameH;
+                const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+                for (let i = 0; i < totalFrames; i++) {
+                    const r = Math.floor(i / columns);
+                    const c = i % columns;
+                    ctx.clearRect(0, 0, frameW, frameH);
+                    ctx.drawImage(imgRef, c * frameW, r * frameH, frameW, frameH, 0, 0, frameW, frameH);
+                    
+                    const data = ctx.getImageData(0, 0, frameW, frameH).data;
+                    let hasContent = false;
+                    for (let j = 3; j < data.length; j += 4) {
+                        if (data[j] > 0) {
+                            hasContent = true;
+                            break;
+                        }
+                    }
+                    if (hasContent) validFrames.push(i);
+                }
+                if (validFrames.length === 0) validFrames = [0];
+                currentValidIdx = 0;
+                
+                updateGrid();
+                updateStats(imgRef.width, imgRef.height);
             }
         });
 

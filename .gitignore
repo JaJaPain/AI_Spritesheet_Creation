@@ -12,12 +12,30 @@ build/
 *.pth
 *.gguf
 *.ckpt
+*.bin
+*.onnx
+*.pt
+*.h5
+*.msgpack
+models/
+backend/models/
+backend/hf_cache/
+backend/.cache/
+.cache/
+huggingface/
+gemma*/
+models/gemma*/
+backend/models/gemma*/
+backend/hf_cache/*gemma*/
+backend/.cache/*gemma*/
 VideoCreation/ComfyUI_Backend/models/
 VideoForge_Rapid/temp_uploads/
 VideoForge_Rapid/outputs/
 VideoCreation/temp_uploads/
 VideoCreation/outputs/
 VideoCreation/scratch/
+output/
+**/outputs/
 
 # Local Environment
 .env

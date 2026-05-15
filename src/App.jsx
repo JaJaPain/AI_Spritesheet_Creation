@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { Sparkles, Wand2, Play, Download, Settings, Image as ImageIcon, Loader2, ArrowLeft, RefreshCw, Save, Upload, X, Check, FolderOpen, HelpCircle, Trash2, ChevronLeft, ChevronRight, Video, Zap, Eraser, Droplet, Minus, Plus, RotateCcw } from 'lucide-react'
+import { Sparkles, Wand2, Play, Download, Settings, Image as ImageIcon, Loader2, ArrowLeft, RefreshCw, Save, Upload, X, Check, FolderOpen, HelpCircle, Trash2, ChevronLeft, ChevronRight, Video, Zap, Eraser, Droplet, Minus, Plus, RotateCcw, FileJson, Copy, ListPlus } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 
 
@@ -202,8 +202,8 @@ function SliceCleanupEditor({ imageUrl, onSave, onCancel, apiBase }) {
       onContextMenu={(e) => e.preventDefault()}
     >
       {/* Header Toolbar */}
-      <header style={{ 
-        padding: '0.8rem 2rem', borderBottom: '1px solid rgba(255,255,255,0.1)', 
+      <header style={{
+        padding: '0.8rem 2rem', borderBottom: '1px solid rgba(255,255,255,0.1)',
         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
         background: 'rgba(15,15,25,0.95)', backdropFilter: 'blur(12px)'
       }}>
@@ -267,7 +267,7 @@ function SliceCleanupEditor({ imageUrl, onSave, onCancel, apiBase }) {
           transition: isPanning ? 'none' : 'transform 0.1s ease-out',
           position: 'relative'
         }}>
-          <canvas ref={canvasRef} style={{ 
+          <canvas ref={canvasRef} style={{
             background: 'repeating-conic-gradient(#1e293b 0% 25%, #0f172a 0% 50%) 50% / 20px 20px',
             boxShadow: '0 0 80px rgba(0,0,0,0.8)',
             imageRendering: 'pixelated',
@@ -354,7 +354,7 @@ function LimbMasker({ imageUrl, onSave, onCancel, title, initialMask }) {
     const maskCanvas = maskCanvasRef.current;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     const mctx = maskCanvas.getContext('2d', { willReadFrequently: true });
-    
+
     const img = new Image();
     img.crossOrigin = "anonymous";
     img.src = imageUrl;
@@ -363,12 +363,12 @@ function LimbMasker({ imageUrl, onSave, onCancel, title, initialMask }) {
       canvas.height = img.height;
       maskCanvas.width = img.width;
       maskCanvas.height = img.height;
-      
+
       ctx.drawImage(img, 0, 0);
       setBaseImage(img);
-      
+
       mctx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
-      
+
       if (initialMask) {
         const maskImg = new Image();
         maskImg.src = initialMask;
@@ -383,13 +383,13 @@ function LimbMasker({ imageUrl, onSave, onCancel, title, initialMask }) {
           tctx.globalCompositeOperation = 'source-in';
           tctx.fillStyle = '#ff0000';
           tctx.fillRect(0, 0, tintCanvas.width, tintCanvas.height);
-          
+
           ctx.clearRect(0, 0, img.width, img.height);
           ctx.drawImage(img, 0, 0);
           ctx.globalAlpha = 0.5;
           ctx.drawImage(tintCanvas, 0, 0);
           ctx.globalAlpha = 1.0;
-          
+
           saveHistory();
         };
       } else {
@@ -409,7 +409,7 @@ function LimbMasker({ imageUrl, onSave, onCancel, title, initialMask }) {
     if (history.length <= 1) return;
     const newHistory = history.slice(0, -1);
     const lastState = newHistory[newHistory.length - 1];
-    
+
     const img = new Image();
     img.src = lastState;
     img.onload = () => {
@@ -484,20 +484,20 @@ function LimbMasker({ imageUrl, onSave, onCancel, title, initialMask }) {
     const canvas = canvasRef.current;
     const ctx = canvas.getContext('2d');
     const maskCanvas = maskCanvasRef.current;
-    
+
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(baseImage, 0, 0);
-    
+
     const tintCanvas = document.createElement('canvas');
     tintCanvas.width = canvas.width;
     tintCanvas.height = canvas.height;
     const tctx = tintCanvas.getContext('2d');
-    
+
     tctx.drawImage(maskCanvas, 0, 0);
     tctx.globalCompositeOperation = 'source-in';
     tctx.fillStyle = '#ff0000';
     tctx.fillRect(0, 0, tintCanvas.width, tintCanvas.height);
-    
+
     ctx.globalAlpha = 0.5;
     ctx.drawImage(tintCanvas, 0, 0);
     ctx.globalAlpha = 1.0;
@@ -509,17 +509,17 @@ function LimbMasker({ imageUrl, onSave, onCancel, title, initialMask }) {
   };
 
   return (
-    <div 
+    <div
       style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.98)', zIndex: 1000, display: 'flex', flexDirection: 'column', alignItems: 'center', overflow: 'hidden' }}
       onContextMenu={(e) => e.preventDefault()}
     >
       {/* Toolbar */}
-      <div className="glass-card" style={{ 
-        margin: '1.5rem', 
-        padding: '0.8rem 1.5rem', 
-        display: 'flex', 
-        gap: '1.5rem', 
-        alignItems: 'center', 
+      <div className="glass-card" style={{
+        margin: '1.5rem',
+        padding: '0.8rem 1.5rem',
+        display: 'flex',
+        gap: '1.5rem',
+        alignItems: 'center',
         border: '1px solid var(--accent-primary)',
         zIndex: 10,
         boxShadow: '0 10px 30px rgba(0,0,0,0.5)'
@@ -530,25 +530,25 @@ function LimbMasker({ imageUrl, onSave, onCancel, title, initialMask }) {
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem' }}>
-           <button 
-             className="btn-secondary" 
+           <button
+             className="btn-secondary"
              style={{ padding: '0.4rem 0.8rem', fontSize: '0.7rem', background: 'rgba(139, 92, 246, 0.1)', color: 'var(--accent-primary)', borderColor: 'var(--accent-primary)' }}
              onClick={() => alert("SURGERY GUIDE:\n\n1. MASK THE TARGET: Paint over the specific limb you want to re-generate.\n2. ISOLATION: To separate a torso, mask the area where the neck and shoulders used to be.\n3. CLEAN EDGES: Use the Eraser to keep the mask tight to the body.\n4. AI LOGIC: Everything in RED will be re-drawn by the AI. Everything else is kept exactly as is.")}
            >
              <HelpCircle size={14} style={{marginRight: '0.3rem'}} /> How to Mask
            </button>
         </div>
-        
+
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem' }}>
-          <button 
-            className={!isErasing ? "btn-primary" : "btn-secondary"} 
+          <button
+            className={!isErasing ? "btn-primary" : "btn-secondary"}
             onClick={() => setIsErasing(false)}
             style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem' }}
           >
             <Sparkles size={14} style={{marginRight: '0.3rem'}} /> Brush
           </button>
-          <button 
-            className={isErasing ? "btn-primary" : "btn-secondary"} 
+          <button
+            className={isErasing ? "btn-primary" : "btn-secondary"}
             onClick={() => setIsErasing(true)}
             style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem' }}
           >
@@ -558,10 +558,10 @@ function LimbMasker({ imageUrl, onSave, onCancel, title, initialMask }) {
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', background: 'rgba(255,255,255,0.05)', padding: '0.4rem 1rem', borderRadius: '8px' }}>
           <label style={{ fontSize: '0.8rem', color: 'var(--accent-primary)', fontWeight: 'bold' }}>Size:</label>
-          <input 
-            type="range" min="5" max="150" 
-            value={brushSize} 
-            onChange={(e) => setBrushSize(parseInt(e.target.value))} 
+          <input
+            type="range" min="5" max="150"
+            value={brushSize}
+            onChange={(e) => setBrushSize(parseInt(e.target.value))}
             style={{ width: '100px' }}
           />
           <span style={{ minWidth: '25px', fontSize: '0.8rem' }}>{brushSize}px</span>
@@ -582,9 +582,9 @@ function LimbMasker({ imageUrl, onSave, onCancel, title, initialMask }) {
         </div>
       </div>
 
-      <div 
+      <div
         ref={containerRef}
-        style={{ 
+        style={{
           flex: 1,
           width: '100%',
           display: 'flex',
@@ -599,25 +599,25 @@ function LimbMasker({ imageUrl, onSave, onCancel, title, initialMask }) {
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseUp}
       >
-        <div style={{ 
+        <div style={{
           transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})`,
           transformOrigin: 'center',
           transition: isPanning ? 'none' : 'transform 0.1s ease-out',
           position: 'relative'
         }}>
-          <canvas 
-            ref={canvasRef} 
-            style={{ 
-              display: 'block', 
+          <canvas
+            ref={canvasRef}
+            style={{
+              display: 'block',
               boxShadow: '0 0 50px rgba(0,0,0,0.8)',
               background: '#111',
               imageRendering: 'pixelated'
-            }} 
+            }}
           />
           <canvas ref={maskCanvasRef} style={{ display: 'none' }} />
         </div>
       </div>
-      
+
       <div style={{ padding: '1rem', color: '#444', fontSize: '0.7rem', display: 'flex', gap: '2rem' }}>
         <span>Zoom: {Math.round(zoom * 100)}%</span>
         <span>History: {history.length} steps</span>
@@ -670,17 +670,18 @@ function App() {
         } catch (e) { /* silent - port not in use */ }
         if (mainFound && videoFound) break;
       }
-      
+
       setApiReady(mainFound);
       setVideoEngineReady(videoFound);
       timeout = setTimeout(discover, (mainFound && videoFound) ? 10000 : 3000);
     }
-    
+
     discover();
     return () => clearTimeout(timeout);
   }, []); // Run once on mount, recursion handled by setTimeout
   const [prompt, setPrompt] = useState('')
   const [selectedAngleForFix, setSelectedAngleForFix] = useState('Front')
+  const [autoLabeling, setAutoLabeling] = useState(false)
   const [variants, setVariants] = useState([])
   const [loading, setLoading] = useState(false)
   const [selectedAnchor, setSelectedAnchor] = useState(null)
@@ -723,9 +724,13 @@ function App() {
   const [projectToDelete, setProjectToDelete] = useState(null)
   const [numGenerations, setNumGenerations] = useState(1)
   const [zoomLevel, setZoomLevel] = useState(1)
-  const turnaroundCanvasRef = useRef(null)
 
-  
+  // Batch JSON Loader state
+  const [showBatchJSONPopup, setShowBatchJSONPopup] = useState(false)
+  const [batchProgress, setBatchProgress] = useState({ active: false, current: 0, total: 0, currentPrompt: "" })
+  const fileInputRef = useRef(null)
+
+
   // Slicing & Kitbashing State
   const [slicedUrls, setSlicedUrls] = useState([])
   const [allSliceVersions, setAllSliceVersions] = useState([[], [], [], [], []])
@@ -734,12 +739,12 @@ function App() {
   const [slicing, setSlicing] = useState(false)
   const [cleanupSlice, setCleanupSlice] = useState(null) // { index, url } when editing a slice
 
-  
+
   // Surgery & Correction State
   const [isMasking, setIsMasking] = useState(false)
   const [activeManualLimb, setActiveManualLimb] = useState(null)
   const [sliceDirections, setSliceDirections] = useState(['side', 'side', 'front-quarter', 'back-quarter', 'back']);
-  
+
   const handleSetSliceDirection = (idx, val) => {
     const newDirs = [...sliceDirections];
     newDirs[idx] = val;
@@ -815,10 +820,10 @@ function App() {
     if (!currentPreset || !selectedVideoSlice) return;
     const selected = (currentPreset.animations || []).filter(a => batchChecked[a.id]);
     if (selected.length === 0) return alert('Select at least one animation');
-    
+
     const activeApi = rapidEngineReady ? rapidApiBase : videoApiBase;
     const formData = new FormData();
-    
+
     try {
       const imgSrc = selectedVideoSlice.startsWith('http') ? selectedVideoSlice : `${apiBase}${selectedVideoSlice}`;
       const imgResp = await fetch(imgSrc);
@@ -827,7 +832,7 @@ function App() {
     } catch(e) {
       formData.append('image_url', selectedVideoSlice);
     }
-    
+
     // Expand animations by their run count (e.g., walk_right x4 = 4 entries with unique seeds)
     const expanded = [];
     selected.forEach(a => {
@@ -839,7 +844,7 @@ function App() {
     formData.append('animations_json', JSON.stringify(expanded));
     formData.append('character_id', activeProjectId || 'unknown');
     formData.append('view_id', selectedPresetId);
-    
+
     const r = await fetch(`${activeApi}/batch`, { method: 'POST', body: formData });
     if (r.ok) {
       const totalRuns = selected.reduce((sum, a) => sum + (batchRuns[a.id] || 1), 0);
@@ -879,12 +884,12 @@ function App() {
     const pollHeartbeat = async () => {
       const activeBase = rapidEngineReady ? rapidApiBase : videoApiBase;
       const isReady = rapidEngineReady || videoEngineReady;
-      
+
       if (!activeBase || !isReady) {
         timeout = setTimeout(pollHeartbeat, 5000);
         return;
       }
-      
+
       try {
         const res = await fetch(`${activeBase}/status`);
         if (res.ok) {
@@ -910,16 +915,16 @@ function App() {
     // Resolve seed for display: if -1, generate a random one client-side for display
     const resolvedSeed = animSeed === -1 ? Math.floor(Math.random() * 1000000) : animSeed;
     setActiveSeed(resolvedSeed);
-    
+
     try {
       const formData = new FormData();
       // Ensure we strip cache busters if present
       const cleanUrl = selectedVideoSlice.split('?')[0];
-      
+
       // Select the active engine
       const activeApi = rapidEngineReady ? rapidApiBase : videoApiBase;
       const endpoint = rapidEngineReady ? '/forge' : '/generate';
-      
+
       // For both engines, fetch the actual image blob and send as file upload
       // This is more reliable than URL resolution across servers
       const imgSrc = cleanUrl.startsWith('http') ? cleanUrl : `${apiBase}${cleanUrl}`;
@@ -931,7 +936,7 @@ function App() {
         console.warn("Failed to fetch image blob, falling back to URL:", fetchErr);
         formData.append('image_url', cleanUrl);
       }
-      
+
       formData.append('prompt', videoPrompt);
       formData.append('negative_prompt', videoNegativePrompt);
       formData.append('num_frames', animDuration);
@@ -939,12 +944,12 @@ function App() {
       formData.append('seed', resolvedSeed);
       formData.append('character_id', activeProjectId || 'unknown');
       formData.append('view_id', selectedPresetId || 'side_view');
-      
+
       const response = await fetch(`${activeApi}${endpoint}`, {
         method: 'POST',
         body: formData
       });
-      
+
       if (response.ok) {
         // The rapid forge returns a JSON with a video_url, classic returns a blob
         if (rapidEngineReady) {
@@ -1012,7 +1017,7 @@ function App() {
     setLoading(true)
     setStage('selecting-anchor')
     setVariants([])
-    
+
     try {
       const response = await fetch(`${apiBase}/generate-anchor`, {
         method: 'POST',
@@ -1048,7 +1053,7 @@ function App() {
     setPrompt(saveData.prompt)
     setSelectedAnchor(`${apiBase}${saveData.image_url}`)
     setStage('animating')
-    
+
     // Auto-describe the loaded anchor with BLIP
     setDescribing(true)
     setAutoPrompt('')
@@ -1090,12 +1095,12 @@ function App() {
 
   const handleAnimate = async () => {
     setLoading(true)
-    
+
     try {
       const response = await fetch(`${apiBase}/animate-openpose`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
+        body: JSON.stringify({
           image_url: selectedAnchor,
           prompt: autoPrompt || prompt,
           num_frames: 12
@@ -1148,8 +1153,8 @@ function App() {
 
   const handleGenerateTurnaround = async () => {
     if (numGenerations > 1) {
-      const confirmMsg = `You are about to generate ${numGenerations} unique character designs. 
-      
+      const confirmMsg = `You are about to generate ${numGenerations} unique character designs.
+
 Only the LAST image will be displayed here, but all ${numGenerations} will be saved in your Project Library as separate folders.
 
 Continue?`;
@@ -1162,7 +1167,7 @@ Continue?`;
       const response = await fetch(`${apiBase}/generate-turnaround`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
+        body: JSON.stringify({
           session_id: Date.now().toString(),
           prompt: prompt,
           enforce_white: enforceWhite,
@@ -1189,6 +1194,66 @@ Continue?`;
     }
   }
 
+  const handleBatchJSONLoad = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = async (evt) => {
+      try {
+        let jsonData = JSON.parse(evt.target.result);
+
+        // Normalize data to array of strings
+        let prompts = [];
+        if (Array.isArray(jsonData)) {
+          if (typeof jsonData[0] === 'string') {
+            prompts = jsonData;
+          } else if (typeof jsonData[0] === 'object' && jsonData[0].prompt) {
+            prompts = jsonData.map(item => item.prompt);
+          }
+        }
+
+        if (prompts.length === 0) {
+          alert("Could not find an array of prompts in the JSON file. Ensure it's a flat array of strings, or an array of objects with a 'prompt' key.");
+          return;
+        }
+
+        setShowBatchJSONPopup(false);
+        setBatchProgress({ active: true, current: 0, total: prompts.length, currentPrompt: "" });
+
+        for (let i = 0; i < prompts.length; i++) {
+          const p = prompts[i];
+          setBatchProgress(prev => ({ ...prev, current: i + 1, currentPrompt: p }));
+
+          try {
+            await fetch(`${apiBase}/generate-turnaround`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                session_id: Date.now().toString() + '_' + i,
+                prompt: p,
+                enforce_white: enforceWhite,
+                num_variants: numGenerations
+              })
+            });
+            // We don't setTurnaroundUrl here since we are doing a batch. We just let it save to the project library.
+          } catch (err) {
+            console.error(`Batch item ${i} failed:`, err);
+          }
+        }
+
+        setBatchProgress({ active: false, current: 0, total: 0, currentPrompt: "" });
+        alert(`Batch JSON processing complete! ${prompts.length} variants were saved to your library.`);
+
+      } catch (err) {
+        alert("Failed to parse JSON file.");
+      }
+    };
+    reader.readAsText(file);
+    // Reset file input
+    e.target.value = null;
+  };
+
   const handleSaveProject = async (silent = false, overrideVersions = null, overrideIndices = null) => {
     // Increment click count for force override
     let forceOverwrite = false;
@@ -1196,7 +1261,7 @@ Continue?`;
       const newCount = saveClickCount + 1;
       setSaveClickCount(newCount);
       forceOverwrite = newCount >= 3;
-      
+
       if (forceOverwrite) {
         console.log(">>> [FORCE] Overwriting project file...");
         setSaveClickCount(0);
@@ -1235,7 +1300,7 @@ Continue?`;
       alert("No turnaround image to slice!");
       return;
     }
-    
+
     setSlicing(true)
     try {
       // Send the full URL, the backend is now robust enough to strip the base itself
@@ -1258,20 +1323,20 @@ Continue?`;
           setActiveProjectId(data.project_id);
           console.log("Project initialized:", data.project_id);
         }
-        
+
         // Use the turnaround sheet for this project as our "Golden Base"
         const sheetUrl = `${apiBase}/output_saves/${data.project_id}/${data.project_id}_turnaround.png`;
         setOriginalTurnaroundUrl(sheetUrl);
         setTurnaroundUrl(`${sheetUrl}?t=${Date.now()}`);
-        
+
         // Add a cache-busting timestamp so the browser actually reloads the fresh files
         const timestamp = Date.now();
         const freshUrls = data.urls.map(u => `${apiBase}${u}?t=${timestamp}`);
         setSlicedUrls(freshUrls);
-        
+
         // Initialize versioning from backend metadata
         if (data.all_slice_versions) {
-          const absoluteVersions = data.all_slice_versions.map(group => 
+          const absoluteVersions = data.all_slice_versions.map(group =>
             group.map(url => url.startsWith('http') ? url : `${apiBase}${url}`)
           );
           setAllSliceVersions(absoluteVersions);
@@ -1326,7 +1391,7 @@ Continue?`;
       } else {
         delete next[cardId];
       }
-      
+
       if (activeProjectId) {
         fetch(`${apiBase}/project/${activeProjectId}/save-selections`, {
           method: 'POST',
@@ -1339,13 +1404,61 @@ Continue?`;
     });
   };
 
+  const handleGemmaAutoLabel = async () => {
+    if (!activeProjectId) return alert('Save or load a project first.');
+
+    const slices = allSliceVersions.flatMap((versions, colIndex) =>
+      versions.map((url, verIndex) => ({
+        card_id: `card_${colIndex}_${verIndex}`,
+        url
+      }))
+    );
+
+    if (slices.length === 0) return alert('No slices found to classify.');
+
+    const gemmaDownloadConfirmed = localStorage.getItem('gemma4DownloadConfirmed') === 'true';
+    if (!gemmaDownloadConfirmed) {
+      const ok = confirm(
+        'Heads up: A. Gemma4 may need to download the Gemma 4 E4B model the first time it runs. ' +
+        'That can be several GB and may take a while depending on your connection.\n\nContinue?'
+      );
+      if (!ok) return;
+      localStorage.setItem('gemma4DownloadConfirmed', 'true');
+    }
+
+    setAutoLabeling(true);
+    try {
+      const res = await fetch(`${apiBase}/project/${activeProjectId}/auto-label-gemma4`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project_id: activeProjectId, slices })
+      });
+      const data = await res.json();
+      if (data.status !== 'success') {
+        throw new Error(data.detail || 'Gemma auto-label failed');
+      }
+
+      setPoseSelections(data.selections || {});
+      const lines = (data.decisions || []).map((d, i) => {
+        const file = d.url?.split('/').pop()?.split('?')[0] || d.card_id;
+        return `${i + 1}. ${file}: ${d.label}${d.raw ? ` (${d.raw})` : ''}`;
+      });
+      alert(`Gemma 4 decisions:\n\n${lines.join('\n')}`);
+    } catch (err) {
+      console.error(err);
+      alert(`Gemma 4 auto-label failed: ${err.message}`);
+    } finally {
+      setAutoLabeling(false);
+    }
+  };
+
   const handleGenerateMore = async () => {
     setGeneratingTurnaround(true);
     try {
       const response = await fetch(`${apiBase}/generate-turnaround`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
+        body: JSON.stringify({
           session_id: Date.now().toString(),
           prompt: prompt,
           enforce_white: enforceWhite,
@@ -1360,7 +1473,7 @@ Continue?`;
         const imageUrl = data.url || data.image_url;
         const freshUrl = `${apiBase}${imageUrl}?t=${Date.now()}`;
         setTurnaroundUrl(freshUrl);
-        
+
         // Auto-trigger slicing so it appears in the gallery
         const sliceRes = await fetch(`${apiBase}/slice-turnaround`, {
           method: 'POST',
@@ -1379,7 +1492,7 @@ Continue?`;
         if (sliceData.status === 'success') {
           // Update the gallery versions
           if (sliceData.all_slice_versions) {
-            const absoluteVersions = sliceData.all_slice_versions.map(group => 
+            const absoluteVersions = sliceData.all_slice_versions.map(group =>
               group.map(url => url.startsWith('http') ? url : `${apiBase}${url}`)
             );
             setAllSliceVersions(absoluteVersions);
@@ -1402,7 +1515,7 @@ Continue?`;
     Object.values(poseSelections).forEach(({ label, url }) => {
       selectedSlices[label] = url;
     });
-    
+
     const required = ["Front", "3/4 Front", "Side", "3/4 Back", "Back"];
     for (let req of required) {
       if (!selectedSlices[req]) {
@@ -1467,7 +1580,7 @@ Continue?`;
     const msg = `This will reset this folder back to the original turnaround and will delete all other images in this folder.\n\nThis cannot be undone. Continue?`;
     if (!window.confirm(msg)) return;
 
-    
+
     try {
       const res = await fetch(`${apiBase}/reset-project`, {
         method: 'POST',
@@ -1508,21 +1621,21 @@ Continue?`;
     if (!project) return;
     setActiveProjectId(project.id);
     setPrompt(project.prompt || '');
-    
+
     // Add cache buster to ensure the image refreshes
     const sheetUrl = project.image_url ? `${apiBase}${project.image_url}` : null;
     setOriginalTurnaroundUrl(sheetUrl);
     setTurnaroundUrl(sheetUrl ? `${sheetUrl}?t=${Date.now()}` : null);
-    
+
     // Restore versioning history if present
     if (project.all_slice_versions && project.all_slice_versions.length > 0) {
       // Ensure we have absolute URLs for the UI
-      const restored = project.all_slice_versions.map(group => 
+      const restored = project.all_slice_versions.map(group =>
         group.map(url => url.startsWith('http') ? url : `${apiBase}${url}`)
       );
       setAllSliceVersions(restored);
       setSelectedVersionIndices(project.selected_indices || [0,0,0,0,0]);
-      
+
       // Update the current display URLs to match the selected versions
       const currentUrls = restored.map((group, idx) => {
         const vIdx = (project.selected_indices || [0,0,0,0,0])[idx];
@@ -1560,59 +1673,59 @@ Continue?`;
 
   const handleWandClick = (e) => {
     if (!isWandActive || !turnaroundUrl) return;
-    
+
     const img = e.target;
     const rect = img.getBoundingClientRect();
     const x = Math.floor(((e.clientX - rect.left) / rect.width) * img.naturalWidth);
     const y = Math.floor(((e.clientY - rect.top) / rect.height) * img.naturalHeight);
-    
+
     // Use a canvas to process the image
     const canvas = document.createElement('canvas');
     canvas.width = img.naturalWidth;
     canvas.height = img.naturalHeight;
     const ctx = canvas.getContext('2d');
     ctx.drawImage(img, 0, 0);
-    
+
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const data = imageData.data;
     const targetIdx = (y * canvas.width + x) * 4;
     const targetR = data[targetIdx];
     const targetG = data[targetIdx + 1];
     const targetB = data[targetIdx + 2];
-    
+
     // Tolerance for matching (higher = more aggressive)
     const tolerance = 45;
-    
+
     // Queue for flood fill
     const queue = [[x, y]];
     const visited = new Set();
-    
+
     while (queue.length > 0) {
       const [cx, cy] = queue.shift();
       if (cx < 0 || cx >= canvas.width || cy < 0 || cy >= canvas.height) continue;
-      
+
       const key = `${cx},${cy}`;
       if (visited.has(key)) continue;
       visited.add(key);
-      
+
       const idx = (cy * canvas.width + cx) * 4;
       const r = data[idx];
       const g = data[idx + 1];
       const b = data[idx + 2];
-      
+
       // Match if color is within tolerance of the clicked pixel
       const dist = Math.sqrt(
-        Math.pow(r - targetR, 2) + 
-        Math.pow(g - targetG, 2) + 
+        Math.pow(r - targetR, 2) +
+        Math.pow(g - targetG, 2) +
         Math.pow(b - targetB, 2)
       );
-      
+
       if (dist < tolerance) {
         data[idx + 3] = 0; // Make transparent
         queue.push([cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]);
       }
     }
-    
+
     ctx.putImageData(imageData, 0, 0);
     setWandHistory(prev => [...prev, turnaroundUrl]);
     setTurnaroundUrl(canvas.toDataURL());
@@ -1650,7 +1763,7 @@ Continue?`;
       const response = await fetch(`${apiBase}/stitch-frames`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
+        body: JSON.stringify({
           frame_urls: frameUrls.filter((_, i) => !excludedFrames.has(i)),
           project_id: activeProjectId
         })
@@ -1692,31 +1805,35 @@ Continue?`;
       const data = await res.json();
       if (data.status === 'success') {
         const urlsToSlice = data.urls || [data.url];
-        
+
         let latestSliceData = null;
+        let mergedVersions = null;
         for (const sheetUrl of urlsToSlice) {
           const sliceRes = await fetch(`${apiBase}/slice-turnaround`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ 
-              image_url: sheetUrl, 
-              project_id: activeProjectId, 
+            body: JSON.stringify({
+              image_url: sheetUrl,
+              project_id: activeProjectId,
               force_reslice: true,
               target_slice_index: index
             })
           });
           latestSliceData = await sliceRes.json();
+          if (latestSliceData?.all_slice_versions) {
+            mergedVersions = latestSliceData.all_slice_versions;
+          }
         }
 
         if (latestSliceData && latestSliceData.status === 'success') {
           const freshUrls = latestSliceData.urls.map(u => `${apiBase}${u}?t=${Date.now()}`);
-          
-          if (latestSliceData.all_slice_versions) {
-            const absoluteVersions = latestSliceData.all_slice_versions.map(group => 
+
+          if (mergedVersions) {
+            const absoluteVersions = mergedVersions.map(group =>
               group.map(url => url.startsWith('http') ? url : `${apiBase}${url}`)
             );
             setAllSliceVersions(absoluteVersions);
-            
+
             // SURGICAL UPDATE: Only auto-select the latest for the slice we just fixed
             let newIndices = [0, 0, 0, 0, 0];
             setSelectedVersionIndices(prev => {
@@ -1738,7 +1855,7 @@ Continue?`;
 
   const handleFixPose = async (maskBase64) => {
     setIsMasking(false);
-    
+
 
 
     setLoading(true);
@@ -1757,10 +1874,10 @@ Continue?`;
       if (data.status === 'success') {
         const newUrl = `${apiBase}${data.url}`;
         setTurnaroundUrl(`${newUrl}?t=${Date.now()}`);
-        
+
         // Re-slice automatically to update individual pose files
         alert("Pose corrected! Re-slicing character sheet to update poses...");
-        
+
         // We call handleSlice with the new URL
         const sliceRes = await fetch(`${apiBase}/slice-turnaround`, {
           method: 'POST',
@@ -1780,10 +1897,10 @@ Continue?`;
         const sliceData = await sliceRes.json();
         if (sliceData.status === 'success') {
             const freshUrls = sliceData.urls.map(u => `${apiBase}${u}?t=${Date.now()}`);
-            
+
             let absoluteVersions = [];
             if (sliceData.all_slice_versions) {
-              absoluteVersions = sliceData.all_slice_versions.map(group => 
+              absoluteVersions = sliceData.all_slice_versions.map(group =>
                 group.map(url => url.startsWith('http') ? url : `${apiBase}${url}`)
               );
               setAllSliceVersions(absoluteVersions);
@@ -1797,13 +1914,13 @@ Continue?`;
             setSelectedVersionIndices(prev => {
               newIndices = prev.map((vIdx, idx) => {
                 // If we added a new version, select it
-                return absoluteVersions[idx] ? absoluteVersions[idx].length - 1 : vIdx; 
+                return absoluteVersions[idx] ? absoluteVersions[idx].length - 1 : vIdx;
               });
               return newIndices;
             });
 
             setSlicedUrls(freshUrls);
-            
+
             // Persist immediately
             handleSaveProject(true, absoluteVersions, newIndices);
 
@@ -1857,7 +1974,7 @@ Continue?`;
     setExcludedFrames(new Set())
     setAutoPrompt('')
     setDescribing(false)
-    
+
     // PROJECT STATE RESET
     setActiveProjectId(null)
     setTurnaroundUrl(null)
@@ -1902,7 +2019,7 @@ Continue?`;
       <main>
         <AnimatePresence mode="wait">
           {stage === 'prompt' && (
-            <motion.div 
+            <motion.div
               key="prompt"
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
@@ -1914,8 +2031,8 @@ Continue?`;
                 <Sparkles size={20} color="var(--accent-primary)" />
                 <h2 style={{ fontSize: '1.5rem' }}>Imagine your Character</h2>
               </div>
-              
-              <textarea 
+
+              <textarea
                 placeholder="Describe your character (e.g., 'A cyberpunk ronin with a neon katana, pixel art style, south facing, neutral pose')"
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
@@ -1924,9 +2041,9 @@ Continue?`;
 
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingBottom: '10px' }}>
                 <div style={{ display: 'flex', gap: '0.8rem' }}>
-                  <button 
-                    className="btn-secondary" 
-                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0.6rem', minWidth: '40px' }} 
+                  <button
+                    className="btn-secondary"
+                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0.6rem', minWidth: '40px' }}
                     onClick={() => setIsOptionsOpen(true)}
                     disabled={!apiReady}
                     title="Pipeline Options"
@@ -1934,8 +2051,18 @@ Continue?`;
                     <Settings size={16} />
                   </button>
 
-                  <button 
-                    className="btn-secondary" 
+                  <button
+                    className="btn-secondary"
+                    style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.6rem 1rem', fontSize: '0.85rem' }}
+                    onClick={() => setShowBatchJSONPopup(true)}
+                    disabled={!apiReady}
+                  >
+                    <ListPlus size={16} />
+                    Batch JSON Loader
+                  </button>
+
+                  <button
+                    className="btn-secondary"
                     style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.6rem 1rem', fontSize: '0.85rem' }}
                     onClick={() => fetchSavedProjects('load')}
                     disabled={!apiReady}
@@ -1943,8 +2070,8 @@ Continue?`;
                     <FolderOpen size={16} />
                     Load Saved Sprite
                   </button>
-                  <button 
-                    className="btn-secondary" 
+                  <button
+                    className="btn-secondary"
                     style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.6rem 1rem', fontSize: '0.85rem', borderColor: '#ef444466' }}
                     onClick={() => fetchSavedProjects('delete')}
 
@@ -1953,13 +2080,13 @@ Continue?`;
                     <Trash2 size={16} color="#ef4444" />
                     Delete Sprite
                   </button>
-                  <button 
-                    className="btn-secondary" 
-                    style={{ 
-                      display: 'flex', alignItems: 'center', justifyContent: 'center', 
+                  <button
+                    className="btn-secondary"
+                    style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
                       padding: '0.6rem', minWidth: '40px', fontSize: '0.75rem', fontWeight: 'bold',
                       borderColor: 'rgba(139, 92, 246, 0.3)', color: 'var(--accent-primary)'
-                    }} 
+                    }}
                     onClick={() => fetchSavedProjects('reset')}
                     disabled={!apiReady}
                     title="Surgical Reset (SR)"
@@ -1970,7 +2097,7 @@ Continue?`;
 
                 <div style={{ display: 'flex', gap: '0.8rem', alignItems: 'center' }}>
                   <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
-                    <select 
+                    <select
                       value={numGenerations}
                       onChange={(e) => setNumGenerations(parseInt(e.target.value))}
                       style={{
@@ -1994,12 +2121,12 @@ Continue?`;
                     <div style={{ position: 'absolute', right: '0.8rem', pointerEvents: 'none', fontSize: '0.7rem', opacity: 0.5 }}>▼</div>
                   </div>
 
-                  <button 
-                    className="btn-primary" 
-                    style={{ 
-                      display: 'flex', alignItems: 'center', gap: '0.4rem', 
+                  <button
+                    className="btn-primary"
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: '0.4rem',
                       padding: '0.6rem 1.2rem', fontSize: '0.85rem',
-                      background: 'linear-gradient(to right, #8b5cf6, #d946ef)' 
+                      background: 'linear-gradient(to right, #8b5cf6, #d946ef)'
                     }}
                     onClick={handleGenerateTurnaround}
                     disabled={!prompt.trim() || generatingTurnaround || !apiReady}
@@ -2010,10 +2137,10 @@ Continue?`;
                 </div>
               </div>
 
-              <button 
-                style={{ 
-                  position: 'absolute', bottom: '6px', right: '6px', 
-                  background: 'none', border: 'none', color: '#333', 
+              <button
+                style={{
+                  position: 'absolute', bottom: '6px', right: '6px',
+                  background: 'none', border: 'none', color: '#333',
                   cursor: 'pointer', padding: '4px', borderRadius: '4px'
                 }}
                 onClick={openOutputFolder}
@@ -2035,7 +2162,7 @@ Continue?`;
               style={{ textAlign: 'center' }}
             >
               <h2 style={{ marginBottom: '2rem' }}>Select your <span className="gradient-text">Base Sprite</span></h2>
-              
+
               {loading && variants.length === 0 ? (
                 <div style={{ padding: '4rem' }}>
                   <motion.div
@@ -2049,18 +2176,18 @@ Continue?`;
                   <p style={{ fontSize: '0.8rem', color: 'var(--text-dim)', marginTop: '0.5rem' }}>This uses deep learning to generate 4 unique versions</p>
                 </div>
               ) : (
-                <div style={{ 
-                  display: 'grid', 
-                  gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', 
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
                   gap: '1.5rem',
                   marginBottom: '3rem',
                   maxWidth: '1200px',
                   margin: '0 auto 3rem'
                 }}>
                   {variants.map((v, i) => (
-                    <motion.div 
-                      key={i} 
-                      className="glass-card" 
+                    <motion.div
+                      key={i}
+                      className="glass-card"
                       style={{ padding: '0', overflow: 'hidden', cursor: 'pointer', height: '380px', display: 'flex', flexDirection: 'column' }}
                       whileHover={{ scale: 1.02 }}
                       onClick={() => selectAnchor(v)}
@@ -2070,9 +2197,9 @@ Continue?`;
                       </div>
                       <div style={{ padding: '0.75rem', borderTop: '1px solid var(--glass-border)', display: 'flex', gap: '0.5rem' }}>
                         <button className="btn-secondary" style={{ flex: 1 }}>Select</button>
-                        <button 
-                          className="btn-secondary" 
-                          style={{ 
+                        <button
+                          className="btn-secondary"
+                          style={{
                             display: 'flex', alignItems: 'center', gap: '0.3rem', padding: '0.5rem 0.75rem',
                             borderColor: saveStatus[v] === 'saved' ? '#4ade80' : undefined,
                             color: saveStatus[v] === 'saved' ? '#4ade80' : undefined,
@@ -2082,8 +2209,8 @@ Continue?`;
                           title="Save this anchor permanently"
                           disabled={saveStatus[v] === 'saving' || saveStatus[v] === 'saved'}
                         >
-                          {saveStatus[v] === 'saving' ? <Loader2 size={14} className="animate-spin" /> : 
-                           saveStatus[v] === 'saved' ? <Check size={14} /> : 
+                          {saveStatus[v] === 'saving' ? <Loader2 size={14} className="animate-spin" /> :
+                           saveStatus[v] === 'saved' ? <Check size={14} /> :
                            <Save size={14} />}
                           {saveStatus[v] === 'saved' && <span style={{fontSize: '0.7rem'}}>Saved!</span>}
                         </button>
@@ -2114,7 +2241,7 @@ Continue?`;
               <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '2rem' }}>
                 <img src={selectedAnchor} alt="Selected" style={{ width: '128px', height: '128px', border: '1px solid var(--glass-border)', borderRadius: '12px', padding: '1rem', background: '#111', imageRendering: 'pixelated' }} />
               </div>
-              
+
               {loading ? (
                 <div style={{ padding: '2rem' }}>
                   <motion.div
@@ -2183,10 +2310,10 @@ Continue?`;
               {/* Main layout: frame grid on left, preview on right */}
               <div style={{ display: 'flex', gap: '1.5rem', alignItems: 'flex-start' }}>
                 {/* Frame grid: 6 columns x 2 rows = 12 frames */}
-                <div style={{ 
+                <div style={{
                   flex: 1,
-                  display: 'grid', 
-                  gridTemplateColumns: 'repeat(6, 1fr)', 
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(6, 1fr)',
                   gap: '0.75rem'
                 }}>
                   {frameUrls.map((url, i) => (
@@ -2198,20 +2325,20 @@ Continue?`;
                       animate={{ opacity: 1, y: 0 }}
                       transition={{ delay: i * 0.04 }}
                     >
-                      <div style={{ 
+                      <div style={{
                         background: animFrame === i ? '#1a1a2e' : '#0a0a0a',
                         border: animFrame === i ? '2px solid var(--accent-secondary)' : '2px solid transparent',
-                        padding: '0.5rem', 
-                        display: 'flex', 
-                        alignItems: 'center', 
+                        padding: '0.5rem',
+                        display: 'flex',
+                        alignItems: 'center',
                         justifyContent: 'center',
                         height: '120px',
                         position: 'relative',
                         transition: 'border-color 0.15s'
                       }}>
-                        <img 
-                          src={url} 
-                          alt={`Frame ${i + 1}`} 
+                        <img
+                          src={url}
+                          alt={`Frame ${i + 1}`}
                           style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', imageRendering: 'pixelated' }}
                         />
                         <span style={{
@@ -2221,11 +2348,11 @@ Continue?`;
                         }}>F{i + 1}</span>
                       </div>
                       <div style={{ padding: '0.35rem', display: 'flex', gap: '0.25rem' }}>
-                        <button 
-                          className="btn-secondary" 
-                          style={{ 
-                            flex: 1, 
-                            fontSize: '0.7rem', 
+                        <button
+                          className="btn-secondary"
+                          style={{
+                            flex: 1,
+                            fontSize: '0.7rem',
                             padding: '0.3rem 0.4rem',
                             display: 'flex',
                             alignItems: 'center',
@@ -2267,9 +2394,9 @@ Continue?`;
                 {/* Animation Preview panel */}
                 <motion.div
                   className="glass-card"
-                  style={{ 
-                    padding: '0', 
-                    overflow: 'hidden', 
+                  style={{
+                    padding: '0',
+                    overflow: 'hidden',
                     width: '220px',
                     minWidth: '220px',
                     display: 'flex',
@@ -2280,32 +2407,32 @@ Continue?`;
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: 0.3 }}
                 >
-                  <span style={{ 
-                    fontSize: '0.75rem', 
-                    color: 'var(--accent-secondary)', 
-                    fontWeight: 600, 
+                  <span style={{
+                    fontSize: '0.75rem',
+                    color: 'var(--accent-secondary)',
+                    fontWeight: 600,
                     marginTop: '0.75rem',
                     textTransform: 'uppercase',
                     letterSpacing: '0.1em'
                   }}>Preview</span>
-                  <div style={{ 
-                    background: '#0a0a0a', 
-                    width: '100%', 
+                  <div style={{
+                    background: '#0a0a0a',
+                    width: '100%',
                     height: '250px',
-                    display: 'flex', 
-                    alignItems: 'center', 
+                    display: 'flex',
+                    alignItems: 'center',
                     justifyContent: 'center',
                     padding: '1rem'
                   }}>
                     {frameUrls.length > 0 && (
-                      <img 
-                        src={frameUrls[animFrame]} 
-                        alt="Animation preview" 
-                        style={{ 
-                          maxHeight: '220px', 
-                          maxWidth: '100%', 
-                          objectFit: 'contain', 
-                          imageRendering: 'pixelated' 
+                      <img
+                        src={frameUrls[animFrame]}
+                        alt="Animation preview"
+                        style={{
+                          maxHeight: '220px',
+                          maxWidth: '100%',
+                          objectFit: 'contain',
+                          imageRendering: 'pixelated'
                         }}
                       />
                     )}
@@ -2320,8 +2447,8 @@ Continue?`;
                 <button className="btn-secondary" onClick={() => { setStage('animating'); setFrameUrls([]); }}>
                   <ArrowLeft size={18} style={{ marginRight: '0.5rem' }} /> Re-forge All
                 </button>
-                <button 
-                  className="btn-primary" 
+                <button
+                  className="btn-primary"
                   style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem 2rem' }}
                   onClick={handleStitchFrames}
                   disabled={loading || redoingFrame !== null}
@@ -2375,16 +2502,26 @@ Continue?`;
               <p style={{ color: 'var(--text-dim)', marginBottom: '2rem' }}>
                 Select exactly one image for each of the 5 poses to build your final character sheet.
               </p>
-              
+
               <div style={{
                 display: 'flex',
                 gap: '1rem',
                 justifyContent: 'center',
                 marginBottom: '2rem'
               }}>
+                <button
+                  className="btn-secondary"
+                  onClick={handleGemmaAutoLabel}
+                  disabled={autoLabeling || loading}
+                  style={{ padding: '0.75rem 1rem', minWidth: '110px' }}
+                  title="Load Gemma 4 E4B and classify every visible slice"
+                >
+                  {autoLabeling ? <Loader2 size={14} className="animate-spin" /> : null}
+                  A. Gemma4
+                </button>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: 'rgba(255,255,255,0.05)', padding: '0.5rem', borderRadius: '8px' }}>
                   <span style={{ fontSize: '0.8rem', color: 'var(--text-dim)' }}>Generate 2 Alts for:</span>
-                  <select 
+                  <select
                      value={selectedAngleForFix}
                      onChange={e => setSelectedAngleForFix(e.target.value)}
                      style={{ background: '#222', color: 'white', border: '1px solid #444', borderRadius: '4px', padding: '4px 8px', fontSize: '0.8rem', outline: 'none' }}
@@ -2395,15 +2532,12 @@ Continue?`;
                      <option value="3/4 Back">3/4 Back</option>
                      <option value="Back">Back</option>
                   </select>
-                  <button 
+                  <button
                     className="btn-secondary"
                     onClick={() => {
-                      // ALWAYS mask a middle column for maximum surrounding context.
-                      // The angle only affects the PROMPT, not which column gets masked.
-                      // This matches how the old Quick Fix worked — always targeting an actual character.
-                      const numSegments = allSliceVersions.length || 5;
-                      const middleIndex = Math.floor(numSegments / 2);
-                      handleQuickFix(middleIndex, selectedAngleForFix);
+                      const poseOrder = ['Front', '3/4 Front', 'Side', '3/4 Back', 'Back'];
+                      const targetIndex = Math.max(0, poseOrder.indexOf(selectedAngleForFix));
+                      handleQuickFix(targetIndex, selectedAngleForFix);
                     }}
                     disabled={loading}
                     style={{ padding: '6px 12px' }}
@@ -2424,13 +2558,13 @@ Continue?`;
                 </button>
               </div>
 
-              <div style={{ 
-                display: 'grid', 
-                gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', 
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
                 gap: '1.5rem',
                 marginBottom: '3rem'
               }}>
-                {allSliceVersions.flatMap((versions, colIndex) => 
+                {allSliceVersions.flatMap((versions, colIndex) =>
                   versions.map((url, verIndex) => ({ url, colIndex, cardId: `card_${colIndex}_${verIndex}` }))
                 ).map((item, i) => {
                   const sel = poseSelections[item.cardId];
@@ -2438,20 +2572,20 @@ Continue?`;
                   return (
                   <div key={item.cardId} style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                     <div className="glass-card" style={{ padding: '0', overflow: 'hidden', height: '250px', background: 'rgba(255,255,255,0.02)', position: 'relative' }}>
-                      <div style={{ 
-                        height: '100%', 
-                        display: 'flex', 
-                        alignItems: 'center', 
+                      <div style={{
+                        height: '100%',
+                        display: 'flex',
+                        alignItems: 'center',
                         justifyContent: 'center',
                         background: 'repeating-conic-gradient(#111 0% 25%, transparent 0% 50%) 50% / 20px 20px'
                       }}>
                         <img src={item.url} alt={`Slice ${i}`} style={{ maxHeight: '100%', maxWidth: '100%', objectFit: 'contain' }} />
                       </div>
                     </div>
-                    <select 
-                       value={currentLabel} 
+                    <select
+                       value={currentLabel}
                        onChange={(e) => handleSelectPose(item.cardId, item.url, e.target.value)}
-                       style={{ 
+                       style={{
                          fontSize: '0.8rem', background: '#222', color: 'white', border: `1px solid ${currentLabel !== 'Unselected' ? 'var(--accent-secondary)' : '#444'}`, borderRadius: '4px', padding: '6px 8px', width: '100%',
                          boxShadow: currentLabel !== 'Unselected' ? '0 0 10px rgba(217, 70, 239, 0.2)' : 'none',
                          transition: 'all 0.2s'
@@ -2488,10 +2622,10 @@ Continue?`;
               <p style={{ color: 'var(--text-dim)', marginBottom: '2rem' }}>
                 Your character sheet is compounded and ready for animation.
               </p>
-              
-              <div style={{ 
-                display: 'grid', 
-                gridTemplateColumns: 'repeat(5, 1fr)', 
+
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(5, 1fr)',
                 gap: '1rem',
                 marginBottom: '3rem'
               }}>
@@ -2500,10 +2634,10 @@ Continue?`;
 
                   return (
                     <div key={i} style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                      <button 
+                      <button
                         className="btn-secondary"
                         onClick={() => setCleanupSlice({ index: i, url })}
-                        style={{ 
+                        style={{
                           padding: '0.35rem 0.6rem', fontSize: '0.7rem', width: '100%',
                           display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.3rem',
                           borderColor: 'var(--accent-primary)', color: 'var(--accent-primary)'
@@ -2512,10 +2646,10 @@ Continue?`;
                         <Eraser size={12} /> Clean Up
                       </button>
                       <div className="glass-card" style={{ padding: '0', overflow: 'hidden', height: '250px', background: 'rgba(255,255,255,0.02)', position: 'relative' }}>
-                        <div style={{ 
-                          height: '100%', 
-                          display: 'flex', 
-                          alignItems: 'center', 
+                        <div style={{
+                          height: '100%',
+                          display: 'flex',
+                          alignItems: 'center',
                           justifyContent: 'center',
                           background: 'repeating-conic-gradient(#111 0% 25%, transparent 0% 50%) 50% / 20px 20px'
                         }}>
@@ -2529,17 +2663,17 @@ Continue?`;
                             {['Front', '3/4 Front', 'Side', '3/4 Back', 'Back'][i]}
                           </div>
                         </div>
-                        <button 
-                          className="btn-secondary" 
-                          style={{ 
+                        <button
+                          className="btn-secondary"
+                          style={{
                             marginTop: '0.4rem',
-                            fontSize: '0.65rem', 
-                            color: '#38bdf8', 
-                            borderColor: 'rgba(56, 189, 248, 0.3)', 
-                            width: '100%', 
-                            display: 'flex', 
-                            alignItems: 'center', 
-                            justifyContent: 'center', 
+                            fontSize: '0.65rem',
+                            color: '#38bdf8',
+                            borderColor: 'rgba(56, 189, 248, 0.3)',
+                            width: '100%',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
                             gap: '0.4rem'
                           }}
                         onClick={async () => {
@@ -2585,7 +2719,7 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
               </div>
 
 
-              
+
               <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}>
                 <button className="btn-secondary" onClick={() => setStage('gallery')}>
                   <ArrowLeft size={18} style={{ marginRight: '0.5rem' }} /> Back to Gallery
@@ -2609,9 +2743,9 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
                   <h2 style={{ margin: 0 }}>Video <span className="gradient-text">Forge</span></h2>
                   <p style={{ color: 'var(--text-dim)', fontSize: '0.9rem' }}>Cinematic Sprite Generation Pipeline</p>
                 </div>
-                
-                <div style={{ 
-                  background: videoEngineReady ? 'rgba(74, 222, 128, 0.1)' : 'rgba(239, 68, 68, 0.1)', 
+
+                <div style={{
+                  background: videoEngineReady ? 'rgba(74, 222, 128, 0.1)' : 'rgba(239, 68, 68, 0.1)',
                   border: `1px solid ${videoEngineReady ? '#4ade80' : '#ef4444'}`,
                   padding: '0.5rem 1rem',
                   borderRadius: '12px',
@@ -2619,22 +2753,22 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
                   alignItems: 'center',
                   gap: '0.6rem'
                 }}>
-                  <div style={{ 
-                    width: '10px', height: '10px', borderRadius: '50%', 
+                  <div style={{
+                    width: '10px', height: '10px', borderRadius: '50%',
                     background: videoEngineReady ? '#4ade80' : '#ef4444',
                     boxShadow: videoEngineReady ? '0 0 10px #4ade80' : 'none'
                   }} />
                   <span style={{ fontSize: '0.8rem', color: videoEngineReady ? '#4ade80' : '#ef4444', fontWeight: 'bold' }}>
                     {videoEngineReady ? 'ENGINE READY' : 'ENGINE OFFLINE'}
                   </span>
-                  
+
                   {/* Persistent Warmup Button */}
-                  <button 
-                    className="btn-primary" 
+                  <button
+                    className="btn-primary"
                     title="Restart Video Engine"
-                    style={{ 
-                      padding: '4px 8px', 
-                      background: isWarmingUp ? '#3b82f6' : 'rgba(255,255,255,0.05)', 
+                    style={{
+                      padding: '4px 8px',
+                      background: isWarmingUp ? '#3b82f6' : 'rgba(255,255,255,0.05)',
                       border: '1px solid rgba(255,255,255,0.1)',
                       borderRadius: '8px'
                     }}
@@ -2658,10 +2792,10 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
               </div>
 
               {!videoEngineReady && (
-                <div className="glass-card" style={{ 
-                  background: isWarmingUp ? 'rgba(59, 130, 246, 0.05)' : 'rgba(239, 68, 68, 0.05)', 
-                  borderColor: isWarmingUp ? 'rgba(59, 130, 246, 0.2)' : 'rgba(239, 68, 68, 0.2)', 
-                  marginBottom: '2rem', padding: '2rem' 
+                <div className="glass-card" style={{
+                  background: isWarmingUp ? 'rgba(59, 130, 246, 0.05)' : 'rgba(239, 68, 68, 0.05)',
+                  borderColor: isWarmingUp ? 'rgba(59, 130, 246, 0.2)' : 'rgba(239, 68, 68, 0.2)',
+                  marginBottom: '2rem', padding: '2rem'
                 }}>
                    {isWarmingUp ? (
                      <>
@@ -2732,25 +2866,25 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
               {!batchMode ? (
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2rem' }}>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-                  <div className="glass-card" style={{ 
-                    padding: '0', 
-                    overflow: 'hidden', 
-                    height: '300px', 
+                  <div className="glass-card" style={{
+                    padding: '0',
+                    overflow: 'hidden',
+                    height: '300px',
                     background: '#2E8B57',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center'
                   }}>
-                    <img 
-                      src={selectedVideoSlice?.startsWith('http') ? selectedVideoSlice : `${apiBase}${selectedVideoSlice}`} 
-                      style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', filter: 'drop-shadow(0 0 10px rgba(0,0,0,0.3))' }} 
-                      alt="Target Slice" 
+                    <img
+                      src={selectedVideoSlice?.startsWith('http') ? selectedVideoSlice : `${apiBase}${selectedVideoSlice}`}
+                      style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', filter: 'drop-shadow(0 0 10px rgba(0,0,0,0.3))' }}
+                      alt="Target Slice"
                     />
                   </div>
-                  
+
                   <div style={{ textAlign: 'left' }}>
                     <label style={{ fontSize: '0.8rem', color: 'var(--accent-primary)', fontWeight: 'bold', textTransform: 'uppercase', marginBottom: '0.5rem', display: 'block' }}>Motion Prompt</label>
-                    <textarea 
+                    <textarea
                       placeholder="Describe the cinematic motion..."
                       value={videoPrompt}
                       onChange={(e) => setVideoPrompt(e.target.value)}
@@ -2760,7 +2894,7 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
                   </div>
                   <div style={{ textAlign: 'left' }}>
                     <label style={{ fontSize: '0.7rem', color: '#ef4444', fontWeight: 'bold', textTransform: 'uppercase', marginBottom: '0.3rem', display: 'block' }}>Negative Prompt</label>
-                    <textarea 
+                    <textarea
                       placeholder="Things to avoid in generation..."
                       value={videoNegativePrompt}
                       onChange={(e) => setVideoNegativePrompt(e.target.value)}
@@ -2773,8 +2907,8 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
                     <button className="btn-secondary" onClick={() => setStage('slicing')} disabled={videoStage === 'generating'}>
                       <ArrowLeft size={18} /> Back to Slices
                     </button>
-                    <button 
-                      className="btn-primary" 
+                    <button
+                      className="btn-primary"
                       style={{ flex: 1, background: 'linear-gradient(to right, #3b82f6, #8b5cf6)' }}
                       onClick={handleForgeVideo}
                       disabled={!videoEngineReady || videoStage === 'generating' || !videoPrompt}
@@ -2843,7 +2977,7 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
                       <div key={anim.id} style={{ background: batchChecked[anim.id] ? 'rgba(74, 222, 128, 0.05)' : 'rgba(255,255,255,0.02)', border: `1px solid ${batchChecked[anim.id] ? 'rgba(74, 222, 128, 0.2)' : 'rgba(255,255,255,0.06)'}`, borderRadius: '8px', padding: '0.6rem 0.8rem' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                           <input type="checkbox" checked={batchChecked[anim.id] || false} onChange={e => setBatchChecked(prev => ({ ...prev, [anim.id]: e.target.checked }))} />
-                          
+
                           {editingAnim === anim.id ? (
                             <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
                               <input value={anim.display_name} onChange={e => {
@@ -2995,7 +3129,7 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
       {/* Save Modal Overlay */}
       <AnimatePresence>
         {isSaveModalOpen && (
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -3006,7 +3140,7 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
             }}
             onClick={() => setIsSaveModalOpen(false)}
           >
-            <motion.div 
+            <motion.div
               initial={{ scale: 0.95, y: 20 }}
               animate={{ scale: 1, y: 0 }}
               exit={{ scale: 0.95, y: 20 }}
@@ -3017,11 +3151,11 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
                 <h2 style={{ fontSize: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                   <FolderOpen size={24} color="var(--accent-primary)" />
-                  {isDeleteMode ? <span style={{ color: '#ef4444' }}>Delete</span> : 
+                  {isDeleteMode ? <span style={{ color: '#ef4444' }}>Delete</span> :
                    isResetMode ? <span style={{ color: 'var(--accent-primary)' }}>Reset</span> : 'Load'}{' '}
                   Project
                 </h2>
-                <button 
+                <button
                   style={{ background: 'none', border: 'none', color: 'var(--text-dim)', cursor: 'pointer', padding: '0.5rem' }}
                   onClick={() => setIsSaveModalOpen(false)}
                 >
@@ -3037,7 +3171,7 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
                 ) : (
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '1rem' }}>
                     {savesList.map((save, i) => (
-                      <div 
+                      <div
                         key={save.id || i}
                         className="glass-card"
                         style={{ padding: '0', overflow: 'hidden', cursor: 'pointer', display: 'flex', flexDirection: 'column', height: '280px' }}
@@ -3069,7 +3203,7 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
       {/* Experimental Turnaround Modal */}
       <AnimatePresence>
         {isTurnaroundModalOpen && (
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -3082,7 +3216,7 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
                if (!generatingTurnaround) setIsTurnaroundModalOpen(false)
             }}
           >
-            <motion.div 
+            <motion.div
               initial={{ scale: 0.95, y: 20 }}
               animate={{ scale: 1, y: 0 }}
               exit={{ scale: 0.95, y: 20 }}
@@ -3097,7 +3231,7 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
                 <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
                   {!generatingTurnaround && turnaroundUrl && (
                     <>
-                      <button 
+                      <button
                         className="btn-primary"
                         style={{ padding: '0.4rem 1rem', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.4rem', background: 'var(--accent-secondary)' }}
                         onClick={handleSaveProject}
@@ -3106,7 +3240,7 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
                         <Save size={14} /> {activeProjectId ? `Save ${activeProjectId}` : 'Save Project'}
                       </button>
                       <div style={{ width: '1px', height: '20px', background: 'var(--glass-border)', margin: '0 0.5rem' }} />
-                      <button 
+                      <button
                         className="btn-secondary"
                         style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
                         onClick={handleUndo}
@@ -3115,9 +3249,9 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
                       >
                         <RefreshCw size={14} style={{ transform: 'scaleX(-1)' }} /> Undo
                       </button>
-                      <button 
+                      <button
                         className={isWandActive ? "btn-primary" : "btn-secondary"}
-                        style={{ 
+                        style={{
                           padding: '0.4rem 1rem', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.4rem',
                           background: isWandActive ? 'var(--accent-primary)' : undefined,
                           borderColor: isWandActive ? 'var(--accent-primary)' : undefined
@@ -3126,9 +3260,9 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
                       >
                         <Wand2 size={14} /> Magic Wand {isWandActive ? 'ON' : 'OFF'}
                       </button>
-                      <button 
+                      <button
                         className={zoomLevel > 1 ? "btn-primary" : "btn-secondary"}
-                        style={{ 
+                        style={{
                           padding: '0.4rem 1rem', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.4rem',
                           background: zoomLevel > 1 ? 'var(--accent-secondary)' : undefined,
                           borderColor: zoomLevel > 1 ? 'var(--accent-secondary)' : undefined
@@ -3140,7 +3274,7 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
                     </>
                   )}
                   {!generatingTurnaround && (
-                    <button 
+                    <button
                       style={{ background: 'none', border: 'none', color: 'var(--text-dim)', cursor: 'pointer', padding: '0.5rem' }}
                       onClick={() => { setIsTurnaroundModalOpen(false); setIsWandActive(false); }}
                     >
@@ -3150,14 +3284,14 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
                 </div>
               </div>
 
-              <div style={{ 
-                background: '#050505', 
-                borderRadius: '8px', 
+              <div style={{
+                background: '#050505',
+                borderRadius: '8px',
                 height: '65vh',
-                display: zoomLevel > 1 ? 'block' : 'flex', 
-                alignItems: 'center', 
-                justifyContent: 'center', 
-                padding: zoomLevel > 1 ? '0' : '1rem', 
+                display: zoomLevel > 1 ? 'block' : 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: zoomLevel > 1 ? '0' : '1rem',
                 border: '1px solid var(--glass-border)',
                 cursor: isWandActive ? 'crosshair' : 'default',
                 overflow: 'auto',
@@ -3170,18 +3304,18 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
                     <p style={{ fontSize: '0.8rem', color: '#888' }}>This requires ~14GB VRAM. Generating high-fidelity assets...</p>
                   </div>
                 ) : turnaroundUrl ? (
-                  <img 
-                    src={turnaroundUrl} 
-                    alt="Turnaround Sheet" 
-                    style={{ 
+                  <img
+                    src={turnaroundUrl}
+                    alt="Turnaround Sheet"
+                    style={{
                       width: zoomLevel > 1 ? `${zoomLevel * 100}%` : 'auto',
-                      maxWidth: zoomLevel > 1 ? 'none' : '100%', 
+                      maxWidth: zoomLevel > 1 ? 'none' : '100%',
                       height: 'auto',
-                      maxHeight: zoomLevel > 1 ? 'none' : '100%', 
+                      maxHeight: zoomLevel > 1 ? 'none' : '100%',
                       objectFit: zoomLevel > 1 ? 'unset' : 'contain',
                       display: 'block',
                       transition: 'width 0.2s ease-in-out'
-                    }} 
+                    }}
                     onClick={handleWandClick}
                     crossOrigin="anonymous"
                   />
@@ -3189,25 +3323,25 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
                   <p style={{ color: 'var(--text-dim)' }}>Failed to generate turnaround sheet.</p>
                 )}
               </div>
-              
+
               {!generatingTurnaround && turnaroundUrl && (
                   <div style={{ marginTop: '1.5rem', display: 'flex', justifyContent: 'center', gap: '1rem' }}>
                      <button className="btn-secondary" onClick={() => setIsTurnaroundModalOpen(false)}>Close Experiment</button>
                      <a href={turnaroundUrl} download="turnaround.png" className="btn-secondary" style={{ textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                        <Download size={18} /> Download Sheet
                      </a>
-                     <button 
-                        className="btn-primary" 
-                        style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: 'linear-gradient(to right, #8b5cf6, #d946ef)' }} 
+                     <button
+                        className="btn-primary"
+                        style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: 'linear-gradient(to right, #8b5cf6, #d946ef)' }}
                         onClick={() => handleSlice(false)}
                         disabled={slicing}
                      >
                        {slicing ? <Loader2 size={18} className="animate-spin" /> : <Wand2 size={18} />}
                        {slicing ? 'Slicing...' : 'Save & Slice'}
                      </button>
-                     <button 
-                        className="btn-secondary" 
-                        style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', borderColor: '#ef4444', color: '#ef4444' }} 
+                     <button
+                        className="btn-secondary"
+                        style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', borderColor: '#ef4444', color: '#ef4444' }}
                         onClick={() => handleSlice(true)}
                         disabled={slicing}
                      >
@@ -3220,11 +3354,11 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
           </motion.div>
         )}
       </AnimatePresence>
-      
+
       {/* Options Modal */}
       <AnimatePresence>
         {isOptionsOpen && (
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -3235,7 +3369,7 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
             }}
             onClick={() => setIsOptionsOpen(false)}
           >
-            <motion.div 
+            <motion.div
               initial={{ scale: 0.95, y: 20 }}
               animate={{ scale: 1, y: 0 }}
               exit={{ scale: 0.95, y: 20 }}
@@ -3255,21 +3389,21 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
                 <p style={{ color: 'var(--text-dim)', marginBottom: '1rem' }}>Background Removal:</p>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
                   <div style={{ display: 'flex', gap: '1rem' }}>
-                    <button 
+                    <button
                       className={removerType === 'ai' ? "btn-primary" : "btn-secondary"}
                       style={{ flex: 1, padding: '0.5rem', fontSize: '0.8rem' }}
                       onClick={() => setRemoverType('ai')}
                     >
                       AI Remover
                     </button>
-                    <button 
+                    <button
                       className={removerType === 'simple' ? "btn-primary" : "btn-secondary"}
                       style={{ flex: 1, padding: '0.5rem', fontSize: '0.8rem' }}
                       onClick={() => setRemoverType('simple')}
                     >
                       Simple
                     </button>
-                    <button 
+                    <button
                       className={removerType === 'none' ? "btn-primary" : "btn-secondary"}
                       style={{ flex: 1, padding: '0.5rem', fontSize: '0.8rem' }}
                       onClick={() => setRemoverType('none')}
@@ -3277,14 +3411,14 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
                       None
                     </button>
                   </div>
-                  
+
                   <div style={{ marginBottom: '1rem', padding: '0.8rem', background: 'rgba(255,255,255,0.03)', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)' }}>
                     <h4 style={{ fontSize: '0.8rem', color: 'var(--accent-primary)', marginBottom: '0.6rem', textTransform: 'uppercase', letterSpacing: '1px' }}>Generation Quality Control</h4>
                     <label style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', fontSize: '0.9rem', cursor: 'pointer' }}>
-                      <input 
-                        type="checkbox" 
-                        checked={enforceWhite} 
-                        onChange={(e) => setEnforceWhite(e.target.checked)} 
+                      <input
+                        type="checkbox"
+                        checked={enforceWhite}
+                        onChange={(e) => setEnforceWhite(e.target.checked)}
                         style={{ width: '16px', height: '16px' }}
                       />
                       <span>Enforce White Background (Auto-Retry)</span>
@@ -3297,7 +3431,7 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
                     <div style={{ marginBottom: '0.5rem' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem', alignItems: 'center' }}>
                         <label style={{ fontSize: '0.9rem' }}>Removal Sensitivity: {removalSensitivity}</label>
-                        <button 
+                        <button
                           style={{ background: 'none', border: 'none', color: 'var(--accent-primary)', fontSize: '0.7rem', cursor: 'pointer', textDecoration: 'underline', padding: 0 }}
                           onClick={() => setRemovalSensitivity(240)}
                         >
@@ -3309,8 +3443,8 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
                           {removalSensitivity > 245 ? 'Low (Keep More)' : removalSensitivity < 210 ? 'High (Cut More)' : 'Balanced'}
                         </span>
                       </div>
-                      <input 
-                        type="range" 
+                      <input
+                        type="range"
                         min="100" max="255" step="1"
                         value={removalSensitivity}
                         onChange={(e) => setRemovalSensitivity(parseInt(e.target.value))}
@@ -3323,10 +3457,10 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
 
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem', padding: '0.8rem', background: 'rgba(255,255,255,0.03)', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)' }}>
                       <label style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', fontSize: '0.9rem', cursor: 'pointer', color: 'var(--accent-primary)' }}>
-                        <input 
-                          type="checkbox" 
-                          checked={forceReslice} 
-                          onChange={(e) => setForceReslice(e.target.checked)} 
+                        <input
+                          type="checkbox"
+                          checked={forceReslice}
+                          onChange={(e) => setForceReslice(e.target.checked)}
                           style={{ width: '16px', height: '16px' }}
                         />
                         <span>Force Fresh Slice (Ignore Cache)</span>
@@ -3334,17 +3468,17 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
 
                       {removerType === 'ai' && (
                         <label style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', fontSize: '0.9rem', cursor: 'pointer' }}>
-                          <input 
-                            type="checkbox" 
-                            checked={alphaMatting} 
-                            onChange={(e) => setAlphaMatting(e.target.checked)} 
+                          <input
+                            type="checkbox"
+                            checked={alphaMatting}
+                            onChange={(e) => setAlphaMatting(e.target.checked)}
                             style={{ width: '16px', height: '16px' }}
                           />
                           <span>Enable Alpha Matting (Refined Edges)</span>
                         </label>
                       )}
                     </div>
-                    
+
                     {removerType === 'simple' && (
                       <p style={{ fontSize: '0.8rem', color: '#666', fontStyle: 'italic', textAlign: 'left' }}>
                         * Simple mode targets pure backgrounds. Best for high-contrast sheets.
@@ -3363,15 +3497,15 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
 
       {/* Surgical Masking Tool */}
       {isMasking && (
-        <LimbMasker 
-          imageUrl={turnaroundUrl} 
+        <LimbMasker
+          imageUrl={turnaroundUrl}
           title={activeManualLimb ? `Manual Surgery: ${activeManualLimb}` : "Surgical Masking"}
           initialMask={activeManualLimb ? (directionalLimbMasks[activeDirection]?.[activeManualLimb]) : null}
-          onCancel={() => { setIsMasking(false); setActiveManualLimb(null); }} 
-          onSave={handleFixPose} 
+          onCancel={() => { setIsMasking(false); setActiveManualLimb(null); }}
+          onSave={handleFixPose}
         />
       )}
-      
+
       {/* Slice Cleanup Editor */}
       {cleanupSlice && (
         <SliceCleanupEditor
@@ -3406,7 +3540,7 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
       {/* Load Project Modal */}
       <AnimatePresence>
         {isLoadModalOpen && (
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -3417,7 +3551,7 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
             }}
             onClick={() => setIsLoadModalOpen(false)}
           >
-            <motion.div 
+            <motion.div
               initial={{ scale: 0.9, y: 30 }}
               animate={{ scale: 1, y: 0 }}
               exit={{ scale: 0.9, y: 30 }}
@@ -3434,7 +3568,7 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
                   <X size={24} />
                 </button>
               </div>
-              
+
               <div style={{ flex: 1, overflowY: 'auto', padding: '1.5rem' }}>
                 {savedProjects.length === 0 ? (
                   <div style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-dim)' }}>
@@ -3444,7 +3578,7 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
                 ) : (
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))', gap: '1.5rem' }}>
                     {savedProjects.filter(p => p && p.id).map(project => (
-                      <motion.div 
+                      <motion.div
                         key={project.id}
                         whileHover={{ y: -5, borderColor: isDeleteMode ? '#ef4444' : 'var(--accent-primary)' }}
                         className="glass-card"
@@ -3463,7 +3597,7 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
                         { (isDeleteMode || isResetMode) && (
                         <div style={{ position: 'absolute', top: '1rem', right: '1rem', zIndex: 5, display: 'flex', gap: '0.5rem' }}>
                           {isResetMode && (
-                            <div 
+                            <div
                               style={{ background: 'var(--accent-primary)', borderRadius: '50%', padding: '0.35rem', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', boxShadow: '0 2px 10px rgba(0,0,0,0.5)' }}
                               title="Reset Project"
                               onClick={(e) => { e.stopPropagation(); handleResetProject(project); }}
@@ -3473,14 +3607,14 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
                           )}
                           {isDeleteMode && (
                             <>
-                              <div 
+                              <div
                                 style={{ background: 'var(--accent-primary)', borderRadius: '50%', padding: '0.35rem', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', boxShadow: '0 2px 10px rgba(0,0,0,0.5)' }}
                                 title="Factory Reset (Restore Original)"
                                 onClick={(e) => { e.stopPropagation(); handleResetProject(project); }}
                               >
                                 <RefreshCw size={12} color="white" />
                               </div>
-                              <div 
+                              <div
                                 style={{ background: '#ef4444', borderRadius: '50%', padding: '0.35rem', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', boxShadow: '0 2px 10px rgba(0,0,0,0.5)' }}
                                 title="Delete Project"
                                 onClick={(e) => { e.stopPropagation(); setProjectToDelete(project); }}
@@ -3492,7 +3626,7 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
                         </div>
                         )}
 
-                        <div style={{ 
+                        <div style={{
                           width: '100%', aspectRatio: '16/9', background: '#000', borderRadius: '4px', overflow: 'hidden', marginBottom: '1rem',
                           border: '1px solid var(--glass-border)'
                         }}>
@@ -3518,7 +3652,7 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
       {/* Delete Confirmation Modal */}
       <AnimatePresence>
         {projectToDelete && (
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -3529,7 +3663,7 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
             }}
             onClick={() => setProjectToDelete(null)}
           >
-            <motion.div 
+            <motion.div
               initial={{ scale: 0.9, y: 20 }}
               animate={{ scale: 1, y: 0 }}
               exit={{ scale: 0.9, y: 20 }}
@@ -3543,11 +3677,11 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
                 Are you sure you want to delete this sprite and all its parts? <br />
                 <span style={{ fontSize: '0.8rem', opacity: 0.7 }}>This action cannot be undone.</span>
               </p>
-              
+
               <div style={{ display: 'flex', gap: '1rem' }}>
                 <button className="btn-secondary" style={{ flex: 1 }} onClick={() => setProjectToDelete(null)}>Cancel</button>
-                <button 
-                  className="btn-primary" 
+                <button
+                  className="btn-primary"
                   style={{ flex: 1, background: '#ef4444', borderColor: '#ef4444' }}
                   onClick={() => handleDeleteProject(projectToDelete)}
                 >
@@ -3558,6 +3692,158 @@ Primary request: generate a fluid looping walk cycle with smooth animation timin
           </motion.div>
         )}
       </AnimatePresence>
+      {/* Batch JSON Loader Modal */}
+      <AnimatePresence>
+        {showBatchJSONPopup && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            style={{
+              position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+              background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(10px)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              zIndex: 1000, padding: '2rem'
+            }}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="glass-card"
+              style={{
+                width: '100%', maxWidth: '800px',
+                position: 'relative', overflow: 'hidden'
+              }}
+            >
+              <button
+                onClick={() => setShowBatchJSONPopup(false)}
+                style={{ position: 'absolute', top: '1rem', right: '1rem', background: 'none', border: 'none', color: '#888', cursor: 'pointer' }}
+              >
+                <X size={24} />
+              </button>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1.5rem' }}>
+                <FileJson size={24} color="var(--accent-primary)" />
+                <h2 style={{ margin: 0 }}>Batch JSON Loader</h2>
+              </div>
+
+              <div style={{ marginBottom: '2rem', padding: '1rem', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
+                <h3 style={{ fontSize: '1rem', marginBottom: '1rem' }}>Copy this prompt for your LLM (ChatGPT/Claude):</h3>
+                <div style={{ position: 'relative' }}>
+                  <textarea
+                    readOnly
+                    value={`I need you to generate a JSON array of character descriptions for a sprite generation pipeline.
+Please follow these EXACT constraints:
+1. All characters MUST be humanoid.
+2. NO tails, NO capes, NO flowing fabrics that extend far outside the body silhouette.
+3. NO weapons or objects in their hands.
+4. Keep your description under 40 tokens (about 30 words) to ensure it stays within the 77-token CLIP limit after we inject our pipeline formatting tags.
+5. Provide ONLY valid JSON in this format:
+[
+  { "prompt": "A cyberpunk ronin with neon armor, pixel art style" },
+  { "prompt": "A fantasy rogue in dark leather armor, pixel art style" }
+]`}
+                    style={{
+                      width: '100%', height: '240px', resize: 'none',
+                      fontFamily: 'monospace', fontSize: '0.85rem',
+                      background: '#111', color: '#0f0',
+                      border: '1px solid #333', borderRadius: '4px', padding: '1rem'
+                    }}
+                  />
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(`I need you to generate a JSON array of character descriptions for a sprite generation pipeline.
+Please follow these EXACT constraints:
+1. All characters MUST be humanoid.
+2. NO tails, NO capes, NO flowing fabrics that extend far outside the body silhouette.
+3. NO weapons or objects in their hands.
+4. Keep your description under 40 tokens (about 30 words) to ensure it stays within the 77-token CLIP limit after we inject our pipeline formatting tags.
+5. Provide ONLY valid JSON in this format:
+[
+  { "prompt": "A cyberpunk ronin with neon armor, pixel art style" },
+  { "prompt": "A fantasy rogue in dark leather armor, pixel art style" }
+]`);
+                      alert("Prompt copied to clipboard!");
+                    }}
+                    className="btn-secondary"
+                    style={{ position: 'absolute', top: '10px', right: '10px', padding: '0.4rem', background: '#222' }}
+                    title="Copy to Clipboard"
+                  >
+                    <Copy size={16} />
+                  </button>
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'center' }}>
+                <input
+                  type="file"
+                  accept=".json"
+                  style={{ display: 'none' }}
+                  ref={fileInputRef}
+                  onChange={handleBatchJSONLoad}
+                />
+                <button
+                  className="btn-primary"
+                  style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '1rem 2rem', fontSize: '1.1rem' }}
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  <Upload size={20} />
+                  Load JSON File & Start Batch
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Batch Processing Overlay */}
+      <AnimatePresence>
+        {batchProgress.active && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            style={{
+              position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+              background: 'rgba(0,0,0,0.9)', backdropFilter: 'blur(5px)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              zIndex: 2000, padding: '2rem'
+            }}
+          >
+            <div style={{ textAlign: 'center', maxWidth: '600px' }}>
+              <motion.div
+                animate={{ rotate: 360 }}
+                transition={{ repeat: Infinity, duration: 2, ease: 'linear' }}
+                style={{ marginBottom: '2rem', display: 'flex', justifyContent: 'center' }}
+              >
+                <Loader2 size={64} color="var(--accent-primary)" />
+              </motion.div>
+              <h2 style={{ fontSize: '2rem', marginBottom: '1rem' }}>
+                Batch Processing... {batchProgress.current} / {batchProgress.total}
+              </h2>
+              <div style={{
+                background: 'rgba(255,255,255,0.1)', height: '8px',
+                borderRadius: '4px', overflow: 'hidden', marginBottom: '1.5rem'
+              }}>
+                <div style={{
+                  height: '100%',
+                  width: `${(batchProgress.current / batchProgress.total) * 100}%`,
+                  background: 'var(--accent-primary)',
+                  transition: 'width 0.3s ease'
+                }} />
+              </div>
+              <p style={{ color: '#aaa', fontStyle: 'italic' }}>
+                Currently generating: "{batchProgress.currentPrompt}"
+              </p>
+              <p style={{ marginTop: '2rem', color: '#666', fontSize: '0.8rem' }}>
+                Please do not close this window until the batch is complete.
+              </p>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
     </div>
   )
 }
