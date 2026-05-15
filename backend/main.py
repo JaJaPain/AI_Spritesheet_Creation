@@ -1599,9 +1599,13 @@ async def list_projects():
                                 "id": d,
                                 "prompt": meta.get("prompt", ""),
                                 "image_url": meta.get("image_url", f"/output_saves/{d}/{d}_turnaround.png"),
+                                "compounded_url": meta.get("compounded_url"),
+                                "is_compounded": meta.get("is_compounded", False),
                                 "timestamp": os.path.getmtime(meta_path),
                                 "all_slice_versions": meta.get("all_slice_versions", []),
-                                "selected_indices": meta.get("selected_indices", [0, 0, 0, 0, 0])
+                                "selected_indices": meta.get("selected_indices", [0, 0, 0, 0, 0]),
+                                "pose_selections": meta.get("pose_selections", {}),
+                                "compound_target_sprite_height": meta.get("compound_target_sprite_height")
                             })
                         except json.JSONDecodeError:
                             logger.warning(f"  Skipping corrupted project folder {d}: Empty or invalid metadata.json")
@@ -3620,6 +3624,14 @@ async def save_pose_selections(project_id: str, req: SavePoseSelectionsRequest):
     meta["pose_selections"] = req.selections
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
+
+    try:
+        state = load_gemma_state(project_dir)
+        reconcile_manual_selections(state, req.selections)
+        save_gemma_state(project_dir, state)
+    except Exception as e:
+        logger.warning(f"Could not sync Gemma state after saving selections: {e}")
+
     return {"status": "success"}
 
 class AutoLabelSlice(BaseModel):
@@ -3629,6 +3641,8 @@ class AutoLabelSlice(BaseModel):
 class AutoLabelRequest(BaseModel):
     project_id: str
     slices: List[AutoLabelSlice]
+    selections: Optional[dict] = None
+    max_attempts: Optional[int] = 3
 
 def normalize_pose_label(raw_text: str) -> str:
     text = (raw_text or "").strip().lower()
@@ -3684,6 +3698,175 @@ def classify_pose_with_gemma(gemma_bundle: dict, image: Image.Image) -> tuple[st
     raw = processor.decode(generated_tokens, skip_special_tokens=True).strip()
     return normalize_pose_label(raw), raw
 
+def empty_gemma_state():
+    return {
+        "selected": {pose: None for pose in POSE_ORDER},
+        "ignored": {},
+        "decisions": [],
+        "attempts": 0,
+        "updated_at": time.time()
+    }
+
+def load_gemma_state(project_dir: str):
+    gemma_path = os.path.join(project_dir, "Gemma.json")
+    if os.path.exists(gemma_path):
+        try:
+            with open(gemma_path, "r") as f:
+                state = json.load(f)
+        except Exception:
+            state = empty_gemma_state()
+    else:
+        state = empty_gemma_state()
+
+    if "selected" not in state or not isinstance(state["selected"], dict):
+        state["selected"] = {}
+    for pose in POSE_ORDER:
+        state["selected"].setdefault(pose, None)
+    if "ignored" not in state or not isinstance(state["ignored"], dict):
+        state["ignored"] = {}
+    state.setdefault("decisions", [])
+    state.setdefault("attempts", 0)
+    state.setdefault("updated_at", time.time())
+    save_gemma_state(project_dir, state)
+    return state
+
+def save_gemma_state(project_dir: str, state: dict):
+    state["updated_at"] = time.time()
+    gemma_path = os.path.join(project_dir, "Gemma.json")
+    with open(gemma_path, "w") as f:
+        json.dump(state, f, indent=2)
+
+def normalize_selection_url(url: str) -> str:
+    if not url:
+        return url
+    if "?" in url:
+        url = url.split("?")[0]
+    if "http" in url:
+        return "/" + "/".join(url.split("/")[3:])
+    return url
+
+def current_slice_cards(meta: dict):
+    cards = []
+    for col_index, versions in enumerate(meta.get("all_slice_versions", []) or []):
+        for ver_index, url in enumerate(versions):
+            cards.append({
+                "card_id": f"card_{col_index}_{ver_index}",
+                "url": url
+            })
+    return cards
+
+def reconcile_manual_selections(state: dict, selections: dict):
+    applied = {}
+    ignored = {}
+    for card_id, selection in (selections or {}).items():
+        if not isinstance(selection, dict):
+            continue
+        label = selection.get("label")
+        url = normalize_selection_url(selection.get("url"))
+        if label == "DO NOT USE" and url:
+            ignored[card_id] = {"label": "DO NOT USE", "url": url}
+            state["ignored"][card_id] = {
+                "url": url,
+                "source": "manual",
+                "updated_at": time.time()
+            }
+            for pose, entry in list(state["selected"].items()):
+                if entry and entry.get("card_id") == card_id:
+                    state["selected"][pose] = None
+        elif label in POSE_ORDER and url:
+            applied[card_id] = {"label": label, "url": url}
+            state["ignored"].pop(card_id, None)
+            state["selected"][label] = {
+                "card_id": card_id,
+                "url": url,
+                "confidence": None,
+                "source": "manual",
+                "updated_at": time.time()
+            }
+
+    # The visible dropdown state is the authority at the start of a Gemma pass.
+    # This clears stale Gemma/manual choices when the user changes a card to
+    # Unselected or DO NOT USE before pressing A. Gemma4 again.
+    next_selected = {pose: None for pose in POSE_ORDER}
+    for card_id, selection in applied.items():
+        label = selection["label"]
+        next_selected[label] = {
+            "card_id": card_id,
+            "url": selection["url"],
+            "confidence": None,
+            "source": "manual",
+            "updated_at": time.time()
+        }
+    state["selected"] = next_selected
+    state["ignored"] = {
+        card_id: {
+            "url": selection["url"],
+            "source": "manual",
+            "updated_at": time.time()
+        }
+        for card_id, selection in ignored.items()
+    }
+    return {**applied, **ignored}
+
+def apply_gemma_selection(state: dict, selections: dict, pose: str, card_id: str, url: str, raw: str):
+    clean_url = normalize_selection_url(url)
+    state["selected"][pose] = {
+        "card_id": card_id,
+        "url": clean_url,
+        "confidence": None,
+        "source": "gemma",
+        "raw": raw,
+        "updated_at": time.time()
+    }
+    selections[card_id] = {"label": pose, "url": clean_url}
+
+def selections_from_gemma_state(state: dict):
+    selections = {}
+    for card_id, entry in (state.get("ignored") or {}).items():
+        url = normalize_selection_url(entry.get("url"))
+        if card_id and url:
+            selections[card_id] = {"label": "DO NOT USE", "url": url}
+    for pose, entry in (state.get("selected") or {}).items():
+        if pose not in POSE_ORDER or not entry:
+            continue
+        card_id = entry.get("card_id")
+        url = normalize_selection_url(entry.get("url"))
+        if card_id and url:
+            selections[card_id] = {"label": pose, "url": url}
+    return selections
+
+def missing_poses(state: dict):
+    return [pose for pose in POSE_ORDER if not state["selected"].get(pose)]
+
+def generation_plan_for_missing(poses: list[str]):
+    plan = {pose: 2 for pose in poses}
+    for idx in range(2):
+        if poses:
+            plan[poses[idx % len(poses)]] += 1
+    return plan
+
+@app.get("/project/{project_id}/gemma-status")
+async def get_gemma_status(project_id: str):
+    project_dir = os.path.join("Output_Saves", project_id)
+    meta_path = os.path.join(project_dir, "metadata.json")
+    if not os.path.exists(meta_path):
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    state = load_gemma_state(project_dir)
+    selections = selections_from_gemma_state(state)
+    with open(meta_path, "r") as f:
+        meta = json.load(f)
+
+    return {
+        "status": "success",
+        "selections": selections,
+        "missing": missing_poses(state),
+        "attempts": state.get("attempts", 0),
+        "updated_at": state.get("updated_at"),
+        "all_slice_versions": meta.get("all_slice_versions", []),
+        "decisions": state.get("decisions", [])
+    }
+
 @app.post("/project/{project_id}/auto-label-gemma4")
 async def auto_label_with_gemma4(project_id: str, req: AutoLabelRequest):
     project_dir = os.path.join("Output_Saves", project_id)
@@ -3692,51 +3875,146 @@ async def auto_label_with_gemma4(project_id: str, req: AutoLabelRequest):
         raise HTTPException(status_code=404, detail="Project not found")
 
     try:
-        gemma = manager.load_gemma4_e4b()
-        decisions = []
-        selections = {}
-        used_labels = set()
-
-        for item in req.slices:
-            img_path = resolve_image_path(item.url)
-            if not os.path.exists(img_path):
-                decisions.append({
-                    "card_id": item.card_id,
-                    "url": item.url,
-                    "label": "Unselected",
-                    "raw": "missing file",
-                    "applied": False
-                })
-                continue
-
-            image = Image.open(img_path).convert("RGBA")
-            label, raw = await run_in_threadpool(classify_pose_with_gemma, gemma, image)
-            applied = False
-            applied_label = label
-            if label != "Unselected" and label not in used_labels:
-                selections[item.card_id] = {"label": label, "url": item.url}
-                used_labels.add(label)
-                applied = True
-            elif label != "Unselected":
-                applied_label = "Unselected"
-                raw = f"{raw} (duplicate {label}; left unselected)"
-
-            decisions.append({
-                "card_id": item.card_id,
-                "url": item.url,
-                "label": applied_label,
-                "raw": raw,
-                "applied": applied
-            })
-
         with open(meta_path, "r") as f:
             meta = json.load(f)
+
+        state = load_gemma_state(project_dir)
+        selections = reconcile_manual_selections(state, req.selections or meta.get("pose_selections", {}))
+        decisions = []
+        generated_urls = []
+        max_attempts = max(1, req.max_attempts or 3)
+
+        async def classify_available_cards(cards):
+            nonlocal decisions, selections, state
+            gemma = manager.load_gemma4_e4b()
+            selected_card_ids = set(selections.keys())
+            ignored_card_ids = set((state.get("ignored") or {}).keys())
+
+            for item in cards:
+                card_id = item.card_id if isinstance(item, AutoLabelSlice) else item.get("card_id")
+                url = item.url if isinstance(item, AutoLabelSlice) else item.get("url")
+                if card_id in selected_card_ids or card_id in ignored_card_ids:
+                    continue
+
+                needed = missing_poses(state)
+                if not needed:
+                    break
+
+                img_path = resolve_image_path(url)
+                if not os.path.exists(img_path):
+                    decision = {
+                        "card_id": card_id,
+                        "url": url,
+                        "label": "Unselected",
+                        "raw": "missing file",
+                        "applied": False,
+                        "needed_before": needed
+                    }
+                    decisions.append(decision)
+                    state["decisions"].append(decision)
+                    continue
+
+                image = Image.open(img_path).convert("RGBA")
+                label, raw = await run_in_threadpool(classify_pose_with_gemma, gemma, image)
+                applied = False
+                applied_label = label
+
+                if label in needed:
+                    apply_gemma_selection(state, selections, label, card_id, url, raw)
+                    selected_card_ids.add(card_id)
+                    applied = True
+                elif label != "Unselected" and label not in needed:
+                    applied_label = "Unselected"
+                    raw = f"{raw} (not currently needed)"
+
+                decision = {
+                    "card_id": card_id,
+                    "url": normalize_selection_url(url),
+                    "label": applied_label,
+                    "raw": raw,
+                    "applied": applied,
+                    "needed_before": needed
+                }
+                decisions.append(decision)
+                state["decisions"].append(decision)
+
+            save_gemma_state(project_dir, state)
+            with open(meta_path, "r") as f:
+                current_meta = json.load(f)
+            current_meta["pose_selections"] = selections
+            current_meta["gemma4_auto_label_decisions"] = state.get("decisions", [])
+            current_meta["gemma4_missing_poses"] = missing_poses(state)
+            current_meta["updated_at"] = time.time()
+            save_metadata_safe(meta_path, current_meta)
+
+        await classify_available_cards(req.slices)
+
+        attempts_this_run = 0
+        while missing_poses(state) and attempts_this_run < max_attempts:
+            missing_before = missing_poses(state)
+            plan = generation_plan_for_missing(missing_before)
+            state["attempts"] = state.get("attempts", 0) + 1
+            attempts_this_run += 1
+            round_decision = {
+                "type": "generation_round",
+                "attempt": state["attempts"],
+                "attempt_this_run": attempts_this_run,
+                "missing": missing_before,
+                "plan": plan,
+                "created_at": time.time()
+            }
+            decisions.append(round_decision)
+            state["decisions"].append(round_decision)
+            save_gemma_state(project_dir, state)
+
+            manager.unload_all()
+            for pose, count in plan.items():
+                pose_index = POSE_ORDER.index(pose)
+                correction = await correct_pose(CorrectPoseRequest(
+                    project_id=project_id,
+                    sheet_url=meta.get("image_url", f"/output_saves/{project_id}/{project_id}_turnaround.png"),
+                    slice_index=pose_index,
+                    target_rotation=pose,
+                    num_variants=count
+                ))
+                for sheet_url in correction.get("urls", []) or []:
+                    generated_urls.append(sheet_url)
+                    slice_data = await slice_turnaround(SliceRequest(
+                        image_url=sheet_url,
+                        project_id=project_id,
+                        force_reslice=True,
+                        target_slice_index=pose_index
+                    ))
+                    if slice_data.get("all_slice_versions"):
+                        meta["all_slice_versions"] = slice_data["all_slice_versions"]
+
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+
+            generated_cards = current_slice_cards(meta)
+            generated_cards = [card for card in generated_cards if card["card_id"] not in selections]
+            await classify_available_cards(generated_cards)
+
+        missing_after = missing_poses(state)
+
         meta["pose_selections"] = selections
         meta["gemma4_auto_label_decisions"] = decisions
+        meta["gemma4_missing_poses"] = missing_after
         meta["updated_at"] = time.time()
         save_metadata_safe(meta_path, meta)
+        save_gemma_state(project_dir, state)
 
-        return {"status": "success", "selections": selections, "decisions": decisions}
+        return {
+            "status": "success",
+            "selections": selections,
+            "decisions": decisions,
+            "missing": missing_after,
+            "attempts": state.get("attempts", 0),
+            "attempts_this_run": attempts_this_run,
+            "generated_urls": generated_urls,
+            "all_slice_versions": meta.get("all_slice_versions", []),
+            "gemma_json": f"/output_saves/{project_id}/Gemma.json"
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -3749,6 +4027,103 @@ class CompoundAndCleanRequest(BaseModel):
     selected_slices: dict # mapping of label -> URL e.g., {"Front": "url1", "3/4 Front": "url2", ...}
 
 import shutil
+
+def get_turnaround_canvas_size(project_dir: str, project_id: str) -> tuple[int, int]:
+    """Use the original sheet size when available so compounding returns a normal turnaround."""
+    candidates = [
+        os.path.join(project_dir, f"{project_id}_turnaround_ORIGINAL.png"),
+        os.path.join(project_dir, f"{project_id}_turnaround.png"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                with Image.open(path) as img:
+                    if img.width > 0 and img.height > 0:
+                        return img.size
+            except Exception:
+                continue
+    return (1536, 768)
+
+def extract_sprite_from_slice(img: Image.Image) -> Image.Image:
+    """Crop a selected gallery slice down to its foreground character."""
+    rgba = img.convert("RGBA")
+    alpha = np.array(rgba.getchannel("A"))
+
+    if np.max(alpha) > 0 and np.min(alpha) < 250:
+        mask = alpha > 10
+    else:
+        rgb = np.array(rgba.convert("RGB"))
+        # Some older outputs are RGB on white; keep anything that is not close to white.
+        mask = np.any(rgb < 245, axis=2)
+
+    if not np.any(mask):
+        return rgba
+
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), 8)
+    if num_labels > 1:
+        image_area = rgba.width * rgba.height
+        min_area = max(64, int(image_area * 0.001))
+        kept = np.zeros(mask.shape, dtype=bool)
+        for label in range(1, num_labels):
+            x, y, w, h, area = stats[label]
+            if area >= min_area and w >= 6 and h >= 12:
+                kept |= labels == label
+        if np.any(kept):
+            mask = kept
+
+    ys, xs = np.where(mask)
+    pad = 2
+    left = max(0, int(xs.min()) - pad)
+    top = max(0, int(ys.min()) - pad)
+    right = min(rgba.width, int(xs.max()) + pad + 1)
+    bottom = min(rgba.height, int(ys.max()) + pad + 1)
+
+    data = np.array(rgba)
+    if not (np.max(alpha) > 0 and np.min(alpha) < 250):
+        data[..., 3] = np.where(mask, 255, 0).astype(np.uint8)
+    else:
+        data[..., 3][~mask] = 0
+    return Image.fromarray(data).crop((left, top, right, bottom))
+
+def compound_target_sprite_height(sprites: list[Image.Image], slot_w: int, canvas_h: int) -> int:
+    """Pick a shared sprite height for compounding, ignoring obvious height outliers."""
+    max_w = max(1, int(slot_w * 0.98))
+    max_h = max(1, int(canvas_h * 0.88))
+    fitted_heights = []
+    for sprite in sprites:
+        if sprite.width <= 0 or sprite.height <= 0:
+            continue
+        scale = min(max_w / sprite.width, max_h / sprite.height)
+        fitted_heights.append(sprite.height * scale)
+
+    if not fitted_heights:
+        return max_h
+
+    median_h = float(np.median(fitted_heights))
+    normal_heights = [
+        h for h in fitted_heights
+        if median_h <= 0 or abs(h - median_h) / median_h <= 0.15
+    ]
+    if not normal_heights:
+        normal_heights = fitted_heights
+
+    return max(1, min(max_h, int(round(sum(normal_heights) / len(normal_heights)))))
+
+def paste_sprite_into_slot(sheet: Image.Image, sprite: Image.Image, slot_index: int, slot_w: int, canvas_h: int, target_height: int):
+    sprite = sprite.convert("RGBA")
+    if sprite.width <= 0 or sprite.height <= 0:
+        return
+
+    max_w = max(1, int(slot_w * 0.98))
+    max_h = max(1, int(canvas_h * 0.88))
+    target_height = max(1, min(target_height, max_h))
+    scale = min(target_height / sprite.height, max_w / sprite.width, max_h / sprite.height)
+    new_size = (max(1, int(sprite.width * scale)), max(1, int(sprite.height * scale)))
+    sprite = sprite.resize(new_size, Image.Resampling.LANCZOS)
+
+    x = slot_index * slot_w + (slot_w - sprite.width) // 2
+    y = canvas_h - sprite.height - max(10, int(canvas_h * 0.055))
+    sheet.paste(sprite, (x, y), sprite)
 
 @app.post("/compound-and-clean")
 async def compound_and_clean(req: CompoundAndCleanRequest):
@@ -3763,12 +4138,9 @@ async def compound_and_clean(req: CompoundAndCleanRequest):
     slices_dir = os.path.join(project_dir, "slices")
 
     try:
-        # Load the 5 images
+        # Load the 5 selected pose sprites in the fixed turnaround order.
         pose_order = ["Front", "3/4 Front", "Side", "3/4 Back", "Back"]
-        images = []
-        max_h = 0
-        w_total = 0
-
+        selected_items = []
         kept_basenames = []
 
         for pose in pose_order:
@@ -3783,17 +4155,24 @@ async def compound_and_clean(req: CompoundAndCleanRequest):
             kept_basenames.append(os.path.basename(img_path))
 
             img = Image.open(img_path).convert("RGBA")
-            images.append(img)
-            max_h = max(max_h, img.height)
-            w_total += img.width
+            selected_items.append({
+                "pose": pose,
+                "url": url,
+                "path": img_path,
+                "sprite": extract_sprite_from_slice(img),
+            })
 
-        # Stitch them. Align to bottom.
-        sheet = Image.new("RGBA", (w_total, max_h), (0, 0, 0, 0))
-        current_x = 0
-        for img in images:
-            y_offset = max_h - img.height
-            sheet.paste(img, (current_x, y_offset), img)
-            current_x += img.width
+        canvas_w, canvas_h = get_turnaround_canvas_size(project_dir, project_id)
+        slot_w = max(1, canvas_w // len(pose_order))
+        target_sprite_height = compound_target_sprite_height(
+            [item["sprite"] for item in selected_items],
+            slot_w,
+            canvas_h
+        )
+
+        sheet = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+        for slot_index, item in enumerate(selected_items):
+            paste_sprite_into_slot(sheet, item["sprite"], slot_index, slot_w, canvas_h, target_sprite_height)
 
         compounded_filename = f"{project_id}_compounded.png"
         compounded_path = os.path.join(project_dir, compounded_filename)
@@ -3826,14 +4205,19 @@ async def compound_and_clean(req: CompoundAndCleanRequest):
             with open(meta_path, "r") as f:
                 meta = json.load(f)
 
-            new_versions = []
-            for pose in pose_order:
-                url = req.selected_slices.get(pose)
-                new_versions.append([url])
+            new_versions = [[item["url"]] for item in selected_items]
 
             meta["all_slice_versions"] = new_versions
+            meta["selected_indices"] = [0] * len(pose_order)
+            meta["pose_selections"] = {
+                f"card_{idx}_0": {"label": item["pose"], "url": item["url"]}
+                for idx, item in enumerate(selected_items)
+            }
             meta["compounded_url"] = f"/output_saves/{project_id}/{compounded_filename}"
+            meta["image_url"] = f"/output_saves/{project_id}/{compounded_filename}"
+            meta["compound_target_sprite_height"] = target_sprite_height
             meta["is_compounded"] = True
+            meta.pop("gemma4_missing_poses", None)
 
             with open(meta_path, "w") as f:
                 json.dump(meta, f, indent=2)

@@ -14,8 +14,9 @@ function SliceCleanupEditor({ imageUrl, onSave, onCancel, apiBase }) {
   const [isPanning, setIsPanning] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [tool, setTool] = useState('eraser'); // 'eraser' or 'smudge'
+  const [tool, setTool] = useState('eraser'); // 'eraser', 'smudge', or 'wand'
   const [smudgeStrength, setSmudgeStrength] = useState(0.5);
+  const [wandSensitivity, setWandSensitivity] = useState(35);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
   const lastDrawPos = useRef(null);
   const lastPanPos = useRef({ x: 0, y: 0 });
@@ -106,6 +107,65 @@ function SliceCleanupEditor({ imageUrl, onSave, onCancel, apiBase }) {
     ctx.restore();
   };
 
+  const eraseWandSelection = (x, y) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const startX = Math.floor(x);
+    const startY = Math.floor(y);
+    if (startX < 0 || startX >= canvas.width || startY < 0 || startY >= canvas.height) return;
+
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = imageData.data;
+    const startIndex = (startY * canvas.width + startX) * 4;
+    const target = [
+      data[startIndex],
+      data[startIndex + 1],
+      data[startIndex + 2],
+      data[startIndex + 3]
+    ];
+    if (target[3] === 0) return;
+
+    const colorLimit = wandSensitivity * 2.6;
+    const alphaLimit = Math.max(35, wandSensitivity * 2);
+    const colorLimitSq = colorLimit * colorLimit;
+    const totalPixels = canvas.width * canvas.height;
+    const visited = new Uint8Array(totalPixels);
+    const queue = new Int32Array(totalPixels);
+    let head = 0;
+    let tail = 0;
+    queue[tail++] = startY * canvas.width + startX;
+    visited[startY * canvas.width + startX] = 1;
+
+    while (head < tail) {
+      const pos = queue[head++];
+      const px = pos % canvas.width;
+      const py = Math.floor(pos / canvas.width);
+      const idx = pos * 4;
+      const dr = data[idx] - target[0];
+      const dg = data[idx + 1] - target[1];
+      const db = data[idx + 2] - target[2];
+      const da = Math.abs(data[idx + 3] - target[3]);
+
+      if ((dr * dr + dg * dg + db * db) > colorLimitSq || da > alphaLimit || data[idx + 3] === 0) {
+        continue;
+      }
+
+      data[idx + 3] = 0;
+
+      const neighbors = [pos - 1, pos + 1, pos - canvas.width, pos + canvas.width];
+      for (const next of neighbors) {
+        if (next < 0 || next >= totalPixels || visited[next]) continue;
+        const nx = next % canvas.width;
+        if ((next === pos - 1 && nx === canvas.width - 1) || (next === pos + 1 && nx === 0)) continue;
+        visited[next] = 1;
+        queue[tail++] = next;
+      }
+    }
+
+    ctx.putImageData(imageData, 0, 0);
+  };
+
   const handleDehalo = async () => {
     setIsProcessing(true);
     try {
@@ -140,6 +200,12 @@ function SliceCleanupEditor({ imageUrl, onSave, onCancel, apiBase }) {
     const pos = getMousePos(e);
     lastDrawPos.current = pos;
     if (tool === 'eraser') drawErase(pos.x, pos.y);
+    else if (tool === 'wand') {
+      eraseWandSelection(pos.x, pos.y);
+      saveState();
+      setIsDrawing(false);
+      lastDrawPos.current = null;
+    }
   };
 
   const onMouseMove = (e) => {
@@ -179,6 +245,7 @@ function SliceCleanupEditor({ imageUrl, onSave, onCancel, apiBase }) {
       if (e.key === ']') setBrushSize(prev => Math.min(prev + 2, 200));
       if (e.key === 'e') setTool('eraser');
       if (e.key === 's' && !e.ctrlKey) setTool('smudge');
+      if (e.key === 'w') setTool('wand');
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
@@ -222,6 +289,10 @@ function SliceCleanupEditor({ imageUrl, onSave, onCancel, apiBase }) {
               style={{ background: tool === 'smudge' ? 'var(--accent-primary)' : 'transparent', border: 'none', color: 'white', padding: '0.4rem 0.6rem', borderRadius: '0.4rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.8rem' }}>
               <Droplet size={16} /> Smudge
             </button>
+            <button onClick={() => setTool('wand')} title="Select Wand (W)"
+              style={{ background: tool === 'wand' ? 'var(--accent-primary)' : 'transparent', border: 'none', color: 'white', padding: '0.4rem 0.6rem', borderRadius: '0.4rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.8rem' }}>
+              <Wand2 size={16} /> Wand
+            </button>
           </div>
 
           <div style={{ width: 1, height: '1.5rem', background: 'rgba(255,255,255,0.1)' }} />
@@ -258,7 +329,7 @@ function SliceCleanupEditor({ imageUrl, onSave, onCancel, apiBase }) {
 
       {/* Canvas Workspace */}
       <div ref={containerRef}
-        style={{ flex: 1, position: 'relative', overflow: 'hidden', cursor: isPanning ? 'grabbing' : 'crosshair', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+        style={{ flex: 1, position: 'relative', overflow: 'hidden', cursor: isPanning ? 'grabbing' : tool === 'wand' ? 'cell' : 'crosshair', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
         onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp} onMouseLeave={onMouseUp}
       >
         <div style={{
@@ -275,7 +346,7 @@ function SliceCleanupEditor({ imageUrl, onSave, onCancel, apiBase }) {
           }} />
           {/* Brush cursor */}
           <svg style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', overflow: 'visible' }}>
-            {!isPanning && (
+            {!isPanning && tool !== 'wand' && (
               <circle cx={mousePos.x} cy={mousePos.y} r={(brushSize / 2) / zoom} fill="none" stroke="rgba(255,255,255,0.5)" strokeWidth={1 / zoom} />
             )}
           </svg>
@@ -310,6 +381,15 @@ function SliceCleanupEditor({ imageUrl, onSave, onCancel, apiBase }) {
             <div>
               <label style={{ fontSize: '0.7rem', display: 'block', marginBottom: '0.4rem', color: '#888' }}>Smudge Strength: {Math.round(smudgeStrength * 100)}%</label>
               <input type="range" min="0.05" max="1" step="0.05" value={smudgeStrength} onChange={(e) => setSmudgeStrength(parseFloat(e.target.value))} style={{ width: '120px' }} />
+            </div>
+          </>
+        )}
+        {tool === 'wand' && (
+          <>
+            <div style={{ width: 1, height: '30px', background: 'rgba(255,255,255,0.1)' }} />
+            <div>
+              <label style={{ fontSize: '0.7rem', display: 'block', marginBottom: '0.4rem', color: '#888' }}>Wand Sensitivity: {wandSensitivity}</label>
+              <input type="range" min="5" max="100" value={wandSensitivity} onChange={(e) => setWandSensitivity(parseInt(e.target.value))} style={{ width: '120px' }} />
             </div>
           </>
         )}
@@ -1383,10 +1463,12 @@ Continue?`;
     setPoseSelections(prev => {
       const next = { ...prev };
       if (poseLabel !== 'Unselected') {
-        // Remove any OTHER card that already has this label
-        Object.keys(next).forEach(key => {
-          if (next[key]?.label === poseLabel) delete next[key];
-        });
+        if (poseLabel !== 'DO NOT USE') {
+          // Remove any OTHER card that already has this label
+          Object.keys(next).forEach(key => {
+            if (next[key]?.label === poseLabel) delete next[key];
+          });
+        }
         next[cardId] = { label: poseLabel, url: url };
       } else {
         delete next[cardId];
@@ -1427,27 +1509,62 @@ Continue?`;
     }
 
     setAutoLabeling(true);
+    let pollTimer = null;
+    const applyGemmaStatus = (data) => {
+      if (data?.selections) {
+        setPoseSelections(data.selections);
+      }
+      if (data?.all_slice_versions) {
+        const absoluteVersions = data.all_slice_versions.map(group =>
+          group.map(url => url.startsWith('http') ? url : `${apiBase}${url}`)
+        );
+        setAllSliceVersions(absoluteVersions);
+      }
+    };
+
     try {
+      pollTimer = setInterval(async () => {
+        try {
+          const statusRes = await fetch(`${apiBase}/project/${activeProjectId}/gemma-status`);
+          const statusData = await statusRes.json();
+          if (statusData.status === 'success') {
+            applyGemmaStatus(statusData);
+          }
+        } catch (err) {
+          console.warn('Gemma status poll failed:', err);
+        }
+      }, 3000);
+
       const res = await fetch(`${apiBase}/project/${activeProjectId}/auto-label-gemma4`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project_id: activeProjectId, slices })
+        body: JSON.stringify({
+          project_id: activeProjectId,
+          slices,
+          selections: poseSelections,
+          max_attempts: 3
+        })
       });
       const data = await res.json();
       if (data.status !== 'success') {
         throw new Error(data.detail || 'Gemma auto-label failed');
       }
 
-      setPoseSelections(data.selections || {});
+      applyGemmaStatus(data);
       const lines = (data.decisions || []).map((d, i) => {
-        const file = d.url?.split('/').pop()?.split('?')[0] || d.card_id;
+        if (d.type === 'generation_round') {
+          return `${i + 1}. Flux round ${d.attempt}: missing ${d.missing?.join(', ') || 'none'}`;
+        }
+        const file = d.url?.split('/').pop()?.split('?')[0] || d.card_id || 'status update';
         return `${i + 1}. ${file}: ${d.label}${d.raw ? ` (${d.raw})` : ''}`;
       });
-      alert(`Gemma 4 decisions:\n\n${lines.join('\n')}`);
+      const missing = data.missing?.length ? `\n\nStill missing after ${data.attempts || 0} attempt(s): ${data.missing.join(', ')}` : '\n\nAll 5 poses selected.';
+      alert(`Gemma 4 decisions:\n\n${lines.join('\n')}${missing}`);
     } catch (err) {
       console.error(err);
       alert(`Gemma 4 auto-label failed: ${err.message}`);
     } finally {
+      if (pollTimer) clearInterval(pollTimer);
       setAutoLabeling(false);
     }
   };
@@ -1511,12 +1628,22 @@ Continue?`;
   };
 
   const handleCompoundAndClean = async () => {
+    const required = ["Front", "3/4 Front", "Side", "3/4 Back", "Back"];
+    const visibleCards = allSliceVersions.flatMap((versions, colIndex) =>
+      versions.map((url, verIndex) => ({
+        cardId: `card_${colIndex}_${verIndex}`,
+        url
+      }))
+    );
     const selectedSlices = {};
-    Object.values(poseSelections).forEach(({ label, url }) => {
-      selectedSlices[label] = url;
+
+    visibleCards.forEach(({ cardId, url }) => {
+      const selection = poseSelections[cardId];
+      if (selection?.label && selection.label !== 'Unselected') {
+        selectedSlices[selection.label] = url;
+      }
     });
 
-    const required = ["Front", "3/4 Front", "Side", "3/4 Back", "Back"];
     for (let req of required) {
       if (!selectedSlices[req]) {
         alert(`Missing selection for: ${req}`);
@@ -1540,6 +1667,9 @@ Continue?`;
         setSlicedUrls(newUrls);
         setAllSliceVersions(newUrls.map(u => [u]));
         setSelectedVersionIndices([0, 0, 0, 0, 0]);
+        setPoseSelections(Object.fromEntries(
+          required.map((pose, index) => [`card_${index}_0`, { label: pose, url: selectedSlices[pose] }])
+        ));
         setTurnaroundUrl(`${apiBase}${data.compounded_url}?t=${Date.now()}`);
         setStage('slicing');
       } else {
@@ -1623,7 +1753,10 @@ Continue?`;
     setPrompt(project.prompt || '');
 
     // Add cache buster to ensure the image refreshes
-    const sheetUrl = project.image_url ? `${apiBase}${project.image_url}` : null;
+    const activeImageUrl = project.is_compounded && project.compounded_url
+      ? project.compounded_url
+      : project.image_url;
+    const sheetUrl = activeImageUrl ? `${apiBase}${activeImageUrl}` : null;
     setOriginalTurnaroundUrl(sheetUrl);
     setTurnaroundUrl(sheetUrl ? `${sheetUrl}?t=${Date.now()}` : null);
 
@@ -2592,6 +2725,7 @@ Continue?`;
                        }}
                     >
                        <option value="Unselected">Unselected</option>
+                       <option value="DO NOT USE">DO NOT USE</option>
                        <option value="Front">Front</option>
                        <option value="3/4 Front">3/4 Front</option>
                        <option value="Side">Side</option>
